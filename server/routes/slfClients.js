@@ -889,6 +889,44 @@ router.post("/issues/apply-batch", requirePermission(PERM, "edit"), async (req, 
   }
 });
 
+/**
+ * "Let VERA fix" — VERA resolves every open issue it safely can, in one run.
+ * See services/veraIssueAutofix.js for exactly what it does and does not touch.
+ * Edit permission: it writes client locations and closes issues.
+ */
+let veraAutofixRunning = false;
+router.post("/issues/vera-autofix", requirePermission(PERM, "edit"), async (req, res) => {
+  if (veraAutofixRunning) return res.status(409).json({ message: "VERA is already fixing issues. Try again in a moment." });
+  veraAutofixRunning = true;
+  try {
+    const Region3Lgu = require("../models/Region3Lgu");
+    const { runVeraIssueAutofix } = require("../services/veraIssueAutofix");
+    const summary = await runVeraIssueAutofix({
+      actor: actor(req),
+      buildIssueSuggestion,
+      loadMasters: () =>
+        Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
+          .select("name municipalityCity province").lean(),
+    });
+    writeLog("info", "slf-client.vera_autofix", {
+      message:
+        `VERA fixed client issues: ${summary.resolved} resolved (${summary.duplicateCopies} duplicate copies, ` +
+        `${summary.repaired} locations repaired), ${summary.leftOpen} left for review`,
+      user: actor(req),
+      ip: req.ip,
+      meta: { ...summary, repairedClients: undefined },
+    });
+    res.json(summary);
+    clearRelMapCache();
+    refreshAdmin(req, "slf-clients");
+    refreshAdmin(req, "clients");
+  } catch (error) {
+    res.status(500).json({ message: "VERA could not finish fixing the issues.", error: error.message });
+  } finally {
+    veraAutofixRunning = false;
+  }
+});
+
 router.get("/issues/:id/suggestion", requirePermission(PERM, "view"), async (req, res) => {
   try {
     const SlfDataIssue = require("../models/SlfDataIssue");

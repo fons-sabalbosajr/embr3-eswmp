@@ -52,7 +52,27 @@ function cellExists(cellIndex, facility) {
  * m³ before comparison.
  * @returns {{ok:boolean, code:string, reason:string, remaining:number|null, utilization:number|null}}
  */
-function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = null, unit = "m³") {
+// Hazardous waste belongs in a hazardous cell and residual waste never does.
+// The WASTE side uses the app's shared classifier (wasteCategories), which
+// normalises legacy spellings ("HW", "hazardous_waste") first; the CELL side reads
+// the admin's free-text cell type ("Treated Haz Waste", "Inert/Hazardous"). Same
+// rule as the portal organizer (SLFPortal/organizeCellRules#wasteFitsCell).
+const { isHazardousWasteType } = require("./wasteCategories");
+const HAZ_CELL_RE = /haz|inert/i;
+function wasteTypeFitsCell(wasteType, cellType) {
+  return isHazardousWasteType(wasteType) === HAZ_CELL_RE.test(String(cellType || "Residual"));
+}
+
+/**
+ * @param {object} [options]
+ * @param {string} [options.wasteType] when given, the waste must fit the cell's
+ *   type (code "type_mismatch").
+ *
+ * A cell an admin has CLOSED for submissions (`cellSubmissionAllowed[i] === false`)
+ * is refused (code "locked") whenever the facility read carries that array. A
+ * caller that does not project it is unaffected.
+ */
+function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = null, unit = "m³", options = {}) {
   const idx = Number(cellIndex);
   if (!cellExists(cellIndex, facility)) {
     return { ok: false, code: "missing", reason: "Selected cell no longer exists in the facility.", remaining: null, utilization: null };
@@ -60,6 +80,19 @@ function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = nu
   const status = facility?.cellStatuses?.[idx];
   if (!isOperationalStatus(status)) {
     return { ok: false, code: "nonoperational", reason: `Cell is not operational (${status || "unknown"}).`, remaining: null, utilization: null };
+  }
+  if (facility?.cellSubmissionAllowed?.[idx] === false) {
+    return { ok: false, code: "locked", reason: "This cell is closed for new waste by EMB.", remaining: null, utilization: null };
+  }
+  if (options.wasteType !== undefined && !wasteTypeFitsCell(options.wasteType, facility?.cellTypes?.[idx])) {
+    const cellType = facility?.cellTypes?.[idx] || "Residual";
+    return {
+      ok: false,
+      code: "type_mismatch",
+      reason: `${options.wasteType || "Residual"} waste cannot go into a ${cellType} cell.`,
+      remaining: null,
+      utilization: null,
+    };
   }
   const capUnit = facility?.cellCapacityUnits?.[idx] || facility?.volumeCapacityUnit || "m³";
   const fillUnit = facility?.cellFillUnits?.[idx] || facility?.wasteReceivedUnit || capUnit;
@@ -93,6 +126,7 @@ function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = nu
 module.exports = {
   isOperationalStatus,
   cellExists,
+  wasteTypeFitsCell,
   evaluateFacilityCellAcceptance,
   toBaseM3,
 };

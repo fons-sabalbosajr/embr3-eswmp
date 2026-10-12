@@ -9,7 +9,7 @@
 //
 // This is the single place that expansion happens, so the modals and the CSV export
 // always break a submission down the same way.
-import { normalizeUnit, convertVolume, M3, TONS } from "./volumeUnits";
+import { normalizeUnit, convertVolume, M3, TONS } from "./volumeUnits.js";
 
 export const displayUnit = (unit) => normalizeUnit(unit) || String(unit || "").trim();
 
@@ -52,17 +52,48 @@ function normalizeClientList(value) {
     });
 }
 
+// The same three places the server reads a hauler's clients from
+// (haulerClientPool): its private-sector list, its client list, and each of its
+// vehicles' selections. Reading only the first two missed rosters kept per vehicle.
+function haulerClientPool(hauler) {
+  return [
+    ...(Array.isArray(hauler?.privateSectorClients) ? hauler.privateSectorClients : []),
+    ...(Array.isArray(hauler?.clients) ? hauler.clients : []),
+    ...(Array.isArray(hauler?.vehicles) ? hauler.vehicles.flatMap((v) => v?.selectedClients || []) : []),
+  ];
+}
+
+const haulerKey = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * The clients for one load, and WHERE they came from.
+ *
+ *   "trip"   — recorded on the load itself (vehicle, else truck).
+ *   "hauler" — the load named no client, so these are the clients its hauler is
+ *              accredited to serve. Not a statement that every one of them was on
+ *              this trip, which is why the source travels with the list.
+ *   ""       — nothing on file anywhere.
+ *
+ * The roster comes from `haulerRoster` (sent by GET /data-slf with trucks) and
+ * falls back to a record that carries its own `accreditedHaulers`.
+ */
 function resolveEntryClients(source, truck, record) {
   const direct = normalizeClientList(source?.selectedClients);
-  if (direct.length) return direct;
+  if (direct.length) return { clients: direct, source: "trip" };
   const truckClients = normalizeClientList(truck?.selectedClients || truck?.clients || truck?.haulerClients || truck?.privateSectorClients);
-  if (truckClients.length) return truckClients;
-  const haulerName = String(truck?.hauler || truck?.haulerName || "").trim().toLowerCase();
-  if (!haulerName) return [];
-  const hauler = (record?.accreditedHaulers || []).find(
-    (item) => String(item?.haulerName || item?.name || "").trim().toLowerCase() === haulerName,
+  if (truckClients.length) return { clients: truckClients, source: "trip" };
+  const name = haulerKey(truck?.hauler || truck?.haulerName);
+  if (!name) return { clients: [], source: "" };
+  const rosters = [
+    ...(Array.isArray(record?.haulerRoster) ? record.haulerRoster : []),
+    ...(Array.isArray(record?.accreditedHaulers) ? record.accreditedHaulers : []),
+  ];
+  const fromRoster = normalizeClientList(
+    rosters
+      .filter((item) => haulerKey(item?.haulerName || item?.name) === name)
+      .flatMap(haulerClientPool),
   );
-  return normalizeClientList(hauler?.privateSectorClients || hauler?.clients);
+  return fromRoster.length ? { clients: fromRoster, source: "hauler" } : { clients: [], source: "" };
 }
 
 /**
@@ -92,11 +123,17 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
 
     sources.forEach(({ source, vehicleIndex }) => {
       const volume = source?.actualVolume == null ? null : Number(source.actualVolume);
-      const codes = Array.isArray(source?.hazWasteCode)
+      // A vehicle's EMPTY code list must not hide the truck's codes: `[]` is an
+      // array, so preferring any array returned nothing for loads whose code was
+      // recorded at the truck level.
+      const sourceCodes = Array.isArray(source?.hazWasteCode)
         ? source.hazWasteCode
-        : Array.isArray(truck?.hazWasteCode)
-          ? truck.hazWasteCode
-          : [source?.hazWasteCode || truck?.hazWasteCode].filter(Boolean);
+        : [source?.hazWasteCode].filter(Boolean);
+      const truckCodes = Array.isArray(truck?.hazWasteCode)
+        ? truck.hazWasteCode
+        : [truck?.hazWasteCode].filter(Boolean);
+      const codes = sourceCodes.length ? sourceCodes : truckCodes;
+      const { clients, source: clientSource } = resolveEntryClients(source, truck, record);
       rows.push({
         key: `${record._id || submissionId}-${truckIndex}-${vehicleIndex ?? "t"}`,
         submissionId,
@@ -114,7 +151,8 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
         slfName: slfName || record.slfName || "",
         status: record.status || "pending",
         hazWasteCodes: codes.filter(Boolean),
-        clients: resolveEntryClients(source, truck, record),
+        clients,
+        clientSource,
         truckIndex,
         vehicleIndex,
       });
@@ -146,6 +184,7 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
         status: record.status || "pending",
         hazWasteCodes: [],
         clients: [],
+        clientSource: "",
         truckIndex: -1,
         vehicleIndex: null,
       });

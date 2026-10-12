@@ -204,6 +204,67 @@ test("a truck with no vehicles is read at the truck level rather than skipped", 
   assert.equal(r.byCell[0].name, "Cell 4");
 });
 
+test("REGRESSION (PWS) — a renamed cell is ONE row, labelled as the facility names it", () => {
+  // Live: index 5 carried 1,061 trips stamped "Cell 6" and 99 stamped "Cell for
+  // Treated Hazardous Waste". Grouping by the stored text split the cell in two,
+  // and "Cell 6" matched no row in Disposal Cells.
+  const facility = {
+    numberOfCell: 2,
+    cellNames: ["", "Cell for Treated Hazardous Waste"],
+    cellStatuses: ["Active Cell", "Active Cell"],
+    cellCapacities: [100, 100],
+    cellCapacityUnits: ["tons", "tons"],
+  };
+  const entry = {
+    idNo: "P1", status: "acknowledged", dateOfDisposal: "2026-09-01T00:00:00.000Z", baselineUnit: "tons",
+    trucks: [{
+      hauler: "H",
+      vehicles: [
+        { actualVolume: 4, actualVolumeUnit: "tons", cellIndex: 1, cellName: "Cell 6" },
+        { actualVolume: 2, actualVolumeUnit: "tons", cellIndex: 1, cellName: "Cell for Treated Hazardous Waste" },
+        { actualVolume: 3, actualVolumeUnit: "tons", cellIndex: 0, cellName: "Cell 4" },
+      ],
+    }],
+  };
+  const r = buildPortalReport([entry], { facility });
+  assert.deepEqual(
+    r.byCell.map((c) => [c.name, c.trips, c.tons]),
+    [["Cell for Treated Hazardous Waste", 2, 6], ["Cell 1", 1, 3]],
+  );
+  // Every byCell label is a row of the Disposal Cells table.
+  const cellNames = new Set(r.cells.map((c) => c.name));
+  r.byCell.forEach((c) => assert.ok(cellNames.has(c.name), `${c.name} must appear in Disposal Cells`));
+});
+
+test("REGRESSION — a truck-level load beside a zero-volume stub vehicle is counted once", () => {
+  // Older rows store the load on the TRUCK and a stub vehicle with actualVolume 0.
+  // `vehicle.actualVolume ?? truck.actualVolume` read the 0, so the report dropped
+  // loads the cell gauges (computeCellOccupancy) count.
+  const entry = {
+    idNo: "S1", status: "acknowledged", dateOfDisposal: "2026-07-14T00:00:00.000Z", baselineUnit: "tons",
+    trucks: [{
+      hauler: "H", actualVolume: 7.5, actualVolumeUnit: "tons", cellName: "Cell 4", truckCapacity: 10,
+      vehicles: [{ actualVolume: 0, cellName: "Cell 4" }, { actualVolume: 0, cellName: "Cell 4" }],
+    }],
+  };
+  const r = buildPortalReport([entry], { facility: FACILITY });
+  assert.equal(r.totals.totalTons, 7.5);
+  assert.equal(r.byCell[0].tons, 7.5, "attributed once, not once per stub vehicle");
+});
+
+test("REGRESSION — cell fill is read in its OWN unit, not the capacity's", () => {
+  const r = buildPortalReport([], {
+    facility: {
+      numberOfCell: 1, cellNames: ["C1"], cellStatuses: ["Active Cell"],
+      cellCapacities: [1000], cellCapacityUnits: ["m³"],
+      cellFillValues: [100], cellFillUnits: ["tons"],
+    },
+  });
+  assert.equal(r.cells[0].capacity, 500, "1000 m³ → 500 t");
+  assert.equal(r.cells[0].fill, 100, "already tons — not halved through the capacity unit");
+  assert.equal(r.cells[0].utilization, 20);
+});
+
 test("clients are counted whether stored as objects or as plain strings", () => {
   const r = buildPortalReport([ACK], { facility: FACILITY });
   const names = r.byClient.map((c) => c.name).sort();

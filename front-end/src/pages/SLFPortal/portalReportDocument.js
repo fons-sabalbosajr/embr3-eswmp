@@ -235,7 +235,15 @@ export function buildReportDocument(report, { unitLabel = "m³", statusRows = []
   push(section("Waste by Type", "", rankTable(report.byWasteType), true));
   push(section("Disposal by Hauler", "", rankTable(report.byHauler)));
   push(section("Disposal by Client", "", rankTable(report.byClient)));
-  push(section("Disposal by Cell", "", rankTable(report.byCell)));
+  push(
+    section(
+      "Disposal by Cell",
+      "Waste from this account's submissions in the reporting period, by the cell it was placed in. " +
+        "Disposal Cells above is the facility's full standing (baseline, all submissions and EMB adjustments), " +
+        "so the two are not expected to match.",
+      rankTable(report.byCell),
+    ),
+  );
 
   const unplaced = report.outstanding?.unplacedEntries || 0;
   const missingCap = report.outstanding?.missingCapacityEntries || 0;

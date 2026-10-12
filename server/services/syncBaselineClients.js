@@ -103,7 +103,13 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
   const flags = [];
   const seenFlags = new Set();
   const addFlag = (f) => {
-    const sig = [f.flagType, f.clientName || "", f.hauler || "", f.portalUserEmail || "", f.baselineRef || ""]
+    // The baseline id is part of the identity ONLY for a flag about one baseline
+    // record (invalid_baseline). Everywhere else it named which COPY of the
+    // roster a problem was read from — accreditedHaulers is copied onto every
+    // baseline-carrying record — so one missing hauler was filed once per copy:
+    // 171 open missing_hauler rows for 9 actual problems.
+    const perRecord = f.flagType === "invalid_baseline";
+    const sig = [f.flagType, f.clientName || "", f.hauler || "", f.portalUserEmail || "", perRecord ? f.baselineRef || "" : ""]
       .map((v) => normalize(String(v))).join("::");
     if (seenFlags.has(sig)) return;
     seenFlags.add(sig);
@@ -320,6 +326,33 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
     }, { upsert: true });
   }
   summary.flagged = flags.length;
+
+  // Close what this run no longer detects. The sync reads EVERY baseline, so an
+  // open baseline-sync issue it did not raise again is fixed (or was filed under
+  // a signature format no longer used). Leaving them open is how 28,479 open
+  // issues accumulated against 525 clients. Only the flag types this sync
+  // produces are touched; an issue from another module is left alone.
+  const SYNC_FLAG_TYPES = [
+    "missing_type", "missing_hauler", "invalid_baseline", "region_unclassified",
+    "conflicting_portal_users", "ambiguous_duplicate", "validation_mismatch", "duplicate_client",
+  ];
+  const stale = await SlfDataIssue.updateMany(
+    {
+      status: "open",
+      sourceModule: "baseline-sync",
+      flagType: { $in: SYNC_FLAG_TYPES },
+      signature: { $nin: flags.map((f) => f.signature) },
+    },
+    {
+      $set: {
+        status: "resolved",
+        resolvedAt: new Date(),
+        resolvedBy: actor,
+        resolutionNotes: "No longer detected by Sync from Baseline.",
+      },
+    },
+  );
+  summary.autoResolved = stale.modifiedCount || 0;
   report(7, 1);
   return summary;
 }

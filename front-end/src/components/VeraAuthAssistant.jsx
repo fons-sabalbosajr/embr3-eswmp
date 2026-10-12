@@ -18,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import api from "../api";
 import VeraFlameIcon from "./VeraFlameIcon";
+import { VeraEdgeBeam } from "./vera/VeraMark";
 
 const { Text } = Typography;
 const MAX_INPUT = 500;
@@ -229,7 +230,13 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
               aria-label="Open VERA account help"
               className={`vera-auth-fab${hint ? " has-issue" : ""}`}
             >
-              <VeraFlameIcon size={26} anime />
+              {/* The UCDS VERA launcher: the flame in a round button with the
+                  border beam running round its edge. Red while a sign-in issue
+                  is being offered, so the beam carries the same signal the
+                  pulse does. */}
+              <VeraEdgeBeam radius="pill" pad={8} theme="light" color={hint ? "#ff4d4f" : "vera"} />
+              <span className="vera-auth-fab-mark">
+                <VeraFlameIcon size={34} /></span>
             </button>
           </Badge>
         </Tooltip>
@@ -370,12 +377,12 @@ const dockCss = `
 }
 .vera-auth-dock > * { pointer-events: auto; }
 
-/* WHITE, not the brand gradient. VeraFlameIcon is itself a blue→teal→green
-   gradient flame, so sitting it on a blue→teal→green button made the icon all but
-   invisible. This matches how the in-portal launcher already handles it
-   (.vera-launcher-icon in VeraChat.css): white disc, teal inset ring, colour moved
-   to the shadow so the button still reads as VERA's. */
+/* WHITE, not the brand gradient: the flame carries the colour, and on a
+   coloured button it all but disappears. The border beam (VeraEdgeBeam, laid
+   over the button's edge) is the UCDS VERA launcher treatment; the mark sits
+   above it so the beam's glow never washes over the flame. */
 .vera-auth-fab {
+  position: relative;
   width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
   background: #fff;
@@ -391,6 +398,8 @@ const dockCss = `
     0 10px 26px rgba(26,51,83,0.34);
 }
 .vera-auth-fab:focus-visible { outline: 3px solid #91caff; outline-offset: 3px; }
+.vera-auth-fab .vera-edge-beam { position: absolute; z-index: 0; pointer-events: none; }
+.vera-auth-fab-mark { position: relative; z-index: 1; display: inline-flex; line-height: 0; }
 .vera-auth-fab.has-issue {
   box-shadow:
     inset 0 0 0 2px rgba(255,77,79,0.45),

@@ -216,7 +216,9 @@ function rejectUnauthorizedDummyAccess(req, res) {
   return true;
 }
 
-const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province dataYear cellNames";
+// `category` is printed by the Submissions export ("Facility Category"); without
+// it that column was blank on every row.
+const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province category dataYear cellNames";
 
 // Exactly what Admin → Cell Waste Placement renders for a submission: its
 // identity, the trucks it is placing, and its correction history. It deliberately
@@ -1476,7 +1478,10 @@ async function readCapacityAllowancePct() {
 // format check would see blanks and flag "missing" on perfectly good rows.
 const REMARK_FORMAT_FIELDS =
   " trucks.disposalTicketNo trucks.hauler trucks.plateNumber trucks.wasteType trucks.hazWasteCode" +
-  " trucks.vehicles.wasteType trucks.vehicles.hazWasteCode";
+  " trucks.vehicles.wasteType trucks.vehicles.hazWasteCode" +
+  // Client NAMES only — enough for the "No client on trip" check, and the same
+  // answer the full document gives, so a list read and VERA's review agree.
+  " trucks.selectedClients.clientName trucks.vehicles.selectedClients.clientName";
 
 function computeSubmissionRemarks(entry, allowancePct = 10) {
   const remarks = [];
@@ -1975,6 +1980,73 @@ async function getAuthoritativeHaulersForEntry(item, cache = null) {
   );
   if (cache && cacheKey) cache.set(cacheKey, merged);
   return merged;
+}
+
+/**
+ * Per-entry hauler rosters for a page of submissions — the clients each hauler
+ * on the entry is accredited to serve, as `[{ haulerName, clients }]`.
+ *
+ * Why the export needs it: 15,166 of 32,672 recorded loads carry no
+ * `selectedClients` (Porac 9,459 of 9,485, Floridablanca 3,713 of 3,729), so the
+ * Submissions export printed "No client recorded" for almost every row of those
+ * facilities. For 13,565 of them the hauler's clients ARE on file — in the
+ * roster the list projection never ships. The browser already had a roster
+ * fallback, but it read `record.accreditedHaulers`, which this endpoint does not
+ * return (it is the heaviest array on the document), so it never fired.
+ *
+ * Read once per FACILITY through getAuthoritativeHaulersForEntry — the same
+ * union-of-copies the submit gate validates against, aggregated where the data
+ * is — then trimmed to the haulers each entry actually uses, with each client cut
+ * to the fields an export prints. Best-effort: a failed read leaves that
+ * facility's rows without a roster, never fails the page.
+ */
+async function buildHaulerRosterLookup(entries = []) {
+  const facilityOf = (entry) => String(entry?.slfGenerator?._id || entry?.slfGenerator || "");
+  const rosters = new Map();
+  const cache = new Map();
+  [...new Set(entries.map(facilityOf))]
+    .filter((id) => id && mongoose.isValidObjectId(id))
+    .forEach((id) => rosters.set(id, null));
+  await Promise.all(
+    [...rosters.keys()].map(async (id) => {
+      try {
+        const haulers = await getAuthoritativeHaulersForEntry({ slfGenerator: id }, cache);
+        rosters.set(id, new Map(haulers.map((h) => [normalizeRelationshipText(h.haulerName), h])));
+      } catch (error) {
+        writeLog("warn", "submission.hauler-roster.lookup_failed", {
+          message: `Hauler roster lookup skipped: ${error.message}`,
+          meta: { facilityId: id },
+        });
+      }
+    }),
+  );
+  const slimClient = (client) => {
+    if (typeof client === "string") return client.trim() ? { clientName: client.trim() } : null;
+    const clientName = String(client?.clientName || client?.name || "").trim();
+    if (!clientName) return null;
+    return {
+      clientName,
+      clientType: client.clientType || "",
+      provinceName: client.provinceName || "",
+      municipalityName: client.municipalityName || "",
+    };
+  };
+  return (entry) => {
+    const roster = rosters.get(facilityOf(entry));
+    if (!roster) return [];
+    const used = new Set(
+      (entry?.trucks || [])
+        .map((truck) => normalizeRelationshipText(truck?.hauler || truck?.haulerName))
+        .filter(Boolean),
+    );
+    return [...used]
+      .map((key) => roster.get(key))
+      .filter(Boolean)
+      .map((hauler) => ({
+        haulerName: hauler.haulerName,
+        clients: (hauler.clients || []).map(slimClient).filter(Boolean),
+      }));
+  };
 }
 
 // `cache` is shared across the entries of ONE submit. A bulk upload validates
@@ -2811,6 +2883,9 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
       notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
       refreshAdmin(req, "submissions");
     }
+    // VERA reviews the new submission straight away, so its remark is already
+    // there when an admin first opens it.
+    queueVeraAutoReviewForEntries(saved, req).catch(() => {});
 
     writeLog("info", "submission.create", {
       message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
@@ -3040,6 +3115,8 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     } catch { /* silent */ }
     notifyAdmin(req, { type: "resubmission", title: "Resubmission", message: `${entry.submittedBy} resubmitted ${entry.idNo}` });
     refreshAdmin(req, "submissions");
+    // The corrected submission is reviewed again on its own.
+    queueVeraAutoReviewForEntries([populated], req).catch(() => {});
 
     writeLog("info", "submission.resubmit", {
       message: `Entry ${entry.idNo} resubmitted after revert`,
@@ -5975,22 +6052,34 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         : [];
       const byId = new Map(entryDocs.map((d) => [String(d._id), d]));
 
-      // Independent reads — run together. See findTicketReuse.
-      const [allowancePct, ticketReuse] = await Promise.all([
+      // Independent reads — run together. See findTicketReuse. The hauler roster
+      // is only read when trucks are shipped (the export and the row expand):
+      // without trucks there is no load for it to name a client for.
+      const [allowancePct, ticketReuse, rosterFor] = await Promise.all([
         readCapacityAllowancePct(),
         findTicketReuse(entryDocs),
+        includeTrucks ? buildHaulerRosterLookup(entryDocs) : null,
       ]);
 
       // Cell names are resolved to the facility's CURRENT labels before the entry
       // leaves the server, so no consumer can render a name frozen at submit time.
-      const enrich = (raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks, ticketReuse });
+      const enrich = (raw) => {
+        const row = enrichSubmissionRow(raw, { allowancePct, includeTrucks, ticketReuse });
+        return rosterFor ? { ...row, haulerRoster: rosterFor(raw) } : row;
+      };
       // Return the RAW entries for this page's groups (every group is returned
       // whole, so no batch is split across pages). The admin table regroups them
       // client-side exactly as before — keeping all existing grouped-row actions
       // intact — while `total` (group count) drives server-side pagination.
       const rows = [];
+      // Automatic VERA review: a group whose stored remark is missing, or was
+      // written for a different set of issues, is queued and its rows marked so
+      // the table says VERA is on it. Never for the export (includeTrucks /
+      // all), which pages through EVERY group and would queue the lot.
+      const reviewOnRead = !includeTrucks && !exportAll && veraAutoEnabled();
+      const staleGroups = [];
       pageGroups.forEach((g) => {
-        (g.entryIds || [])
+        const groupRows = (g.entryIds || [])
           .map((id) => byId.get(String(id)))
           .filter(Boolean)
           .sort(
@@ -5998,8 +6087,18 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
               new Date(b.createdAt || 0) - new Date(a.createdAt || 0) ||
               String(b._id).localeCompare(String(a._id)),
           )
-          .forEach((e) => rows.push(enrich(e)));
+          .map((e) => ({ raw: e, row: enrich(e) }));
+        if (reviewOnRead && groupRows.length) {
+          const signature = veraRemarkSignature(mergeRemarkLists(groupRows.map(({ row }) => row.remarks)));
+          const stale = groupRows.some(({ raw }) => raw.veraRemark?.signature !== signature);
+          if (stale) {
+            staleGroups.push(groupRows.map(({ raw }) => String(raw._id)));
+            groupRows.forEach((item) => { item.row.veraReviewPending = true; });
+          }
+        }
+        groupRows.forEach(({ row }) => rows.push(row));
       });
+      if (staleGroups.length) queueVeraAutoReview(staleGroups, req);
 
       const exportCapped = exportAll && total > EXPORT_GROUP_MAX;
       if (exportCapped) {
@@ -6980,28 +7079,75 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
     // be operational. Mirrors the front-end availability rule (cellAvailability)
     // so a stale/altered client cannot organize waste into a nonexistent, deleted
     // or non-operational (used/completed/closed/out-of-service) cell.
+    //
+    // The organizer PLACES waste that has no cell. Beyond exists/operational it
+    // now also enforces, in one pass before anything is written:
+    //   • already placed — a slot that already sits in a valid cell is not moved
+    //     from the portal (moving placed waste is an admin correction). Re-sending
+    //     the SAME cell is a harmless no-op, so a capacity-only completion that
+    //     echoes its cell still saves;
+    //   • closed cell — an admin's "closed for submissions" toggle;
+    //   • waste type — hazardous-family waste only into a hazardous cell, residual
+    //     never into one (cellAvailability#wasteTypeFitsCell);
+    //   • capacity — the COMBINED volume this request puts into each cell against
+    //     that cell's remaining room, the way the bulk route already did. Checked
+    //     per row in isolation, a request could over-fill a cell every row of which
+    //     fitted on its own.
     let facility = null;
     if (entry.slfGenerator) {
       facility = await SlfFacility.findById(entry.slfGenerator)
-        .select("numberOfCell cellStatuses cellNames lgu")
+        .select(
+          "numberOfCell cellStatuses cellNames cellTypes cellSubmissionAllowed lgu " +
+            "cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
+        )
         .lean();
     }
     const cellCount = Number(facility?.numberOfCell || facility?.cellStatuses?.length || 0);
     const validationErrors = [];
+    const plannedM3 = new Map(); // cellIndex → m³ this request places there
+    const cellLabel = (ci) => resolveCellName(facility?.cellNames, ci, "") || `Cell ${ci + 1}`;
     list.forEach((assignment, i) => {
       if (assignment.cellIndex === null || assignment.cellIndex === undefined || assignment.cellIndex === "") return;
       const ci = Number(assignment.cellIndex);
       if (!Number.isInteger(ci) || ci < 0) {
         validationErrors.push(`Row ${i + 1}: invalid cell selection.`);
-      } else if (cellCount > 0 && ci >= cellCount) {
-        validationErrors.push(`Row ${i + 1}: selected cell does not belong to this SLF facility.`);
-      } else if (facility && !cellExists(ci, facility)) {
-        validationErrors.push(`Row ${i + 1}: selected cell no longer exists in the facility.`);
-      } else if (facility && !isOperationalStatus(facility?.cellStatuses?.[ci])) {
-        validationErrors.push(
-          `Row ${i + 1}: cell is not operational (${facility?.cellStatuses?.[ci] || "unknown"}).`,
-        );
+        return;
       }
+      if (cellCount > 0 && ci >= cellCount) {
+        validationErrors.push(`Row ${i + 1}: selected cell does not belong to this SLF facility.`);
+        return;
+      }
+      // Resolve the slot this row writes to — its waste type, volume, and the
+      // cell it already has (if any).
+      const ti = Number(assignment.truckIndex);
+      const truck = Number.isInteger(ti) && ti >= 0 ? entry.trucks?.[ti] : null;
+      if (!truck) {
+        validationErrors.push(`Row ${i + 1}: invalid truck reference.`);
+        return;
+      }
+      const vi =
+        assignment.vehicleIndex === null || assignment.vehicleIndex === undefined ? null : Number(assignment.vehicleIndex);
+      const slot = Number.isInteger(vi) && truck.vehicles?.[vi] ? truck.vehicles[vi] : truck;
+      const prior = currentCellIndexOf(truck, Number.isInteger(vi) ? vi : null);
+      if (prior !== null && facility && cellExists(prior, facility)) {
+        if (prior === ci) return; // same cell — nothing changes, nothing to charge
+        validationErrors.push(
+          `Row ${i + 1}: this waste is already placed in ${cellLabel(prior)}. ` +
+            "Moving placed waste to another cell is an EMB correction — contact the administrator.",
+        );
+        return;
+      }
+      if (!facility) return;
+      const wasteType = slot?.wasteType || truck?.wasteType || "Residual";
+      const vol = Number(slot?.actualVolume ?? truck?.actualVolume ?? 0) || 0;
+      const unit = slot?.actualVolumeUnit || truck?.actualVolumeUnit || entry.baselineUnit || "m³";
+      const volM3 = toBaseM3(vol, unit);
+      const acc = evaluateFacilityCellAcceptance(facility, ci, (plannedM3.get(ci) || 0) + volM3, "m³", { wasteType });
+      if (!acc.ok) {
+        validationErrors.push(`Row ${i + 1} (${cellLabel(ci)}): ${acc.reason}`);
+        return;
+      }
+      plannedM3.set(ci, (plannedM3.get(ci) || 0) + volM3);
     });
     if (validationErrors.length) {
       writeLog("warn", "organize_cells_validation_failed", {
@@ -7278,7 +7424,7 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       const key = String(genId);
       if (facilityCache.has(key)) return facilityCache.get(key);
       const fac = await SlfFacility.findById(genId)
-        .select("numberOfCell cellStatuses cellNames cellTypes cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit")
+        .select("numberOfCell cellStatuses cellNames cellTypes cellSubmissionAllowed cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit")
         .lean();
       facilityCache.set(key, fac || null);
       return fac || null;
@@ -7378,13 +7524,34 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       }
 
       const facility = await getFacility(doc.slfGenerator);
-      const vol = placementVolumeM3(truck, vehicleIndex, doc.baselineUnit);
+
+      // Already placed — same rule as PATCH /:id/portal-cell-assignments: the
+      // organizer places unplaced waste; moving placed waste is an EMB
+      // correction. Naming the cell it already has is a no-op (capacity-only rows
+      // in the template carry their cell).
+      const priorCell = currentCellIndexOf(truck, vehicleIndex);
+      const alreadyPlaced = priorCell !== null && facility && cellExists(priorCell, facility);
+      if (alreadyPlaced && priorCell !== cellIndex) {
+        results.push({
+          ...base,
+          status: "invalid",
+          code: "already_placed",
+          message: `Already placed in ${resolveCellName(facility?.cellNames, priorCell, "") || `Cell ${priorCell + 1}`}. Moving placed waste is an EMB correction.`,
+        });
+        continue;
+      }
+
+      const slot = Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex] ? truck.vehicles[vehicleIndex] : truck;
+      const wasteType = slot?.wasteType || truck?.wasteType || "Residual";
+      // Re-sending a slot's own cell adds nothing to that cell.
+      const vol = alreadyPlaced ? 0 : placementVolumeM3(truck, vehicleIndex, doc.baselineUnit);
       const cellKey = `${String(doc.slfGenerator)}:${cellIndex}`;
       const planned = cellPlanned.get(cellKey) || 0;
-      // Validate the cell against LIVE state + already-planned volume in this batch.
+      // Validate the cell against LIVE state + already-planned volume in this batch,
+      // the waste type, and an admin's "closed for submissions" toggle.
       let acc = { ok: true, code: "available", reason: "", remaining: null, utilization: null };
       if (facility) {
-        acc = evaluateFacilityCellAcceptance(facility, cellIndex, planned + vol, doc.baselineUnit || "m³");
+        acc = evaluateFacilityCellAcceptance(facility, cellIndex, planned + vol, doc.baselineUnit || "m³", { wasteType });
       }
       // The facility's LIVE name wins over the snapshot stored on the row; the
       // snapshot is only a fallback for legacy rows with no usable cellIndex.
@@ -7394,7 +7561,10 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       const cellType = r.cellType || facility?.cellTypes?.[cellIndex] || truck?.wasteType || "";
 
       if (!acc.ok) {
-        const codeMap = { full: "capacity", insufficient: "capacity", nonoperational: "unavailable", missing: "unavailable" };
+        const codeMap = {
+          full: "capacity", insufficient: "capacity", nonoperational: "unavailable", missing: "unavailable",
+          locked: "unavailable", type_mismatch: "type_mismatch",
+        };
         results.push({
           ...base,
           targetCell: cellName,
@@ -7426,7 +7596,9 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
 
       // Valid — reserve the volume and stage the write.
       cellPlanned.set(cellKey, planned + vol);
-      const already = (truck.vehicles?.[vehicleIndex]?.cellName || truck.cellName) ? true : false;
+      // No "reassigned" outcome any more: moving placed waste is refused above,
+      // and a legacy name-only copy (cellName with no valid cellIndex) is unplaced
+      // waste being placed properly for the first time.
       if (!pendingByDoc.has(String(doc._id))) pendingByDoc.set(String(doc._id), { doc, list: [] });
       pendingByDoc.get(String(doc._id)).list.push({
         truckIndex,
@@ -7440,9 +7612,9 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       results.push({
         ...base,
         targetCell: cellName,
-        status: already ? "warning" : "valid",
-        code: already ? "reassigned" : "ok",
-        message: already ? "Reassigning an already-placed transaction." : "",
+        status: "valid",
+        code: alreadyPlaced ? "capacity_only" : "ok",
+        message: alreadyPlaced ? "Already placed in this cell — only the Truck Capacity is completed." : "",
         remaining: acc.remaining,
         utilization: acc.utilization,
         volumeM3: Math.round(vol * 100) / 100,
@@ -8017,37 +8189,62 @@ router.patch("/bulk-status", async (req, res) => {
 // provider failure) a rule-based remark is written instead, so the button always
 // produces something useful. Stored on the record so the column shows it without
 // a model call on every page load.
-router.post("/vera-remarks", adminOnly, async (req, res) => {
-  const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [req.body?.id];
-  const ids = [...new Set(rawIds.map((id) => String(id || "")).filter((id) => mongoose.isValidObjectId(id)))].slice(0, 50);
-  if (!ids.length) {
-    return res.status(400).json({ ok: false, message: "At least one valid submission id is required." });
-  }
-  try {
-    const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null })
-      .setOptions({ includeHiddenYears: true })
-      .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
-      .select("idNo submissionId slfName slfGenerator lguCompanyName companyType dateOfDisposal status trucks truckCount baselineUnit")
-      .lean();
-    if (!entries.length) return res.status(404).json({ ok: false, message: "Submission not found." });
+// Same merge the table applies to a grouped row: one remark per label, the most
+// severe level wins.
+const REMARK_SEVERITY = { error: 3, warning: 2, info: 1 };
+function mergeRemarkLists(lists = []) {
+  const merged = new Map();
+  lists.forEach((list) =>
+    (list || []).forEach((remark) => {
+      if (!remark?.text) return;
+      const prev = merged.get(remark.text);
+      if (!prev || (REMARK_SEVERITY[remark.level] || 0) > (REMARK_SEVERITY[prev.level] || 0)) {
+        merged.set(remark.text, remark);
+      }
+    }),
+  );
+  return [...merged.values()];
+}
 
-    // Same merge the table applies to a grouped row: one remark per label, the
-    // most severe level wins.
+/**
+ * Fingerprint of WHAT VERA reviewed — the merged issue list, order-free.
+ *
+ * Stored with the remark, and recomputed by every list read. When the two
+ * differ the submission changed in a way that matters (a cell was placed, a
+ * ticket started colliding with another submission) and VERA reviews it again;
+ * when they match, nothing VERA said is out of date and no model call is made.
+ * Status is deliberately NOT part of it: acknowledging a row changes nothing
+ * about its issues.
+ */
+function veraRemarkSignature(remarks = []) {
+  const parts = remarks
+    .map((r) => `${r.level || ""}|${r.text || ""}|${r.detail || ""}`)
+    .sort();
+  return require("crypto").createHash("sha1").update(parts.join("\n")).digest("hex").slice(0, 16);
+}
+
+/**
+ * VERA reviews one submission (one id, or every entry of a grouped row, which
+ * share one remark) and stores the remark. Used by the "Re-check" action and by
+ * the automatic review queue below.
+ */
+async function generateVeraRemark(ids, { req, actor, auto = false } = {}) {
+  const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null })
+    .setOptions({ includeHiddenYears: true })
+    .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
+    .select("idNo submissionId slfName slfGenerator lguCompanyName companyType dateOfDisposal status trucks truckCount baselineUnit")
+    .lean();
+  if (!entries.length) return null;
+  {
     const [allowancePct, ticketReuse] = await Promise.all([
       readCapacityAllowancePct(),
       findTicketReuse(entries),
     ]);
-    const severity = { error: 3, warning: 2, info: 1 };
-    const merged = new Map();
-    entries.forEach((entry) =>
-      computeSubmissionRemarks(entry, allowancePct)
-        .concat(ticketReuseRemarks(ticketReuse.get(String(entry._id))))
-        .forEach((remark) => {
-          const prev = merged.get(remark.text);
-          if (!prev || (severity[remark.level] || 0) > (severity[prev.level] || 0)) merged.set(remark.text, remark);
-        }),
+    const remarks = mergeRemarkLists(
+      entries.map((entry) =>
+        computeSubmissionRemarks(entry, allowancePct).concat(ticketReuseRemarks(ticketReuse.get(String(entry._id)))),
+      ),
     );
-    const remarks = [...merged.values()];
 
     const AppSettings = require("../models/AppSettings");
     const agent = require("../utils/automationAgent");
@@ -8090,8 +8287,10 @@ router.post("/vera-remarks", adminOnly, async (req, res) => {
       text,
       source,
       model,
-      generatedBy: getRequestActor(req),
+      generatedBy: actor || (req ? getRequestActor(req) : "VERA"),
       generatedAt: new Date(),
+      signature: veraRemarkSignature(remarks),
+      auto,
     };
     // `timestamps: false` — a reviewer note is not an edit of the submission and
     // must not move it in any updatedAt-ordered view.
@@ -8102,10 +8301,10 @@ router.post("/vera-remarks", adminOnly, async (req, res) => {
     );
 
     UsageLog.create({
-      userId: req.user?.id || null,
-      userEmail: req.user?.email || "",
-      userRole: req.user?.role || "",
-      feature: "vera_submission_remark",
+      userId: auto ? null : req?.user?.id || null,
+      userEmail: auto ? "" : req?.user?.email || "",
+      userRole: auto ? "system" : req?.user?.role || "",
+      feature: auto ? "vera_submission_remark_auto" : "vera_submission_remark",
       model: source === "model" ? model : "fallback",
       success: !providerError,
       durationMs: Date.now() - started,
@@ -8115,25 +8314,152 @@ router.post("/vera-remarks", adminOnly, async (req, res) => {
       errorMessage: providerError || undefined,
     }).catch(() => {});
     writeLog("info", "submission.vera-remark", {
-      message: `VERA remark generated for ${entries.map((e) => e.idNo || e._id).join(", ")} (${source})`,
-      user: getRequestActor(req),
-      ip: req.ip,
-      meta: { ids: entries.map((e) => String(e._id)), source, providerError: providerError || undefined },
+      message: `VERA remark ${auto ? "auto-generated" : "generated"} for ${entries.map((e) => e.idNo || e._id).join(", ")} (${source})`,
+      user: veraRemark.generatedBy,
+      ip: req?.ip || "",
+      meta: { ids: entries.map((e) => String(e._id)), source, auto, providerError: providerError || undefined },
     });
-    refreshAdmin(req, "submissions");
 
-    return res.json({
-      ok: true,
+    return {
       ids: entries.map((entry) => String(entry._id)),
       veraRemark,
       remarks,
       degraded: Boolean(providerError),
-    });
+    };
+  }
+}
+
+router.post("/vera-remarks", adminOnly, async (req, res) => {
+  const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [req.body?.id];
+  const ids = [...new Set(rawIds.map((id) => String(id || "")).filter((id) => mongoose.isValidObjectId(id)))].slice(0, 50);
+  if (!ids.length) {
+    return res.status(400).json({ ok: false, message: "At least one valid submission id is required." });
+  }
+  try {
+    const result = await generateVeraRemark(ids, { req });
+    if (!result) return res.status(404).json({ ok: false, message: "Submission not found." });
+    refreshAdmin(req, "submissions");
+    return res.json({ ok: true, ...result });
   } catch (error) {
     logSlfCrudError(req, "submission.vera-remark.error", error, { ids });
     return res.status(500).json({ ok: false, message: "VERA could not generate a remark. Please try again." });
   }
 });
+
+// ── Automatic VERA review ────────────────────────────────────────────────────
+//
+// VERA reviews a submission on its own instead of waiting for an admin to ask:
+//   • when it is SUBMITTED (submitEntries) or RESUBMITTED after a revert;
+//   • when an admin's list read finds a row with no remark, or with a remark
+//     whose signature no longer matches the row's issues (veraRemarkSignature).
+// The second trigger is what reaches every existing submission without a
+// sweep over the whole collection: rows are reviewed as they are looked at.
+//
+// One in-process queue, two reviews at a time, so a page of fifty stale rows
+// never fires fifty model calls at once. A group reviewed in the last
+// VERA_AUTO_COOLDOWN_MS is not queued again — a second line of defence, should
+// a list read and the review ever compute different signatures for the same
+// data, against re-reviewing one row on every refresh. When the queue drains,
+// ONE admin refresh is broadcast so open tables pick the remarks up.
+const VERA_AUTO_CONCURRENCY = 2;
+const VERA_AUTO_MAX_QUEUE = 300;
+const VERA_AUTO_COOLDOWN_MS = 30 * 60 * 1000;
+const veraAuto = {
+  queue: [],
+  queued: new Set(),
+  lastRun: new Map(), // groupKey → ms
+  active: 0,
+  wrote: false,
+  req: null,
+};
+const veraAutoKey = (ids) => [...ids].map(String).sort().join(",");
+
+function veraAutoEnabled() {
+  return String(process.env.VERA_AUTO_REVIEW ?? "true").toLowerCase() !== "false";
+}
+
+function queueVeraAutoReview(groups = [], req = null) {
+  if (!veraAutoEnabled()) return 0;
+  if (req) veraAuto.req = req;
+  const now = Date.now();
+  let added = 0;
+  for (const raw of groups) {
+    const ids = [...new Set((raw || []).map(String).filter((id) => mongoose.isValidObjectId(id)))];
+    if (!ids.length) continue;
+    const key = veraAutoKey(ids);
+    if (veraAuto.queued.has(key)) continue;
+    if (now - (veraAuto.lastRun.get(key) || 0) < VERA_AUTO_COOLDOWN_MS) continue;
+    if (veraAuto.queue.length >= VERA_AUTO_MAX_QUEUE) break;
+    veraAuto.queued.add(key);
+    veraAuto.queue.push({ key, ids });
+    added += 1;
+  }
+  pumpVeraAutoReview();
+  return added;
+}
+
+function pumpVeraAutoReview() {
+  while (veraAuto.active < VERA_AUTO_CONCURRENCY && veraAuto.queue.length) {
+    const job = veraAuto.queue.shift();
+    veraAuto.active += 1;
+    generateVeraRemark(job.ids, { actor: "VERA (automatic review)", auto: true })
+      .then((result) => {
+        if (result) veraAuto.wrote = true;
+      })
+      .catch((error) => {
+        writeLog("warn", "submission.vera-remark.auto_failed", {
+          message: `Automatic VERA review failed: ${error.message}`,
+          meta: { ids: job.ids },
+        });
+      })
+      .finally(() => {
+        veraAuto.lastRun.set(job.key, Date.now());
+        veraAuto.queued.delete(job.key);
+        veraAuto.active -= 1;
+        if (veraAuto.lastRun.size > 5000) veraAuto.lastRun.clear();
+        if (!veraAuto.queue.length && !veraAuto.active && veraAuto.wrote) {
+          veraAuto.wrote = false;
+          if (veraAuto.req) refreshAdmin(veraAuto.req, "submissions");
+        }
+        pumpVeraAutoReview();
+      });
+  }
+}
+
+/**
+ * Queue the review for freshly written entries, expanded to the SAME group the
+ * admin table shows them in (submittedBy + company + status + submissionId,
+ * reverted rows standing alone) so the remark lands on the whole row at once.
+ */
+async function queueVeraAutoReviewForEntries(entries = [], req = null) {
+  if (!veraAutoEnabled() || !entries.length) return;
+  const groups = new Map();
+  for (const entry of entries) {
+    const groupable =
+      String(entry.submittedBy || "").includes("@") &&
+      String(entry.lguCompanyName || "").trim() &&
+      String(entry.submissionId || "").trim() &&
+      entry.status !== "reverted";
+    const key = groupable
+      ? [entry.submittedBy, entry.lguCompanyName, entry.status || "pending", entry.submissionId].join("::")
+      : `single:${entry._id}`;
+    if (!groups.has(key)) groups.set(key, { sample: entry, groupable, ids: new Set() });
+    groups.get(key).ids.add(String(entry._id));
+  }
+  for (const group of groups.values()) {
+    if (!group.groupable) continue;
+    const { submittedBy, lguCompanyName, status, submissionId } = group.sample;
+    const siblings = await DataSLF.find({
+      submittedBy, lguCompanyName, status: status || "pending", submissionId, deletedAt: null, ...SUBMISSION_HAS_TRUCKS,
+    })
+      .setOptions({ includeHiddenYears: true })
+      .select("_id")
+      .lean()
+      .catch(() => []);
+    siblings.forEach((s) => group.ids.add(String(s._id)));
+  }
+  queueVeraAutoReview([...groups.values()].map((g) => [...g.ids]), req);
+}
 
 // Bulk soft-delete selected submissions
 router.post("/bulk-delete", async (req, res) => {
@@ -10325,6 +10651,12 @@ module.exports.rejectUnauthorizedDummyAccess = rejectUnauthorizedDummyAccess;
 module.exports.SUBMISSION_HAS_TRUCKS = SUBMISSION_HAS_TRUCKS;
 module.exports.sanitizeClient = sanitizeClient;
 module.exports.computeSubmissionRemarks = computeSubmissionRemarks;
+// The automatic VERA review's change detection — exposed so a test (and a parity
+// check against live data) can confirm a list read and a review fingerprint the
+// same submission identically.
+module.exports.mergeRemarkLists = mergeRemarkLists;
+module.exports.veraRemarkSignature = veraRemarkSignature;
+module.exports.REMARK_FORMAT_FIELDS = REMARK_FORMAT_FIELDS;
 module.exports.findTicketReuse = findTicketReuse;
 module.exports.ticketReuseRemarks = ticketReuseRemarks;
 module.exports.enrichSubmissionRow = enrichSubmissionRow;

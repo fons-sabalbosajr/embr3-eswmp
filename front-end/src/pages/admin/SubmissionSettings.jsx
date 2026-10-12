@@ -783,33 +783,68 @@ export default function SubmissionSettings({
             : "") ||
           record.slfName ||
           "";
-        buildSubmissionWasteEntries(record, {
+        const entries = buildSubmissionWasteEntries(record, {
           slfName: canonicalName,
           fallbackUnit: record.baselineUnit,
-        }).forEach((entry) => {
+        });
+        // A transport row with no hauler, ticket, plate or volume carries nothing
+        // to report. Nineteen Porac submissions consist ENTIRELY of such rows
+        // (2,337 of them), and each used to print as its own blank line. The
+        // submission is still represented — one row, saying why it is empty —
+        // so it cannot vanish from the export.
+        const isEmptyEntry = (entry) =>
+          !entry.hauler && !entry.ticketNo && !entry.plateNumber && !(Number(entry.volume) > 0);
+        const allEmpty = entries.length > 0 && entries.every(isEmptyEntry);
+        const exportEntries = allEmpty ? [{ ...entries[0], empty: true }] : entries;
+        exportEntries.forEach((entry) => {
           // The same submission can be reachable under more than one identity;
           // de-duplicate on the entry key so no row is written twice.
           if (seen.has(entry.key)) return;
           seen.add(entry.key);
+          const remarks = [];
+          if (entry.empty) {
+            remarks.push(`No transport data recorded (${entries.length} empty row${entries.length === 1 ? "" : "s"})`);
+          }
+          // The submit validator requires an HW code for TREATED hazardous waste.
+          if (/treated/i.test(entry.wasteType || "") && /haz/i.test(entry.wasteType || "") && !(entry.hazWasteCodes || []).length) {
+            remarks.push("Treated hazardous waste without HW code");
+          }
           rows.push({
             "Submission Reference": entry.submissionId,
-            "Submission Date": entry.date ? dayjs(entry.date).format("YYYY-MM-DD") : "",
+            // This is the DISPOSAL date (dateOfDisposal). It used to be headed
+            // "Submission Date", which it is not — that is "Created Date" below.
+            "Disposal Date": entry.date ? dayjs(entry.date).format("YYYY-MM-DD") : "",
             "SLF Name": entry.slfName,
             "Facility Category": facility?.category || record.category || "",
             "LGU/Company": record.lguCompanyName || "",
             "Hauler Name": entry.hauler || "",
-            "Hauler Details": [entry.plateNumber ? `Plate ${entry.plateNumber}` : "", entry.ticketNo ? `Ticket ${entry.ticketNo}` : ""].filter(Boolean).join("; "),
-            "Client Name": (entry.clients || []).map((client) => client.name).join(", ") || "No client recorded",
-            "Client Details": (entry.clients || []).map((client) => client.details).filter(Boolean).join("; "),
+            // Its own column: it used to be folded into a "Hauler Details" text
+            // beside a second copy of the plate, so it could not be sorted,
+            // filtered or matched against the weighbridge.
+            "Ticket No.": entry.ticketNo || "",
             "Plate No.": entry.plateNumber || "",
+            "Client Name": entry.empty
+              ? ""
+              : (entry.clients || []).map((client) => client.name).join(", ") || "No client recorded",
+            "Client Details": (entry.clients || []).map((client) => client.details).filter(Boolean).join("; "),
+            // A load that named no client is shown with its hauler's accredited
+            // clients — said here so it is never read as recorded on the trip.
+            "Client Source":
+              entry.clientSource === "trip"
+                ? "Recorded on trip"
+                : entry.clientSource === "hauler"
+                  ? "Hauler's accredited clients (not recorded on trip)"
+                  : "",
             "Waste Type": entry.wasteType || "",
+            "HW Code": (entry.hazWasteCodes || []).join(", "),
             "Waste Volume": entry.volume == null ? "" : Number(entry.volume.toFixed(2)),
             // Always populated alongside a volume — an unlabelled quantity is
             // exactly what this column exists to prevent.
             "Unit of Measurement":
               entry.volume == null ? "" : entry.unit || "unit not recorded",
-            "Cell or Disposal Area": entry.cell || "Unplaced",
+            "Cell or Disposal Area": entry.empty ? "" : entry.cell || "Unplaced",
             "Submission Status": entry.status || "pending",
+            "Data Remarks": remarks.join("; "),
             "Submitted By": record.submittedBy || "",
             "Created Date": record.createdAt
               ? dayjs(record.createdAt).format("YYYY-MM-DD HH:mm")
@@ -825,7 +860,10 @@ export default function SubmissionSettings({
         message.info("No waste entries to export for the current filters.");
         return;
       }
-      exportToExcel(rows, `SLF_Submissions_Filtered_${dayjs().format("YYYY-MM-DD")}`);
+      exportToExcel(rows, `SLF_Submissions_Filtered_${dayjs().format("YYYY-MM-DD")}`, "Submissions", {
+        autoWidth: true,
+        freezeHeader: true,
+      });
     } catch (err) {
       message.error(
         err?.response?.data?.message || "Could not build the submission export.",
@@ -1572,7 +1610,9 @@ export default function SubmissionSettings({
       const idSet = new Set((resp.ids || ids).map(String));
       setData((prev) =>
         prev.map((entry) =>
-          idSet.has(String(entry._id)) ? { ...entry, veraRemark: resp.veraRemark } : entry,
+          idSet.has(String(entry._id))
+            ? { ...entry, veraRemark: resp.veraRemark, veraReviewPending: false }
+            : entry,
         ),
       );
       invalidateCache(currentCacheKey);
@@ -1746,6 +1786,11 @@ export default function SubmissionSettings({
         const severity = { error: 3, warning: 2, info: 1 };
         const merged = new Map();
         let vera = null;
+        // VERA reviews every submission on its own (server: automatic review
+        // queue). The server marks a row it has just queued because its remark is
+        // missing or no longer matches the row's issues; the remark arrives with
+        // the next data-refresh broadcast.
+        const reviewPending = sources.some((e) => e?.veraReviewPending);
         sources.forEach((e) => {
           (e?.remarks || []).forEach((rm) => {
             if (!rm?.text) return;
@@ -1780,7 +1825,26 @@ export default function SubmissionSettings({
             ) : (
               <Text type="secondary" style={{ fontSize: 11 }}>No issues flagged</Text>
             )}
-            {vera && (
+            {(generating || (reviewPending && !vera)) && (
+              <div
+                role="status"
+                style={{
+                  display: "flex",
+                  gap: 6,
+                  alignItems: "center",
+                  background: "rgba(22, 119, 255, 0.06)",
+                  border: "1px dashed rgba(22, 119, 255, 0.28)",
+                  borderRadius: 6,
+                  padding: "4px 6px",
+                  fontSize: 11,
+                  color: "#4a5b70",
+                }}
+              >
+                <VeraFlameIcon size={16} state="thinking" />
+                VERA is reviewing this submission…
+              </div>
+            )}
+            {vera && !generating && (
               <Tooltip
                 title={
                   <span>
@@ -1789,7 +1853,8 @@ export default function SubmissionSettings({
                     <span style={{ opacity: 0.75, fontSize: 11 }}>
                       {vera.source === "model" ? "Written by VERA" : "Rule-based (AI model unavailable)"}
                       {vera.generatedAt ? ` · ${dayjs(vera.generatedAt).format("MM/DD/YYYY hh:mm A")}` : ""}
-                      {vera.generatedBy ? ` · ${vera.generatedBy}` : ""}
+                      {vera.auto ? " · automatic review" : vera.generatedBy ? ` · ${vera.generatedBy}` : ""}
+                      {reviewPending ? " · re-checking after a change" : ""}
                     </span>
                   </span>
                 }
@@ -1817,17 +1882,18 @@ export default function SubmissionSettings({
                 </div>
               </Tooltip>
             )}
-            <Button
-              size="small"
-              type="link"
-              disabled={generating}
-              aria-busy={generating || undefined}
-              onClick={() => generateVeraRemark(r)}
-              icon={<VeraFlameIcon size={14} state={generating ? "working" : "idle"} animated={generating} />}
-              style={{ padding: 0, height: "auto", fontSize: 11 }}
-            >
-              {generating ? "VERA is reviewing…" : vera ? "Regenerate VERA remark" : "Ask VERA for a remark"}
-            </Button>
+            {/* The review is automatic; this only forces a fresh one now. */}
+            {vera && !generating && (
+              <Button
+                size="small"
+                type="link"
+                onClick={() => generateVeraRemark(r)}
+                icon={<ReloadOutlined style={{ fontSize: 10 }} />}
+                style={{ padding: 0, height: "auto", fontSize: 11, alignSelf: "flex-start" }}
+              >
+                Re-check
+              </Button>
+            )}
           </Space>
         );
       },

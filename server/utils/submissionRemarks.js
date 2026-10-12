@@ -62,10 +62,22 @@ const hasHazCode = (codes) =>
  */
 const vehicleCarriesLoad = (v) => !isBlank(v?.actualVolume) || !isBlank(v?.wasteType);
 
+const namesAClient = (list) =>
+  (Array.isArray(list) ? list : []).some((c) => text(typeof c === "string" ? c : c?.clientName || c?.name));
+
+// Did this read include client data? A list projection that leaves
+// `selectedClients` out returns no such key at all, which is different from an
+// empty selection.
+const clientsProjected = (truck) =>
+  Array.isArray(truck?.selectedClients) ||
+  (Array.isArray(truck?.vehicles) && truck.vehicles.some((v) => Array.isArray(v?.selectedClients)));
+
 function truckLoadRows(truck) {
   const vehicles = (Array.isArray(truck?.vehicles) ? truck.vehicles : []).filter(vehicleCarriesLoad);
+  const truckHasClient = namesAClient(truck?.selectedClients);
   if (vehicles.length) {
     return vehicles.map((v) => ({
+      hasClient: namesAClient(v.selectedClients) || truckHasClient,
       plate: v.plateNumber || truck?.plateNumber,
       volume: v.actualVolume,
       volumeUnit: v.actualVolumeUnit || truck?.actualVolumeUnit,
@@ -78,6 +90,7 @@ function truckLoadRows(truck) {
   }
   return [
     {
+      hasClient: truckHasClient,
       plate: truck?.plateNumber,
       volume: truck?.actualVolume,
       volumeUnit: truck?.actualVolumeUnit,
@@ -124,10 +137,23 @@ function computeFormatRemarks(entry, { now = new Date() } = {}) {
   const missingWaste = [];
   const oddWaste = new Set();
   const hazNoCode = [];
+  const emptyRows = [];
+  const noClient = [];
   let loadCount = 0;
 
   trucks.forEach((truck, index) => {
     const label = `#${index + 1}`;
+    // A transport row with nothing in it — no hauler, ticket, plate or volume.
+    // Nineteen Porac submissions consist entirely of these (2,337 rows), and two
+    // of them were acknowledged: the per-field flags below did fire, but as a
+    // wall of "missing" tags that never said the submission was simply empty.
+    const rowsForEmpty = truckLoadRows(truck);
+    if (
+      !text(truck?.hauler) && !text(truck?.disposalTicketNo) && !text(truck?.plateNumber) &&
+      !rowsForEmpty.some((row) => Number(row.volume || 0) > 0)
+    ) {
+      emptyRows.push(label);
+    }
     const ticket = text(truck?.disposalTicketNo);
     if (!ticket) missingTicket.push(label);
     else if (!isWellFormedTicket(ticket)) badTicket.push(`"${ticket}"`);
@@ -150,11 +176,28 @@ function computeFormatRemarks(entry, { now = new Date() } = {}) {
       if (needsHazCode(waste) && !hasHazCode(row.hazWasteCode)) {
         hazNoCode.push(plate || label);
       }
+      // A load that carries waste but names no client cannot be attributed to
+      // a generator; only the hauler's roster can stand in for it.
+      if (Number(row.volume || 0) > 0 && !row.hasClient) noClient.push(plate || label);
     });
   });
 
   const duplicateTickets = [...ticketSeen.values()].filter((list) => list.length > 1).map((list) => `"${list[0]}" ×${list.length}`);
   const total = trucks.length;
+
+  // An entirely empty submission is ONE error that says so, not eight
+  // per-field flags that each describe a symptom of it.
+  if (emptyRows.length === total) {
+    remarks.push({
+      text: "No transport data",
+      level: "error",
+      detail: `All ${total} transport row${total === 1 ? " is" : "s are"} empty — no hauler, ticket, plate or volume`,
+    });
+    return remarks;
+  }
+  if (emptyRows.length) {
+    remarks.push({ text: "Empty transport rows", level: "warning", detail: `${ofLoads(emptyRows.length, total, "transport row")}: ${examples(emptyRows)}` });
+  }
 
   if (noVolume.length) {
     remarks.push({ text: "Missing load volume", level: "error", detail: `${ofLoads(noVolume.length, total, "truck entry")} have no volume: ${examples(noVolume)}` });
@@ -192,6 +235,11 @@ function computeFormatRemarks(entry, { now = new Date() } = {}) {
   }
   if (oddWaste.size) {
     remarks.push({ text: "Non-standard waste type", level: "info", detail: examples([...oddWaste]) });
+  }
+  // Only judged when the read carried client data at all (clientsProjected):
+  // a projection without it must not report every load as client-less.
+  if (noClient.length && trucks.some(clientsProjected)) {
+    remarks.push({ text: "No client on trip", level: "info", detail: `${ofLoads(noClient.length, loadCount)}: ${examples(noClient)}` });
   }
   return remarks;
 }

@@ -37,7 +37,8 @@ import {
   Pagination,
   Alert,
   Tour,
-  Skeleton
+  Skeleton,
+  message,
 } from "antd";
 import {
   CheckCircleOutlined,
@@ -163,6 +164,16 @@ import {
   formatOrganizeWarningHtml,
 } from "./organizeCellsValidation";
 import {
+  splitOrganizerWork,
+  plannedM3ByCell,
+  cellChoicesFor,
+  applyCellToRows,
+  autoPlace,
+  organizerProgress,
+  rowVolumeM3,
+  roomLeftM3,
+} from "./organizeCellRules";
+import {
   normalizeUnit,
   hasBaselinePayload,
   formatEntryVolumeSummary,
@@ -214,7 +225,6 @@ import {
   DISPOSAL_VERA_ASSESSMENT_PROMPT,
 } from "./disposalVeraContext";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
-import { isHazardousWasteType } from "../../utils/wasteCategories";
 // Canonical cell helpers — shared with the admin side so the Portal and the admin
 // never disagree about which cells exist or what they are called.
 import {
@@ -2088,16 +2098,35 @@ export default function SLFPortal() {
     setBulkOrganizeOpen(true);
   });
 
+  // The organizer's two jobs, and the session's progress — see organizeCellRules.
+  // Placed waste never appears as placement work: it is only listed (separately)
+  // when it is still missing a Truck Capacity.
+  const organizerWork = useMemo(() => splitOrganizerWork(cellOrganizerData), [cellOrganizerData]);
+  const organizerStats = useMemo(() => organizerProgress(cellOrganizerData), [cellOrganizerData]);
+  // m³ already chosen per cell in this session — every cell picker counts it.
+  const organizerPlanned = useMemo(() => plannedM3ByCell(cellOrganizerData), [cellOrganizerData]);
+
+  // " · 1,234 m³ left" — the cell's room once this session's choices are taken,
+  // in the unit the cell picker shows. Empty for a cell with no declared capacity.
+  const cellRoomLabel = (opt, planned) => {
+    const room = roomLeftM3(opt, planned);
+    if (!Number.isFinite(room)) return "";
+    const unit = String(opt?.unit || "m³").replace("m3", "m³");
+    const shown = convertVolume(room, "m³", unit) ?? room;
+    return ` · ${Number(shown).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${unit} left`;
+  };
+
+  const cellPatchFor = (opt) => ({
+    cellName: opt?.value || "",
+    cellType: opt?.cellType || "",
+    cellIndex: opt && typeof opt.cellIndex === "number" ? opt.cellIndex : null,
+  });
+
   // Assign a cell to ONE unassigned placement, addressed by its canonical
   // truckIndex/vehicleIndex (which the server preserved).
   const updateOrganizerCell = (subId, truckIndex, vehicleIndex, cellValue) => {
     const opt = activeCellOptions.find((o) => o.value === cellValue);
-    const patch = {
-      cellName: cellValue || "",
-      cellType: opt?.cellType || "",
-      cellIndex:
-        opt && typeof opt.cellIndex === "number" ? opt.cellIndex : null,
-    };
+    const patch = cellValue ? cellPatchFor(opt) : { cellName: "", cellType: "", cellIndex: null };
     setCellOrganizerData((prev) =>
       prev.map((sub) => {
         if (sub._id !== subId) return sub;
@@ -2151,21 +2180,44 @@ export default function SLFPortal() {
     );
   };
 
-  // Apply the bulk cell to all currently checked rows.
+  // Apply the bulk cell to the checked rows — only those it can legally take.
+  // It used to write the chosen cell into EVERY checked row: a residual cell into
+  // a hazardous load, or past the cell's remaining room.
   const applyBulkCellToSelected = () => {
     if (!cellOrganizerBulkCell || cellOrganizerSelected.length === 0) return;
-    cellOrganizerSelected.forEach((rowKey) => {
-      // rowKey format: "subId|truckIndex|vehicleIndex" or "subId|truckIndex|t"
-      const parts = rowKey.split("|");
-      if (parts.length < 3) return;
-      const subId = parts[0];
-      const truckIndex = Number(parts[1]);
-      const vPart = parts[2];
-      const vehicleIndex = vPart === "t" ? null : Number(vPart);
-      updateOrganizerCell(subId, truckIndex, vehicleIndex, cellOrganizerBulkCell);
-    });
+    const opt = activeCellOptions.find((o) => o.value === cellOrganizerBulkCell);
+    if (!opt) return;
+    const res = applyCellToRows(cellOrganizerData, cellOrganizerSelected, opt, cellPatchFor);
+    setCellOrganizerData(res.data);
     setCellOrganizerSelected([]);
     setCellOrganizerBulkCell(undefined);
+    const skippedTotal = res.skipped.type + res.skipped.capacity;
+    if (skippedTotal) {
+      const parts = [];
+      if (res.skipped.type) parts.push(`${res.skipped.type} whose waste type does not fit ${opt.cellName || opt.value}`);
+      if (res.skipped.capacity) parts.push(`${res.skipped.capacity} that would exceed its remaining room`);
+      message.warning(`Placed ${res.applied} row(s). Skipped ${parts.join(" and ")}.`, 6);
+    } else {
+      message.success(`Placed ${res.applied} row(s) in ${opt.cellName || opt.value}.`);
+    }
+  };
+
+  // Auto-place every row that has no cell yet into the type-compatible open cell
+  // with the most room left, largest loads first. Nothing is saved — the operator
+  // reviews the choices and presses Save Placement.
+  const autoPlaceOrganizer = () => {
+    const res = autoPlace(cellOrganizerData, activeCellOptions, cellPatchFor);
+    setCellOrganizerData(res.data);
+    if (!res.placed && !res.unplaceable) {
+      message.info("Every row already has a cell selected.");
+    } else if (res.unplaceable) {
+      message.warning(
+        `Placed ${res.placed} row(s). ${res.unplaceable} could not be placed — no open cell of the right type has room for them.`,
+        6,
+      );
+    } else {
+      message.success(`Placed ${res.placed} row(s). Review the cells, then Save Placement.`);
+    }
   };
 
   const saveCellOrganizer = async () => {
@@ -2188,7 +2240,12 @@ export default function SLFPortal() {
               // is offered here). Sending it as `{ cellIndex: null, cellName }`
               // made the backend skip the row while the modal still reported
               // "Waste Placement Saved", so the arrangement never persisted.
-              const hasCell = !!p.cellName && Number.isInteger(p.cellIndex);
+              //
+              // Only waste that NEEDED a cell sends one. Placed waste listed for
+              // its capacity already carries its own cell, and re-sending it made
+              // every untouched capacity row look like a change — so "Nothing to
+              // Save" could never fire.
+              const hasCell = p.needsCell !== false && !!p.cellName && Number.isInteger(p.cellIndex);
               const providesCapacity = p.needsCapacity && isPos(p.capacity);
               if (!hasCell && !providesCapacity) return null; // untouched / still incomplete
               return {
@@ -9467,8 +9524,8 @@ export default function SLFPortal() {
               <Space>
                 <ContainerOutlined style={{ color: "#722ed1" }} />
                 <span>Organize Cell Placement</span>
-                {cellOrganizerData.length > 0 && (
-                  <Tag color="purple">{cellOrganizerData.length} submission(s)</Tag>
+                {organizerWork.placementSubs.length > 0 && (
+                  <Tag color="purple">{organizerWork.placementSubs.length} submission(s) to place</Tag>
                 )}
                 {cellOrganizerData.length > 0 && (
                   <Button
@@ -9604,12 +9661,11 @@ export default function SLFPortal() {
                       ),
                       children: (
                         <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
-                          <li><b>Expand a submission card</b> below to see the trucks/vehicles that still need a disposal cell.</li>
-                          <li><b>Pick a cell</b> for each row using the cell selector on the right — only cells that are <i>Open for Disposal</i> (active and not full) can be chosen.</li>
-                          <li>To place many rows at once, <b>tick the checkboxes</b>, choose a cell in the purple bulk-assign bar, and press <b>Apply</b>.</li>
-                          <li>If a row is missing its <b>Truck Capacity</b>, enter it (in your declared baseline unit) — historical entries need this completed here rather than at submission time. Where that plate&apos;s capacity is already on your <b>Baseline Data</b>, it is filled in for you and marked <i>from baseline</i>; check it and edit only if that trip was different.</li>
-                          <li>Rows fully completed turn green. When everything is placed and every capacity is filled, click <b>Save Placement</b> to update your records and the cell fill levels.</li>
-                          <li><b>Organizing is required</b> — new submissions are blocked until all past waste is placed into cells and any missing truck capacities are completed.</li>
+                          <li>Only waste that has <b>no disposal cell yet</b> is listed for placement. Waste that is already placed is never offered again — moving it is an EMB correction.</li>
+                          <li><b>Pick a cell</b> for each row. Only cells that fit the <b>waste type</b> are offered (hazardous waste → a hazardous cell, residual waste → a residual cell), each with the room it has left <i>after the rows you have already chosen</i>.</li>
+                          <li>To place many rows at once, <b>tick the checkboxes</b>, choose a cell in the purple bar and press <b>Apply</b> — rows that cell cannot take are skipped and counted. Or press <b>Auto-place</b> to fill every empty row into the compatible cell with the most room.</li>
+                          <li>Placed waste still missing a <b>Truck Capacity</b> is listed separately at the bottom. Where that plate&apos;s capacity is on your <b>Baseline Data</b> it is filled in and marked <i>from baseline</i>; check it and edit only if that trip was different.</li>
+                          <li>Click <b>Save Placement</b> to record your choices and update the cell fill levels. New submissions stay blocked until all past waste is placed and every missing capacity is completed.</li>
                         </ol>
                       ),
                     },
@@ -9950,6 +10006,55 @@ export default function SLFPortal() {
                 );
               })()}
 
+              {/* ── Session progress + Auto-place ── */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  flexWrap: "wrap",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: "1px solid #efdbff",
+                  background: "#fdf9ff",
+                }}
+              >
+                {organizerStats.toPlace > 0 ? (
+                  <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+                    <Text style={{ fontSize: 12 }}>
+                      <b>{organizerStats.placed.toLocaleString()}</b> of{" "}
+                      <b>{organizerStats.toPlace.toLocaleString()}</b> unplaced load
+                      {organizerStats.toPlace === 1 ? "" : "s"} assigned a cell
+                    </Text>
+                    <Progress
+                      percent={Math.round((organizerStats.placed / organizerStats.toPlace) * 100)}
+                      size="small"
+                      strokeColor="#722ed1"
+                      showInfo={false}
+                      style={{ margin: 0 }}
+                    />
+                  </div>
+                ) : (
+                  <Text style={{ fontSize: 12, flex: "1 1 240px" }}>
+                    <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 6 }} />
+                    All your waste is already placed in cells.
+                  </Text>
+                )}
+                {organizerStats.capacityNeeded > 0 && (
+                  <Tag color={organizerStats.capacityFilled >= organizerStats.capacityNeeded ? "green" : "orange"} style={{ margin: 0 }}>
+                    Truck capacity: {organizerStats.capacityFilled}/{organizerStats.capacityNeeded}
+                  </Tag>
+                )}
+                {organizerStats.toPlace > organizerStats.placed && activeCellOptions.length > 0 && (
+                  <Tooltip title="Fill every row that has no cell into the open cell of the right waste type with the most room left, largest loads first. Nothing is saved until you press Save Placement.">
+                    <Button size="small" icon={<ThunderboltOutlined />} onClick={autoPlaceOrganizer}>
+                      Auto-place {(organizerStats.toPlace - organizerStats.placed).toLocaleString()} row
+                      {organizerStats.toPlace - organizerStats.placed === 1 ? "" : "s"}
+                    </Button>
+                  </Tooltip>
+                )}
+              </div>
+
               {/* ── Bulk-assign bar ── */}
               {cellOrganizerSelected.length > 0 && (
                 <div
@@ -9972,7 +10077,10 @@ export default function SLFPortal() {
                     onChange={setCellOrganizerBulkCell}
                     allowClear
                     style={{ flex: 1, minWidth: 200 }}
-                    options={activeCellOptions.map((o) => ({ label: o.label, value: o.value }))}
+                    options={activeCellOptions.map((o) => ({
+                      label: `${o.label}${cellRoomLabel(o, organizerPlanned)}`,
+                      value: o.value,
+                    }))}
                     size="small"
                   />
                   <Button
@@ -10006,17 +10114,17 @@ export default function SLFPortal() {
                 onChange={setCellOrganizerExpanded}
                 bordered={false}
                 style={{ background: "transparent" }}
-                items={cellOrganizerData
+                items={organizerWork.placementSubs
                   .slice(
                     (cellOrganizerPage - 1) * cellOrganizerPageSize,
                     cellOrganizerPage * cellOrganizerPageSize,
                   )
                   .map((sub) => {
-                  // The server already sent ONLY the placements that still need a
-                  // cell, each carrying its canonical truckIndex/vehicleIndex — so
-                  // there is no walking of trucks here, and nothing already assigned
-                  // is loaded or shown.
+                  // ONLY waste that has no cell yet (splitOrganizerWork). Placed
+                  // waste that is merely missing a Truck Capacity is listed in its
+                  // own section below and never appears here as placement work.
                   const rows = (sub.placements || []).map((p) => ({
+                    placement: p,
                     rowKey: `${sub._id}|${p.truckIndex}|${
                       Number.isInteger(p.vehicleIndex) ? p.vehicleIndex : "t"
                     }`,
@@ -10163,13 +10271,30 @@ export default function SLFPortal() {
                           {
                             title: "Disposal Cell",
                             render: (_, r) => {
-                              const isHaz = isHazardousWasteType(r.wasteType);
-                              const opts = activeCellOptions.filter((o) =>
-                                isHaz
-                                  ? String(o.cellType || "").toLowerCase().includes("haz")
-                                  : !String(o.cellType || "").toLowerCase().includes("haz"),
-                              );
-                              const cellOpts = opts.length ? opts : activeCellOptions;
+                              // Only cells that fit the WASTE TYPE, with the room each
+                              // has left after every OTHER row's choice in this
+                              // session. There is no fallback to "any open cell":
+                              // that fallback is how a hazardous load could be
+                              // offered a residual cell.
+                              const planned = new Map(organizerPlanned);
+                              if (r.cellName && Number.isInteger(r.placement.cellIndex)) {
+                                const own = rowVolumeM3(r.placement);
+                                planned.set(r.placement.cellIndex, (planned.get(r.placement.cellIndex) || 0) - own);
+                              }
+                              const choices = cellChoicesFor(r.placement, activeCellOptions, planned);
+                              if (!choices.length) {
+                                return (
+                                  <Tooltip title={`No open cell accepts ${r.wasteType} waste. Contact EMB Region III to open one.`}>
+                                    <Select
+                                      size="small"
+                                      style={{ width: "100%" }}
+                                      disabled
+                                      status="warning"
+                                      placeholder={`No open ${/haz|inert/i.test(r.wasteType) ? "hazardous" : "residual"} cell`}
+                                    />
+                                  </Tooltip>
+                                );
+                              }
                               return (
                                 <Select
                                   size="small"
@@ -10177,7 +10302,15 @@ export default function SLFPortal() {
                                   placeholder="Select open cell"
                                   value={r.cellName || undefined}
                                   allowClear
-                                  options={cellOpts.map((o) => ({ label: o.label, value: o.value }))}
+                                  status={r.cellName ? "" : "warning"}
+                                  popupMatchSelectWidth={false}
+                                  options={choices.map(({ option: o, fits, room }) => ({
+                                    value: o.value,
+                                    // A full option stays selectable only if it is the
+                                    // row's current choice, so the value still renders.
+                                    disabled: !fits && o.value !== r.cellName,
+                                    label: `${o.label}${Number.isFinite(room) ? cellRoomLabel(o, planned) : ""}${fits ? "" : " — not enough room"}`,
+                                  }))}
                                   onChange={(val) =>
                                     updateOrganizerCell(sub._id, r.truckIndex, r.vehicleIndex, val)
                                   }
@@ -10235,13 +10368,13 @@ export default function SLFPortal() {
                   };
                 })}
               />
-              {cellOrganizerData.length > cellOrganizerPageSize && (
+              {organizerWork.placementSubs.length > cellOrganizerPageSize && (
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <Pagination
                     size="small"
                     current={cellOrganizerPage}
                     pageSize={cellOrganizerPageSize}
-                    total={cellOrganizerData.length}
+                    total={organizerWork.placementSubs.length}
                     showSizeChanger
                     pageSizeOptions={["5", "10", "20", "50"]}
                     showTotal={(total) =>
@@ -10253,6 +10386,122 @@ export default function SLFPortal() {
                     }}
                   />
                 </div>
+              )}
+
+              {/* ── Already placed — Truck Capacity still needed ──
+                  Waste that HAS a cell is never placement work. It is listed here
+                  only because a historical trip is missing its Truck Capacity,
+                  which still blocks new submissions. The cell is shown, never
+                  offered for change. */}
+              {organizerWork.capacityRows.length > 0 && (
+                <Collapse
+                  size="small"
+                  defaultActiveKey={organizerWork.placementSubs.length ? [] : ["capacity"]}
+                  style={{ borderRadius: 10, background: "#fffbe6", borderColor: "#ffe58f" }}
+                  items={[
+                    {
+                      key: "capacity",
+                      label: (
+                        <Space size={8} wrap>
+                          <InfoCircleOutlined style={{ color: "#d48806" }} />
+                          <Text strong style={{ fontSize: 13 }}>
+                            Already placed — Truck Capacity still needed
+                          </Text>
+                          <Tag color="orange" style={{ margin: 0 }}>
+                            {organizerWork.capacityRows.filter((c) => !(Number(c.placement.capacity) > 0)).length} of{" "}
+                            {organizerWork.capacityRows.length} missing
+                          </Tag>
+                        </Space>
+                      ),
+                      children: (
+                        <Table
+                          size="small"
+                          rowKey="key"
+                          dataSource={organizerWork.capacityRows}
+                          pagination={
+                            organizerWork.capacityRows.length > 10
+                              ? { pageSize: 10, size: "small", showSizeChanger: false, showTotal: (t) => `${t} load${t === 1 ? "" : "s"}` }
+                              : false
+                          }
+                          columns={[
+                            {
+                              title: "Submission",
+                              width: 150,
+                              render: (_, c) => (
+                                <div style={{ lineHeight: 1.3 }}>
+                                  <Text style={{ fontSize: 12 }}>{c.sub.idNo || c.sub.submissionId || "Submission"}</Text>
+                                  {c.sub.dateOfDisposal && (
+                                    <div>
+                                      <Text type="secondary" style={{ fontSize: 11 }}>
+                                        {dayjs(c.sub.dateOfDisposal).format("MM/DD/YYYY")}
+                                      </Text>
+                                    </div>
+                                  )}
+                                </div>
+                              ),
+                            },
+                            { title: "Truck / Plate", width: 120, render: (_, c) => <Text style={{ fontSize: 12 }}>{c.placement.plateNumber || c.placement.hauler || "-"}</Text> },
+                            {
+                              title: "Volume",
+                              width: 100,
+                              render: (_, c) => (
+                                <Text style={{ fontSize: 12 }}>
+                                  {Number(c.placement.actualVolume || 0).toLocaleString()}{" "}
+                                  {String(c.placement.actualVolumeUnit || baselineUnit || slfUnit).replace("m3", "m³")}
+                                </Text>
+                              ),
+                            },
+                            {
+                              title: "Placed in",
+                              render: (_, c) => (
+                                <Tag color="purple" bordered={false} style={{ margin: 0 }}>
+                                  {c.placement.cellName || `Cell ${Number(c.placement.cellIndex) + 1}`}
+                                </Tag>
+                              ),
+                            },
+                            {
+                              title: (
+                                <span>
+                                  Truck Capacity{" "}
+                                  <Text type="secondary" style={{ fontSize: 10, fontWeight: 400 }}>
+                                    ({String(baselineUnit || slfUnit).replace("m3", "m³")})
+                                  </Text>
+                                </span>
+                              ),
+                              width: 150,
+                              render: (_, c) => (
+                                <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                                  <InputNumber
+                                    size="small"
+                                    style={{ width: "100%" }}
+                                    min={0}
+                                    step={0.1}
+                                    placeholder="Required"
+                                    status={Number(c.placement.capacity) > 0 ? "" : "warning"}
+                                    value={Number(c.placement.capacity) > 0 ? c.placement.capacity : undefined}
+                                    onChange={(val) =>
+                                      updateOrganizerCapacity(
+                                        c.sub._id,
+                                        c.placement.truckIndex,
+                                        Number.isInteger(c.placement.vehicleIndex) ? c.placement.vehicleIndex : null,
+                                        val,
+                                      )
+                                    }
+                                  />
+                                  {c.placement.capacityPrefilled && Number(c.placement.capacity) > 0 && (
+                                    <Tooltip title="Taken from this plate's capacity on your Baseline Data. Edit it if this trip was different.">
+                                      <Text type="secondary" style={{ fontSize: 10 }}>from baseline</Text>
+                                    </Tooltip>
+                                  )}
+                                </Space>
+                              ),
+                            },
+                          ]}
+                        />
+                      ),
+                    },
+                  ]}
+                />
               )}
               </Space>
             )}

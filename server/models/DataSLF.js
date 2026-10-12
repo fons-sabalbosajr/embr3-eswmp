@@ -228,6 +228,13 @@ const dataSLFSchema = new mongoose.Schema(
       model: { type: String, trim: true },
       generatedBy: { type: String, trim: true },
       generatedAt: { type: Date },
+      // Fingerprint of the issues VERA reviewed (routes/dataSLF.js →
+      // veraRemarkSignature). A list read whose issues no longer match it
+      // queues an automatic re-review.
+      signature: { type: String, trim: true },
+      // true when VERA reviewed the submission on its own, false when an admin
+      // asked for it.
+      auto: { type: Boolean },
     },
 
     // Denormalized metric fields — computed from trucks/dateOfDisposal on save.
