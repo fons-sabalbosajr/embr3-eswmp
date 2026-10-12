@@ -125,12 +125,38 @@ jobs:
       - name: Public health check
         # The app is served under /eswm-pipeline/ — the bare /api/ path answers
         # 404 over HTTPS, so it would fail every deploy.
+        #
+        # Run FROM THE VPS, over the deploy SSH connection. The site sits behind
+        # Cloudflare, which answers GitHub-hosted runners (cloud datacenter IPs)
+        # with HTTP 403 — measured 2026-10-12: six 403s from the runner while
+        # the same URL returned 200 from the VPS and from a normal client, after
+        # a deploy that had succeeded. Curling the PUBLIC hostname from the VPS
+        # still exercises the whole path (DNS → Cloudflare → nginx → app); it
+        # just is not subject to Cloudflare's bot rules for datacenter ranges.
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          HEALTH_URL: https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/eswm-pipeline/api/health || true)
-            echo "attempt $i → HTTP $code"
+            code=$(ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
+                     -o ConnectTimeout=20 "$VPS_USER@$VPS_HOST" \
+                     "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 '$HEALTH_URL'" || true)
+            echo "attempt $i → HTTP $code (from the VPS)"
             [ "$code" = "200" ] && exit 0
             sleep 10
           done
-          echo "::error::Public health check failed after deploy"
+          echo "::error::Public health check failed after deploy (checked from the VPS)"
           exit 1
+
+      - name: Public health check from GitHub (informational)
+        # Reported, never fatal: a Cloudflare block on GitHub's IP ranges says
+        # nothing about whether the deploy worked — the step above does.
+        if: always()
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/eswm-pipeline/api/health || true)
+          echo "From the GitHub runner → HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::warning title=Public check from GitHub::HTTP $code from the runner (likely Cloudflare blocking GitHub's datacenter IPs). The VPS-side check above is the one that gates the deploy."
+          fi
