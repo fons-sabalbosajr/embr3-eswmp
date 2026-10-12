@@ -71,6 +71,44 @@ const toM3 = (volume, unitRaw) => {
 /** Does this submission's waste still stand? */
 const countsTowardVolume = (status) => ACTIVE_VOLUME_STATUSES.has(text(status) || "pending");
 
+const isBlankIndex = (value) => value === null || value === undefined || value === "";
+
+/**
+ * The facility's label for a placement, keyed by CELL INDEX.
+ *
+ * A placement's stored `cellName` is a snapshot of what the cell was called when
+ * the row was written, so a renamed cell carries two spellings — measured on
+ * PWS, 1,061 trips into index 5 say "Cell 6" and 99 say "Cell for Treated
+ * Hazardous Waste", the cell's actual name. Grouping by that text split one cell
+ * into two rows, and the "Cell 6" row matched nothing in Disposal Cells. The
+ * index is what the occupancy calculation keys on, so it is what this keys on,
+ * and the label comes from the facility the same way the Disposal Cells table
+ * builds its own — so the two tables always name a cell identically.
+ *
+ * A row with no usable index falls back to matching its name against the
+ * facility's cell names, then to the stored name itself.
+ */
+function resolveCellLabel(facility, cellIndex, cellName) {
+  const labelAt = (i) => text(facility?.cellNames?.[i]) || `Cell ${i + 1}`;
+  const count = Math.max(
+    num(facility?.numberOfCell),
+    (facility?.cellNames || []).length,
+    (facility?.cellStatuses || []).length,
+    (facility?.cellCapacities || []).length,
+  );
+  if (facility && !isBlankIndex(cellIndex)) {
+    const index = Number(cellIndex);
+    if (Number.isInteger(index) && index >= 0 && index < count) return labelAt(index);
+  }
+  const name = text(cellName);
+  if (!name) return "";
+  if (facility) {
+    const match = (facility.cellNames || []).findIndex((n) => text(n).toLowerCase() === name.toLowerCase());
+    if (match >= 0) return labelAt(match);
+  }
+  return name;
+}
+
 /** Accumulate into a keyed bucket map. */
 function bump(map, key, patch) {
   if (!key) return;
@@ -161,21 +199,34 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
       // on the truck itself otherwise — the same rule the server's cell
       // accounting applies. Reading only one level would drop whichever shape the
       // record happens to use.
-      const vehicles = Array.isArray(truck.vehicles) && truck.vehicles.length
-        ? truck.vehicles
-        : [truck];
+      const hasVehicles = Array.isArray(truck.vehicles) && truck.vehicles.length > 0;
+      const vehicles = hasVehicles ? truck.vehicles : [truck];
+      // The volume sits on the vehicles only when at least one of them carries
+      // some; otherwise the TRUCK holds it — computeCellOccupancy's rule. Older
+      // rows store the load on the truck beside a stub vehicle whose volume is 0,
+      // and `vehicle.actualVolume ?? truck.actualVolume` read that 0 (it is not
+      // nullish), so the report dropped loads the cell gauges count.
+      const vehiclesCarryVolume = hasVehicles && vehicles.some((v) => num(v.actualVolume) > 0);
       const haulerName = text(truck.hauler);
       const submissionId = text(entry.idNo || entry.submissionId || entry._id);
 
-      vehicles.forEach((vehicle) => {
+      vehicles.forEach((vehicle, vehicleIndex) => {
         // Normalised before it is summed ANYWHERE — see toTons. The unit falls
         // back the same way the model's own metrics do: vehicle, then truck, then
         // the submission's declared baseline unit.
         const unit = vehicle.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit;
-        const rawVolume = vehicle.actualVolume ?? truck.actualVolume;
+        // A truck-level load is attributed once (to the first vehicle), never to
+        // every stub vehicle beside it.
+        const rawVolume = !hasVehicles || vehiclesCarryVolume
+          ? vehicle.actualVolume
+          : vehicleIndex === 0 ? truck.actualVolume : 0;
         const tons = toTons(rawVolume, unit);
         const m3 = toM3(rawVolume, unit);
-        const cellName = text(vehicle.cellName || truck.cellName);
+        const cellName = resolveCellLabel(
+          facility,
+          !isBlankIndex(vehicle.cellIndex) ? vehicle.cellIndex : truck.cellIndex,
+          vehicle.cellName || truck.cellName,
+        );
         const wasteType = text(vehicle.wasteType || truck.wasteType) || "Residual";
         const clients = Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [];
 
@@ -241,11 +292,19 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
       //
       // Normalised here through the same toTons every other total in this report
       // already passes through, so the whole document speaks one unit.
-      const cellUnit = facility.cellCapacityUnits?.[i] || "m³";
-      const capacity = toTons(num(facility.cellCapacities?.[i]), cellUnit);
-      const fill = toTons(num(facility.cellFillValues?.[i]), cellUnit);
+      //
+      // Capacity and fill each carry their OWN unit. The fill is written by the
+      // occupancy recompute in `cellFillUnits`, which need not match the
+      // capacity's unit; reading the fill through `cellCapacityUnits` misstated
+      // "Used" by the conversion factor whenever the two differed.
+      const capacityUnit = facility.cellCapacityUnits?.[i] || "m³";
+      const fillUnit = facility.cellFillUnits?.[i] || capacityUnit;
+      const capacity = toTons(num(facility.cellCapacities?.[i]), capacityUnit);
+      const fill = toTons(num(facility.cellFillValues?.[i]), fillUnit);
       cells.push({
-        name: facility.cellNames?.[i] || `Cell ${i + 1}`,
+        // Same label rule as resolveCellLabel, so a cell is named identically in
+        // this table and in Disposal by Cell.
+        name: text(facility.cellNames?.[i]) || `Cell ${i + 1}`,
         status,
         type: facility.cellTypes?.[i] || "Residual",
         unit: "tons",

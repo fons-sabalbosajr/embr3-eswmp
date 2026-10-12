@@ -443,7 +443,10 @@ export default function PortalReportModal({ open, onClose }) {
               locale={{ emptyText: <Empty description="No clients recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>
 
-          <Section title="Disposal by Cell">
+          <Section
+            title="Disposal by Cell"
+            subtitle="Waste from this account's submissions in the reporting period, by the cell it was placed in. Disposal Cells above is the facility's full standing (baseline, all submissions and EMB adjustments), so the two are not expected to match."
+          >
             <Table size="small" pagination={false} rowKey="name" dataSource={report.byCell || []} columns={rankColumns(unitLabel)}
               locale={{ emptyText: <Empty description="No placements recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>

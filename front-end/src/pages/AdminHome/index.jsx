@@ -1378,7 +1378,7 @@ export default function AdminHome() {
 
       {/* VERA — Admin assistant (role-gated to admin KB by the backend; developer
           topics are refused). Ticket actions hidden on the admin side. */}
-      <VeraChat activeMenu={activeMenu} isMobile={isMobile} hideTicketActions />
+      <VeraChat activeMenu={activeMenu} isMobile={isMobile} hideTicketActions theme={isDark ? "dark" : "light"} />
       <VeraOnboarding portal="admin" userId={user?.email || user?.id || user?._id} />
 
       <Modal

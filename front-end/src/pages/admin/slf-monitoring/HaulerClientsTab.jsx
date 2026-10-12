@@ -6,12 +6,13 @@
 //
 // Features: search (hauler/client), client-type filter, sortable columns,
 // pagination with a page-size changer, Excel export of the filtered rows, and
-// row grouping — each hauler's cells are merged (rowSpan) across its client rows,
-// with the office Address column included. Duplicate hauler-client pairs are
-// collapsed.
+// row grouping — each hauler's cell (name, office address, trucks and its trips
+// per month) is merged (rowSpan) across its client rows; client name and type
+// share one cell. The total declared trips per month is shown in the header and
+// in a summary row. Duplicate hauler-client pairs are collapsed.
 import { useMemo, useState } from "react";
 import { Button, Empty, Input, Select, Space, Table, Tag, Typography } from "antd";
-import { DownloadOutlined, TeamOutlined } from "@ant-design/icons";
+import { CarOutlined, DownloadOutlined, EnvironmentOutlined, TeamOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { exportToExcel } from "../../../utils/exportExcel";
 
@@ -112,19 +113,39 @@ export default function HaulerClientsTab({ baselineData, loading, savedAt }) {
 
   // Group by hauler: the first row of each hauler spans its client rows (rowSpan);
   // subsequent rows return 0 so the hauler cells visually merge into one block.
+  //
+  // Spans are counted per PAGE: a hauler whose clients cross a page boundary
+  // would otherwise be given a rowSpan taller than the rows actually rendered.
+  const [page, setPage] = useState(1);
   const spanByRowKey = useMemo(() => {
+    const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize);
     const counts = new Map();
-    filtered.forEach((r) => counts.set(r._haulerKey, (counts.get(r._haulerKey) || 0) + 1));
+    pageRows.forEach((r) => counts.set(r._haulerKey, (counts.get(r._haulerKey) || 0) + 1));
     const seen = new Set();
     const map = new Map();
-    filtered.forEach((r) => {
+    pageRows.forEach((r) => {
       if (seen.has(r._haulerKey)) map.set(r.key, 0);
       else { seen.add(r._haulerKey); map.set(r.key, counts.get(r._haulerKey)); }
     });
     return map;
-  }, [filtered]);
+  }, [filtered, page, pageSize]);
 
-  const haulerCell = (_, row) => ({ rowSpan: spanByRowKey.get(row.key) ?? 1 });
+  // antd calls onCell(record, rowIndex). This read the SECOND argument as the
+  // row, so it was always handed the index, `row.key` was undefined, every span
+  // fell back to 1 — and the hauler cells were never actually merged.
+  const haulerCell = (record) => ({ rowSpan: spanByRowKey.get(record.key) ?? 1 });
+
+  // Declared trips per month — the only trip figure a baseline carries — summed
+  // per hauler and over the filtered rows, so the header, each hauler block and
+  // the table's summary row always agree with what is on screen.
+  const tripNum = (v) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : 0);
+  const tripsByHauler = useMemo(() => {
+    const map = new Map();
+    filtered.forEach((r) => map.set(r._haulerKey, (map.get(r._haulerKey) || 0) + tripNum(r.trips)));
+    return map;
+  }, [filtered]);
+  const totalTrips = useMemo(() => filtered.reduce((sum, r) => sum + tripNum(r.trips), 0), [filtered]);
+  const clientCount = useMemo(() => filtered.filter((r) => r.clientName).length, [filtered]);
 
   const exportRows = () => {
     if (!filtered.length) return;
@@ -143,17 +164,64 @@ export default function HaulerClientsTab({ baselineData, loading, savedAt }) {
     exportToExcel(data, `SLF_Haulers_Clients_${dayjs().format("YYYY-MM-DD")}`);
   };
 
+  // Hauler name + address (+ trucks, + its trips) share ONE merged cell, and
+  // client name + type share another — ten columns at a forced 1,200px scroll
+  // became seven that fit the Facility Details modal.
   const columns = [
-    { title: "Hauler Name", dataIndex: "haulerName", onCell: haulerCell, width: 200, sorter: (a, b) => a.haulerName.localeCompare(b.haulerName), render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
-    { title: "Hauler Address", dataIndex: "haulerAddress", onCell: haulerCell, width: 220, ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
-    { title: "Trucks", dataIndex: "haulerTrucks", onCell: haulerCell, width: 80, align: "center", render: (v) => (v != null ? <Tag color="blue">{v}</Tag> : "—") },
-    { title: "Client Name", dataIndex: "clientName", width: 200, render: (v) => (v ? <Text style={{ fontSize: 12 }}>{v}</Text> : <Text type="secondary" italic style={{ fontSize: 12 }}>No client recorded</Text>) },
-    { title: "Client Type", dataIndex: "clientType", width: 110, render: (v) => (v ? <Tag color={v === "LGU" ? "blue" : "purple"}>{v}</Tag> : "—") },
-    { title: "Client Address", dataIndex: "clientAddr", width: 220, ellipsis: true, render: (v) => v || "—" },
-    { title: "Contact", dataIndex: "clientContact", width: 150, ellipsis: true, render: (v) => v || "—" },
-    { title: "Trips/Mo.", dataIndex: "trips", width: 90, align: "center", render: (v) => v ?? "—" },
-    { title: "Status", dataIndex: "status", width: 100, render: (v) => <Tag color={/active/i.test(v) ? "green" : "default"}>{v || "—"}</Tag> },
-    { title: "Date Added", dataIndex: "dateAdded", width: 120, render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—") },
+    {
+      title: "Hauler",
+      dataIndex: "haulerName",
+      onCell: haulerCell,
+      width: 250,
+      sorter: (a, b) => a.haulerName.localeCompare(b.haulerName),
+      render: (v, r) => (
+        <div style={{ lineHeight: 1.35 }}>
+          <Text strong style={{ fontSize: 12 }}>{v}</Text>
+          <div>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              <EnvironmentOutlined style={{ marginRight: 4 }} />
+              {r.haulerAddress && r.haulerAddress !== "—" ? r.haulerAddress : "No office address"}
+            </Text>
+          </div>
+          <Space size={4} style={{ marginTop: 4 }} wrap>
+            {r.haulerTrucks != null && (
+              <Tag bordered={false} color="blue" style={{ margin: 0, fontSize: 10.5 }}>
+                <CarOutlined /> {r.haulerTrucks} truck{Number(r.haulerTrucks) === 1 ? "" : "s"}
+              </Tag>
+            )}
+            <Tag bordered={false} color="cyan" style={{ margin: 0, fontSize: 10.5 }}>
+              {(tripsByHauler.get(r._haulerKey) || 0).toLocaleString()} trips/mo
+            </Tag>
+          </Space>
+        </div>
+      ),
+    },
+    {
+      title: "Client",
+      dataIndex: "clientName",
+      width: 240,
+      sorter: (a, b) => String(a.clientName || "").localeCompare(String(b.clientName || "")),
+      render: (v, r) =>
+        v ? (
+          <div style={{ lineHeight: 1.35 }}>
+            <Text style={{ fontSize: 12 }}>{v}</Text>
+            {r.clientType && (
+              <div>
+                <Tag bordered={false} color={r.clientType === "LGU" ? "blue" : "purple"} style={{ margin: "3px 0 0", fontSize: 10.5 }}>
+                  {r.clientType}
+                </Tag>
+              </div>
+            )}
+          </div>
+        ) : (
+          <Text type="secondary" italic style={{ fontSize: 12 }}>No client recorded</Text>
+        ),
+    },
+    { title: "Client Address", dataIndex: "clientAddr", ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
+    { title: "Contact", dataIndex: "clientContact", width: 140, ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
+    { title: "Trips/Mo.", dataIndex: "trips", width: 104, align: "center", sorter: (a, b) => tripNum(a.trips) - tripNum(b.trips), render: (v) => v ?? "—" },
+    { title: "Status", dataIndex: "status", width: 86, render: (v) => <Tag bordered={false} color={/active/i.test(v) ? "green" : "default"} style={{ margin: 0 }}>{v || "—"}</Tag> },
+    { title: "Date Added", dataIndex: "dateAdded", width: 104, render: (v) => <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MM/DD/YYYY") : "—"}</Text> },
   ];
 
   if (!loading && haulers.length === 0) {
@@ -164,10 +232,10 @@ export default function HaulerClientsTab({ baselineData, loading, savedAt }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <Space wrap>
-          <Input.Search allowClear placeholder="Search hauler or client" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 240 }} />
+          <Input.Search allowClear placeholder="Search hauler or client" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} style={{ width: 240 }} />
           <Select
             value={typeFilter}
-            onChange={setTypeFilter}
+            onChange={(value) => { setTypeFilter(value); setPage(1); }}
             style={{ width: 150 }}
             options={[
               { label: "All Client Types", value: "all" },
@@ -176,10 +244,16 @@ export default function HaulerClientsTab({ baselineData, loading, savedAt }) {
             ]}
           />
         </Space>
-        <Space>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            <TeamOutlined /> {haulers.length} hauler(s)
-          </Text>
+        <Space size={6} wrap>
+          <Tag bordered={false} style={{ margin: 0 }}>
+            <TeamOutlined /> {haulers.length} hauler{haulers.length === 1 ? "" : "s"}
+          </Tag>
+          <Tag bordered={false} style={{ margin: 0 }}>
+            {clientCount.toLocaleString()} client{clientCount === 1 ? "" : "s"}
+          </Tag>
+          <Tag bordered={false} color="cyan" style={{ margin: 0, fontWeight: 600 }}>
+            Total trips: {totalTrips.toLocaleString()} / month
+          </Tag>
           <Button size="small" icon={<DownloadOutlined />} onClick={exportRows} disabled={!filtered.length}>Export</Button>
         </Space>
       </div>
@@ -189,13 +263,36 @@ export default function HaulerClientsTab({ baselineData, loading, savedAt }) {
         rowKey="key"
         dataSource={filtered}
         columns={columns}
-        scroll={{ x: 1200 }}
+        tableLayout="fixed"
+        // Fits the 1,400px Facility Details modal as is; scrolls only on a
+        // screen narrower than the columns' own minimum.
+        scroll={{ x: 960 }}
         bordered
+        summary={() =>
+          filtered.length ? (
+            <Table.Summary.Row style={{ background: "#fafafa" }}>
+              <Table.Summary.Cell index={0} colSpan={4}>
+                <Text strong style={{ fontSize: 12 }}>Total trips per month</Text>
+                <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>
+                  ({clientCount.toLocaleString()} client{clientCount === 1 ? "" : "s"} shown)
+                </Text>
+              </Table.Summary.Cell>
+              <Table.Summary.Cell index={4} align="center">
+                <Text strong>{totalTrips.toLocaleString()}</Text>
+              </Table.Summary.Cell>
+              <Table.Summary.Cell index={5} colSpan={2} />
+            </Table.Summary.Row>
+          ) : null
+        }
         pagination={{
+          current: page,
           pageSize,
           showSizeChanger: true,
           pageSizeOptions: ["10", "20", "50", "100"],
-          onShowSizeChange: (_, size) => setPageSize(size),
+          onChange: (nextPage, size) => {
+            setPage(size !== pageSize ? 1 : nextPage);
+            setPageSize(size);
+          },
           showTotal: (total) => `${total} row(s)`,
           size: "small",
         }}

@@ -1,14 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, Select, Space, Tag, Row, Col,
-  Typography, Tooltip, Statistic, Descriptions, Popconfirm, AutoComplete, Empty, Alert, Badge, Progress, Avatar, Popover,
+  Typography, Tooltip, Statistic, Descriptions, Popconfirm, AutoComplete, Empty, Alert, Progress, Popover, Segmented,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
   ReloadOutlined, TeamOutlined, BankOutlined, UserOutlined, FilterOutlined,
   ClearOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, EnvironmentOutlined,
   PhoneOutlined, MailOutlined, SolutionOutlined, SyncOutlined, WarningOutlined,
-  RobotOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -23,8 +22,8 @@ import {
   BLUE,
   GREEN,
   REGION_TILE,
-  AVATAR_COLORS as PALETTE_AVATAR_COLORS,
 } from "../../utils/palette";
+import VeraFlameIcon from "../../components/VeraFlameIcon";
 
 const { Title, Text } = Typography;
 
@@ -37,7 +36,8 @@ const STATUS_OPTIONS = [
   { label: "Inactive", value: "Inactive" },
 ];
 
-// Human labels for SlfDataIssue.flagType.
+// Human labels for SlfDataIssue.flagType — EVERY type the model defines. Three
+// were missing, so those rows showed the raw key ("region_unclassified").
 const FLAG_LABELS = {
   missing_type: "Missing client type",
   missing_hauler: "Missing hauler",
@@ -46,6 +46,23 @@ const FLAG_LABELS = {
   conflicting_portal_users: "Conflicting portal users",
   invalid_baseline: "Invalid baseline",
   unmigrated_baseline_client: "Not yet migrated",
+  ambiguous_duplicate: "Listed under two types",
+  region_unclassified: "No province (Region 3 unknown)",
+  validation_mismatch: "Totals mismatch",
+};
+// Tag colour by how much a person is needed: red needs a decision, orange is
+// missing data, blue is classification VERA can often repair.
+const FLAG_COLORS = {
+  conflicting_portal_users: "red",
+  ambiguous_duplicate: "red",
+  invalid_baseline: "red",
+  validation_mismatch: "red",
+  missing_hauler: "orange",
+  missing_type: "orange",
+  unknown_hauler: "orange",
+  duplicate_client: "gold",
+  unmigrated_baseline_client: "gold",
+  region_unclassified: "blue",
 };
 
 const typeTag = (t) =>
@@ -57,6 +74,56 @@ const statusTag = (s) =>
   s === "Active"
     ? <Tag color="green" bordered={false}><CheckCircleOutlined /> Active</Tag>
     : <Tag color="default" bordered={false}><StopOutlined /> Inactive</Tag>;
+
+// The Issues toolbar button and its built-in count.
+const ISSUES_BTN_CSS = `
+.slf-issues-btn { display: inline-flex; align-items: center; gap: 6px; }
+.slf-issues-btn .slf-issues-btn__count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 20px; padding: 0 7px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums;
+  background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f;
+}
+.slf-issues-btn.has-issues { border-color: #ffd591; color: #ad4e00; }
+.slf-issues-btn.has-issues:hover { border-color: #fa8c16 !important; color: #d46b08 !important; }
+.slf-issues-btn.has-issues .slf-issues-btn__count { background: #fa8c16; color: #fff; border-color: #fa8c16; }
+
+/* ── VERA buttons: ONE look everywhere on this page ──
+   VERA's colour is the flame's teal. These used to be a robot icon in navy,
+   navy-filled on some rows and plain on others, beside a blue Resolve and a red
+   Ignore — four colour systems in one toolbar. */
+.vera-btn.ant-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #006d75; background: #e6fffb; border-color: #87e8de; font-weight: 500;
+}
+.vera-btn.ant-btn:not(:disabled):hover { color: #00474f !important; background: #b5f5ec !important; border-color: #36cfc9 !important; }
+.vera-btn.ant-btn.vera-btn--primary {
+  color: #fff; border-color: transparent;
+  background: linear-gradient(135deg, #08979c 0%, #13a8a8 55%, #389e0d 140%);
+  box-shadow: 0 2px 6px rgba(8, 151, 156, 0.28);
+}
+.vera-btn.ant-btn.vera-btn--primary:not(:disabled):hover {
+  color: #fff !important; border-color: transparent !important;
+  background: linear-gradient(135deg, #006d75 0%, #08979c 55%, #237804 140%) !important;
+}
+.vera-btn.ant-btn:disabled { color: rgba(0,0,0,0.3); background: #f5f5f5; border-color: #e5e5e5; box-shadow: none; }
+
+/* ── Client Data Issues modal ── */
+.slf-issues-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 10px;
+}
+.slf-issues-head__left { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.slf-issues-vera {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 10px; margin-bottom: 12px;
+  background: #f6fffe; border: 1px solid #b5f5ec; border-radius: 10px;
+}
+.slf-issues-vera__label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #006d75; margin-right: 4px; }
+.slf-issues-vera__sep { width: 1px; height: 18px; background: #b5f5ec; }
+.slf-issues-vera__hint { font-size: 11.5px; color: #5b7a7d; }
+.slf-issue-actions .ant-btn { font-size: 12px; }
+`;
 
 const REGION_OPTIONS = [
   { label: "Within Region 3", value: "within-region-3" },
@@ -103,14 +170,9 @@ const uniqueUserNames = (r, byId = {}) => {
   if (!seen.size && (byId[r.portalUser] || r.portalUserName)) {
     seen.set("legacy", byId[r.portalUser] || r.portalUserName);
   }
-  return [...seen.values()].sort((a, b) => a.localeCompare(b));
-};
-const initials = (name) => String(name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
-const AVATAR_COLORS = PALETTE_AVATAR_COLORS;
-const avatarColor = (name) => {
-  let h = 0; const s = String(name || "");
-  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+  // De-duplicated by NAME as well: two accounts assigned to the same SLF (PWS has
+  // two) are one SLF, not "Prime Waste Solution +1".
+  return [...new Set(seen.values())].sort((a, b) => a.localeCompare(b));
 };
 
 export default function SlfClients({ isDark, canView = true, canEdit = true, canDelete = true }) {
@@ -303,6 +365,56 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     }
   };
   const [openIssueCount, setOpenIssueCount] = useState(0);
+  const [veraAutofixing, setVeraAutofixing] = useState(false);
+
+  // "Let VERA fix" — one server run over every open issue (services/
+  // veraIssueAutofix.js). Only deterministic actions; the summary says exactly
+  // what was closed, repaired and left for a person.
+  const runVeraAutofix = async () => {
+    const confirm = await Swal.fire({
+      icon: "question",
+      title: "Let VERA fix the client issues?",
+      html:
+        '<div style="text-align:left;font-size:14px;line-height:1.55">VERA will:<ul style="margin:8px 0 0 18px;padding:0">' +
+        "<li>close duplicate copies of the same issue,</li>" +
+        "<li>close issues the current data no longer supports,</li>" +
+        "<li>set the province and municipality where the client matches ONE Region 3 masterlist entry.</li>" +
+        "</ul><div style=\"margin-top:8px;color:#666\">Anything that needs a decision stays open. Every change is recorded and can be reopened.</div></div>",
+      showCancelButton: true,
+      confirmButtonText: "Let VERA fix",
+      confirmButtonColor: "#1a3353",
+    });
+    if (!confirm.isConfirmed) return;
+    setVeraAutofixing(true);
+    try {
+      const { data } = await api.post("/slf-clients/issues/vera-autofix");
+      fetchOpenIssueCount();
+      fetchRecords(false);
+      if (issuesOpen) loadIssues(1, issuesPaging.pageSize, issuesStatus);
+      const stale = data?.staleClosed || {};
+      const left = Object.entries(data?.leftOpenByType || {})
+        .map(([type, n]) => `<li>${(FLAG_LABELS[type] || type)}: <b>${n.toLocaleString()}</b></li>`)
+        .join("");
+      Swal.fire({
+        icon: "success",
+        title: `VERA resolved ${(data?.resolved || 0).toLocaleString()} issue(s)`,
+        html:
+          '<div style="text-align:left;font-size:14px;line-height:1.6">' +
+          `<b>${(data?.duplicateCopies || 0).toLocaleString()}</b> duplicate copies closed<br/>` +
+          `<b>${((stale.duplicate_client || 0) + (stale.region_unclassified || 0) + (stale.missing_hauler || 0)).toLocaleString()}</b> out-of-date issues closed<br/>` +
+          `<b>${(data?.repaired || 0).toLocaleString()}</b> client locations repaired from the masterlist` +
+          (data?.leftOpen
+            ? `<div style="margin-top:10px"><b>${data.leftOpen.toLocaleString()}</b> left for review:<ul style="margin:4px 0 0 18px;padding:0">${left}</ul></div>`
+            : '<div style="margin-top:10px">Nothing is left open.</div>') +
+          "</div>",
+        confirmButtonColor: "#1a3353",
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "VERA could not fix the issues.", "error");
+    } finally {
+      setVeraAutofixing(false);
+    }
+  };
 
   const fetchRecords = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true);
@@ -383,7 +495,22 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     return [...set].sort().map((l) => ({ label: l, value: l }));
   }, [records]);
 
-  const displayUser = (r) => r.portalUserName || portalUserById[r.portalUser] || "";
+  // The SLF the linked account is assigned to — what this page calls "SLF Name".
+  // `portalUserName` is stored by the sync as the operator's PERSONAL name
+  // (517 of 525 links), so reading it first put "REYNALDO ARAGON JR" in the SLF
+  // Name column of the export and the search. It is only a fallback now.
+  const displayUser = (r) => uniqueUserNames(r, portalUserById).join(", ") || portalUserById[r.portalUser] || r.portalUserName || "";
+
+  // Issue rows carry the declaring account's EMAIL; resolve it to that
+  // account's SLF so the Issues table's "SLF Name" column says what it is named.
+  const slfNameByEmail = useMemo(() => {
+    const map = {};
+    portalUsers.forEach((u) => {
+      const email = String(u.email || "").trim().toLowerCase();
+      if (email) map[email] = portalUserLabel(u);
+    });
+    return map;
+  }, [portalUsers]);
   // Distinct portal users / haulers linked to a canonical client (relationship-based).
   const relCount = (r) => {
     const rels = Array.isArray(r.portalUserRelationships) ? r.portalUserRelationships : [];
@@ -748,12 +875,9 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         const extra = users.length - 1;
         return (
           <Space size={6} wrap>
-            <Avatar.Group max={{ count: 3 }} size="small">
-              {users.map((u) => (
-                <Avatar key={u} size="small" style={{ background: avatarColor(u), fontSize: 10 }}>{initials(u)}</Avatar>
-              ))}
-            </Avatar.Group>
-            <Text style={{ fontSize: 12 }}>{primary}{extra > 0 ? <Text type="secondary" style={{ fontSize: 11 }}> +{extra}</Text> : null}</Text>
+            <Tooltip title={users.length > 1 ? users.join(" · ") : undefined}>
+              <Text style={{ fontSize: 12 }}>{primary}{extra > 0 ? <Text type="secondary" style={{ fontSize: 11 }}> +{extra}</Text> : null}</Text>
+            </Tooltip>
             {isMultiPortal(r) && <Tag color="gold" bordered={false}>Multiple</Tag>}
             {/* On-demand source detail (relationships render lazily on open). */}
             <Popover
@@ -879,14 +1003,31 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               <Button icon={<TeamOutlined />} onClick={handleCleanup} loading={cleaning}>Clean Duplicates</Button>
             </Tooltip>
           )}
-          <Badge
-            count={openIssueCount}
-            size="small"
-            overflowCount={99}
-            aria-label={`${openIssueCount} unresolved issue${openIssueCount === 1 ? "" : "s"}`}
+          {/* The count is PART of the button, in full — a floating "99+" dot
+              said nothing about whether there were 100 issues or 28,000, and sat
+              over the button's corner. */}
+          <Button
+            onClick={openIssues}
+            className={`slf-issues-btn${openIssueCount ? " has-issues" : ""}`}
+            aria-label={`Issues: ${openIssueCount.toLocaleString()} open`}
+            icon={openIssueCount ? <WarningOutlined /> : <CheckCircleOutlined />}
           >
-            <Button icon={<WarningOutlined />} onClick={openIssues}>Issues</Button>
-          </Badge>
+            Issues
+            <span className="slf-issues-btn__count">{openIssueCount.toLocaleString()}</span>
+          </Button>
+          {canEdit && openIssueCount > 0 && (
+            <Tooltip title="VERA closes duplicate and out-of-date issues and repairs locations it can match to the Region 3 masterlist. Anything that needs a decision stays open.">
+              <Button
+                className="vera-btn"
+                icon={<VeraFlameIcon size={16} state={veraAutofixing ? "working" : "idle"} />}
+                onClick={runVeraAutofix}
+                loading={veraAutofixing}
+              >
+                Let VERA fix
+              </Button>
+            </Tooltip>
+          )}
+          <style>{ISSUES_BTN_CSS}</style>
           <Button icon={<DownloadOutlined />} onClick={handleExport} disabled={!filtered.length}>Export</Button>
           <Tooltip title="Refresh"><Button icon={<ReloadOutlined />} onClick={() => { fetchRecords(true); fetchOpenIssueCount(); }} loading={loading} /></Tooltip>
         </Space>
@@ -1138,98 +1279,107 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
             style={{ marginBottom: 12 }}
           />
         )}
-        <Space size={8} wrap style={{ marginBottom: 10 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Status</Text>
-          <Select
-            size="small"
-            value={issuesStatus}
-            style={{ width: 150 }}
-            onChange={(value) => {
-              setIssuesStatus(value);
-              loadIssues(1, issuesPaging.pageSize, value);
-            }}
-            options={[
-              { value: "open", label: `Open${issuesCounts.open ? ` (${issuesCounts.open.toLocaleString()})` : ""}` },
-              { value: "resolved", label: `Resolved${issuesCounts.resolved ? ` (${issuesCounts.resolved.toLocaleString()})` : ""}` },
-              { value: "ignored", label: `Ignored${issuesCounts.ignored ? ` (${issuesCounts.ignored.toLocaleString()})` : ""}` },
-              { value: "", label: "All" },
-            ]}
-          />
-          <Tag color="volcano">{issuesPaging.total.toLocaleString()} record(s)</Tag>
-          {canEdit && issuesStatus === "open" && (
-            <>
+        {/* ── Header: which issues, how many, and VERA's one-click fix ── */}
+        <div className="slf-issues-head">
+          <div className="slf-issues-head__left">
+            <Segmented
+              size="small"
+              value={issuesStatus}
+              onChange={(value) => {
+                setIssuesStatus(value);
+                loadIssues(1, issuesPaging.pageSize, value);
+              }}
+              options={[
+                { value: "open", label: `Open${issuesCounts.open != null ? ` · ${issuesCounts.open.toLocaleString()}` : ""}` },
+                { value: "resolved", label: `Resolved${issuesCounts.resolved != null ? ` · ${issuesCounts.resolved.toLocaleString()}` : ""}` },
+                { value: "ignored", label: `Ignored${issuesCounts.ignored != null ? ` · ${issuesCounts.ignored.toLocaleString()}` : ""}` },
+                { value: "", label: "All" },
+              ]}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {issuesPaging.total.toLocaleString()} record{issuesPaging.total === 1 ? "" : "s"}
+            </Text>
+          </div>
+          {canEdit && issuesStatus === "open" && issuesPaging.total > 0 && (
+            <Tooltip title="VERA closes duplicate and out-of-date issues and repairs locations it can match to ONE Region 3 masterlist entry. Anything that needs a decision stays open.">
               <Button
-                type="primary"
-                size="small"
-                icon={<RobotOutlined />}
-                loading={bulkFixing}
-                disabled={selectedFixableKeys.length === 0}
-                style={{ background: "#1a3353", borderColor: "#1a3353" }}
-                onClick={runBulkVeraFix}
+                className="vera-btn vera-btn--primary"
+                icon={<VeraFlameIcon size={16} state={veraAutofixing ? "working" : "idle"} theme="dark" />}
+                loading={veraAutofixing}
+                onClick={runVeraAutofix}
               >
-                Repair {selectedFixableKeys.length || ""} with VERA
+                Let VERA fix
               </Button>
-              {fixableOnPage.length > 0 && (
-                <Button
-                  size="small"
-                  onClick={() =>
-                    setSelectedIssueKeys(
-                      selectedIssueKeys.length === fixableOnPage.length
-                        ? []
-                        : fixableOnPage.map((i) => i._id),
-                    )
-                  }
-                >
-                  {selectedIssueKeys.length === fixableOnPage.length ? "Clear" : `Select all ${fixableOnPage.length} fixable`}
-                </Button>
-              )}
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {fixableOnPage.length} of {issues.length} on this page can be auto-repaired
-              </Text>
-            </>
+            </Tooltip>
           )}
-          {/* ── VERA-resolvable: which issues VERA is ALLOWED to resolve ──
-              Distinct from "repair now" above: this only records permission and
-              never changes an issue's status. The selection it acts on is not
-              page-bound — ticked rows persist across pages, and "Allow all
-              matching" is applied by the server over the entire filtered set. */}
-          {canEdit && (
-            <>
-              <span style={{ width: 1, height: 18, background: "#f0f0f0" }} />
+        </div>
+
+        {/* ── VERA on the selection ──
+            "Repair" changes data now (high-confidence rows only); "Allow" only
+            records permission and never changes an issue's status. The selection
+            is not page-bound — ticked rows persist across pages, and "Allow all
+            matching" is applied by the server over the entire filtered set. */}
+        {canEdit && issuesStatus === "open" && issuesPaging.total > 0 && (
+          <div className="slf-issues-vera">
+            <span className="slf-issues-vera__label">
+              <VeraFlameIcon size={14} animated={false} /> VERA
+              {selectedIssueKeys.length > 0 && (
+                <Tag bordered={false} color="cyan" style={{ marginLeft: 4 }}>
+                  {selectedIssueKeys.length} selected
+                </Tag>
+              )}
+            </span>
+            <Button
+              size="small"
+              className="vera-btn"
+              loading={bulkFixing}
+              disabled={selectedFixableKeys.length === 0}
+              onClick={runBulkVeraFix}
+            >
+              Repair {selectedFixableKeys.length || ""} selected
+            </Button>
+            {fixableOnPage.length > 0 && (
               <Button
                 size="small"
-                icon={<RobotOutlined />}
-                loading={veraMarking}
-                disabled={selectedIssueKeys.length === 0}
-                onClick={() => markVeraResolvable("selected", true)}
+                type="text"
+                onClick={() =>
+                  setSelectedIssueKeys(
+                    selectedIssueKeys.length === fixableOnPage.length ? [] : fixableOnPage.map((i) => i._id),
+                  )
+                }
               >
-                Allow VERA on {selectedIssueKeys.length || ""} selected
+                {selectedIssueKeys.length === fixableOnPage.length ? "Clear" : `Select ${fixableOnPage.length} repairable`}
               </Button>
-              {issuesPaging.total > 0 && (
-                <Button
-                  size="small"
-                  loading={veraMarking}
-                  onClick={() => markVeraResolvable("all", true)}
-                >
-                  Allow all {issuesPaging.total.toLocaleString()} matching
-                </Button>
-              )}
-              {selectedIssueKeys.length > 0 && (
-                <Button size="small" danger loading={veraMarking} onClick={() => markVeraResolvable("selected", false)}>
+            )}
+            <span className="slf-issues-vera__sep" />
+            <Button
+              size="small"
+              className="vera-btn"
+              loading={veraMarking}
+              disabled={selectedIssueKeys.length === 0}
+              onClick={() => markVeraResolvable("selected", true)}
+            >
+              Allow VERA on {selectedIssueKeys.length || ""} selected
+            </Button>
+            <Button size="small" className="vera-btn" loading={veraMarking} onClick={() => markVeraResolvable("all", true)}>
+              Allow all {issuesPaging.total.toLocaleString()}
+            </Button>
+            {selectedIssueKeys.length > 0 && (
+              <>
+                <Button size="small" type="text" danger loading={veraMarking} onClick={() => markVeraResolvable("selected", false)}>
                   Remove permission
                 </Button>
-              )}
-              <Tag color={veraCount ? "purple" : "default"}>
-                {veraCount.toLocaleString()} of {issuesPaging.total.toLocaleString()} VERA-resolvable
-              </Tag>
-              {selectedIssueKeys.length > 0 && (
                 <Button size="small" type="link" onClick={() => setSelectedIssueKeys([])}>
                   Clear selection
                 </Button>
-              )}
-            </>
-          )}
-        </Space>
+              </>
+            )}
+            <span style={{ flex: 1 }} />
+            <span className="slf-issues-vera__hint">
+              {fixableOnPage.length} of {issues.length} on this page repairable · {veraCount.toLocaleString()} allowed
+            </span>
+          </div>
+        )}
         <Table
           dataSource={issues}
           rowKey="_id"
@@ -1274,9 +1424,22 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           })}
           onChange={(p) => loadIssues(p.current, p.pageSize, issuesStatus)}
           columns={[
-            { title: "Type", dataIndex: "flagType", width: 190, render: (v) => <Tag color="volcano">{FLAG_LABELS[v] || v}</Tag> },
+            { title: "Type", dataIndex: "flagType", width: 190, render: (v) => <Tag color={FLAG_COLORS[v] || "default"} bordered={false}>{FLAG_LABELS[v] || v}</Tag> },
             { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
-            { title: "SLF Name", dataIndex: "portalUserEmail", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
+            {
+              // The issue stores the declaring account's email; show the SLF that
+              // account is assigned to, with the email on hover.
+              title: "SLF Name", dataIndex: "portalUserEmail", width: 200,
+              render: (v) => {
+                const email = String(v || "").trim().toLowerCase();
+                if (!email) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                return (
+                  <Tooltip title={v}>
+                    <Text style={{ fontSize: 11 }}>{slfNameByEmail[email] || v}</Text>
+                  </Tooltip>
+                );
+              },
+            },
             { title: "Hauler", dataIndex: "hauler", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Status", dataIndex: "status", width: 100, render: (v) => v === "open" ? <Tag color="red">Open</Tag> : v === "ignored" ? <Tag>Ignored</Tag> : <Tag color="green">Resolved</Tag> },
             {
@@ -1288,7 +1451,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               render: (v) =>
                 v ? (
                   <Tooltip title="An administrator has allowed VERA to resolve this issue. It is still open until repaired.">
-                    <Tag color="purple" icon={<RobotOutlined />}>Allowed</Tag>
+                    <Tag color="cyan" bordered={false} icon={<span style={{ marginRight: 4, verticalAlign: -2 }}><VeraFlameIcon size={12} animated={false} /></span>}>Allowed</Tag>
                   </Tooltip>
                 ) : (
                   <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
@@ -1298,7 +1461,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               title: "Action", key: "action", width: 230, fixed: "right",
               render: (_, issue) => canEdit ? (
                 issue.status === "open" ? (
-                  <Space size={4}>
+                  <Space size={4} className="slf-issue-actions">
                     {/* VERA proposes; the admin approves. The button only asks
                         for a suggestion — it never writes. */}
                     <Tooltip
@@ -1312,19 +1475,18 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
                     >
                       <Button
                         size="small"
-                        icon={<RobotOutlined />}
+                        icon={<VeraFlameIcon size={14} animated={false} theme={isBulkFixable(issue._id) ? "dark" : "light"} />}
                         loading={veraFix.loadingId === issue._id}
-                        // Purple when VERA has a confident proposal for this row,
-                        // so the repairable ones are obvious at a glance.
-                        type={isBulkFixable(issue._id) ? "primary" : "default"}
-                        style={isBulkFixable(issue._id) ? { background: "#1a3353", borderColor: "#1a3353" } : undefined}
+                        // Filled when VERA has a confident proposal for this row,
+                        // so the repairable ones stand out — same teal either way.
+                        className={`vera-btn${isBulkFixable(issue._id) ? " vera-btn--primary" : ""}`}
                         onClick={() => askVera(issue)}
                       >
-                        VERA
+                        {isBulkFixable(issue._id) ? "Fix" : "VERA"}
                       </Button>
                     </Tooltip>
-                    <Button size="small" type="primary" onClick={() => resolveIssue(issue, "resolved")}>Resolve</Button>
-                    <Button size="small" type="primary" danger onClick={() => resolveIssue(issue, "ignored")}>Ignore</Button>
+                    <Button size="small" icon={<CheckCircleOutlined style={{ color: "#52c41a" }} />} onClick={() => resolveIssue(issue, "resolved")}>Resolve</Button>
+                    <Button size="small" type="text" onClick={() => resolveIssue(issue, "ignored")}>Ignore</Button>
                   </Space>
                 ) : (
                   <Button size="small" type="link" onClick={() => resolveIssue(issue, "open")}>Reopen</Button>
@@ -1341,7 +1503,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           masterlist — never generated text — so a province can't be invented on
           a compliance record. */}
       <Modal
-        title={<Space><RobotOutlined style={{ color: "#1a3353" }} /> VERA — Suggested Fix</Space>}
+        title={<Space><VeraFlameIcon size={22} /> VERA — Suggested Fix</Space>}
         open={veraFix.open}
         onCancel={() => setVeraFix((s) => ({ ...s, open: false }))}
         width={620}
@@ -1351,7 +1513,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           veraFix.suggestion?.canFix && (
             <Button
               key="apply"
-              type="primary"
+              className="vera-btn vera-btn--primary"
               loading={veraFix.applying}
               disabled={!veraFix.choice?.province}
               onClick={applyVeraFix}

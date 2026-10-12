@@ -1,5 +1,11 @@
 // VERA — Virtual Environmental Response Assistant (floating SLF Portal chatbot).
 //
+// The look is the EMBR3 UCDS VERA design: a launcher pill with a border beam
+// running round its edge, the animated dotted flame whose state follows what
+// VERA is doing (burning at rest, listening while you type, thinking /
+// searching / working while an answer is on its way), and a palette derived
+// from the app's own accent in light or dark. See VeraChat.css.
+//
 // Self-contained: manages its own open/minimize state, conversation, and API
 // calls to /api/vera/chat. Renders assistant replies as PLAIN TEXT only (no HTML
 // injection). Minimal conversation history is kept in sessionStorage, ENCRYPTED
@@ -15,9 +21,10 @@ import {
   MessageOutlined, FileAddOutlined, ProfileOutlined, WarningOutlined,
   ReloadOutlined, QuestionCircleOutlined,
 } from "@ant-design/icons";
+import { theme as antdTheme } from "antd";
 import { animate, utils } from "animejs";
 import api from "../../../api";
-import VeraFlameIcon from "../../../components/VeraFlameIcon";
+import { VeraEdgeBeam, VeraFlame } from "../../../components/vera/VeraMark";
 import secureStorage from "../../../utils/secureStorage";
 import { buildVeraPageContext } from "../../../utils/veraPageContext";
 import "./VeraChat.css";
@@ -54,13 +61,67 @@ function newId() {
   return `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * VERA's answer, rendered as TEXT — never HTML — so a reply can never inject
+ * markup. A small safe subset of Markdown is honoured: **bold**, `code`,
+ * numbered and bulleted lists, paragraphs.
+ */
+function AnswerText({ children }) {
+  const blocks = String(children || "").split(/\n{2,}/);
+  const inline = (line, key) => (
+    <span key={key}>
+      {String(line)
+        .split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+        .map((part, i) => {
+          if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={i}>{part.slice(2, -2)}</strong>;
+          if (/^`[^`]+`$/.test(part)) return <code key={i} className="vera-code">{part.slice(1, -1)}</code>;
+          return <span key={i}>{part}</span>;
+        })}
+    </span>
+  );
+  return (
+    <div className="vera-answer">
+      {blocks.map((block, bi) => {
+        const lines = block.split("\n").filter((l) => l.trim());
+        const isList = lines.length > 0 && lines.every((l) => /^\s*(\d+[.)]|[-•*])\s+/.test(l));
+        if (isList) {
+          const ListTag = /^\s*\d+[.)]/.test(lines[0]) ? "ol" : "ul";
+          return (
+            <ListTag key={bi} className="vera-answer__list">
+              {lines.map((l, li) => (
+                <li key={li}>{inline(l.replace(/^\s*(\d+[.)]|[-•*])\s+/, ""), li)}</li>
+              ))}
+            </ListTag>
+          );
+        }
+        return (
+          <p key={bi} className="vera-answer__p">
+            {lines.map((l, li) => (
+              <span key={li}>
+                {inline(l, li)}
+                {li < lines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function VeraChat({
   activeMenu = "",
   isMobile = false,
   onOpenNewTicket = () => {},
   onOpenMyTickets = () => {},
   hideTicketActions = false, // admin mount: hide the portal-only ticket buttons
+  theme = "light", // the app's mode — the palette and the flame follow it
 }) {
+  // The palette is derived from the app's own accent (VeraChat.css), so VERA
+  // matches whichever primary colour the admin has chosen.
+  const accent = antdTheme.useToken().token.colorPrimary;
+  const mode = theme === "dark" ? "dark" : "light";
+  const [inputFocused, setInputFocused] = useState(false);
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [input, setInput] = useState("");
@@ -337,21 +398,34 @@ export default function VeraChat({
 
   const showGreeting = messages.length === 0;
 
+  // One state for every flame on screen: the stage of a pending answer
+  // (thinking → checking → preparing), listening while a question is being
+  // typed, burning at rest. The dot-by-dot hand-off from the orb back to the
+  // flame is what an arriving answer looks like.
+  const flameState = typing
+    ? ["thinking", "searching", "working"][thinkStage % 3]
+    : inputFocused && input.trim()
+      ? "listening"
+      : "burning";
+  const modelOn = status.mode === "model";
+
   return (
-    <div className="vera-root">
+    // data-theme scopes the palette in VeraChat.css and is the [data-theme] the
+    // canvases fall back to; --v-app-accent is the app's primary colour.
+    <div className="vera-root" data-theme={mode} style={{ "--v-app-accent": accent }}>
       {/* Floating launcher + contextual nudge bubble */}
       {!open && (
         <>
           {nudge && (
             <div className="vera-nudge" ref={nudgeRef} role="status">
-              <button type="button" className="vera-nudge-close" aria-label="Dismiss" onClick={dismissNudge}>×</button>
-              <span className="vera-nudge-icon"><VeraFlameIcon size={18} anime /></span>
-              <div className="vera-nudge-body">
-                <p className="vera-nudge-text">{nudge.text}</p>
+              <button type="button" className="vera-nudge__close" aria-label="Dismiss" onClick={dismissNudge}>×</button>
+              <span className="vera-nudge__icon"><VeraFlame size={26} state="burning" theme={mode} glow={false} label="" /></span>
+              <div className="vera-nudge__body">
+                <p className="vera-nudge__text">{nudge.text}</p>
                 {nudge.cta && (
                   <button
                     type="button"
-                    className="vera-nudge-cta"
+                    className="vera-nudge__cta"
                     onClick={() => { dismissNudge(); setOpen(true); setMinimized(false); }}
                   >
                     Yes, guide me
@@ -367,8 +441,15 @@ export default function VeraChat({
             aria-label="Open VERA, the Virtual Environmental Response Assistant"
             onClick={() => { setOpen(true); setMinimized(false); }}
           >
-            <span className="vera-launcher-icon"><VeraFlameIcon size={24} /></span>
-            <span className="vera-launcher-label">Ask VERA</span>
+            {/* border={1}: the launcher has a 1px outline; the beam runs on it. */}
+            <VeraEdgeBeam radius="pill" border={1} theme={mode} color={accent} />
+            <VeraFlame size={isMobile ? 40 : 34} state="burning" theme={mode} glow={false} label="" />
+            <span className="vera-launcher__text">
+              <span className="vera-launcher__label">Ask VERA</span>
+              <span className="vera-launcher__sub">
+                {hideTicketActions ? "Your ESWMP assistant" : "Your SLF Portal assistant"}
+              </span>
+            </span>
           </button>
         </>
       )}
@@ -376,23 +457,25 @@ export default function VeraChat({
       {/* Chat window */}
       {open && (
         <section
-          className={`vera-window${minimized ? " vera-window-min" : ""}${isMobile ? " vera-window-mobile" : ""}`}
+          className={["vera-window", minimized ? "vera-window--min" : "", isMobile ? "vera-window--mobile" : ""].filter(Boolean).join(" ")}
           role="dialog"
           aria-label="VERA assistant chat"
           onKeyDown={onKeyDownShell}
         >
           <header className="vera-header">
-            <div className="vera-header-id">
-              <span className="vera-header-icon"><VeraFlameIcon size={22} /></span>
-              <div className="vera-header-text">
-                <div className="vera-header-name">VERA</div>
-                <div className="vera-header-sub">
-                  <span className={`vera-status-dot ${status.mode === "model" ? "online" : "lite"}`} />
-                  {status.mode === "model" ? "Online" : "Online · Help library"}
+            <div className="vera-header__id">
+              <span className="vera-header__mark">
+                <VeraFlame size={34} state={flameState} theme={mode} label="" />
+              </span>
+              <div className="vera-header__text">
+                <div className="vera-header__name">VERA</div>
+                <div className="vera-header__sub">
+                  <span className={`vera-status-dot vera-status-dot--${typing ? "busy" : modelOn ? "online" : "lite"}`} />
+                  {typing ? "Answering…" : modelOn ? "Online" : "Online · Help library"}
                 </div>
               </div>
             </div>
-            <div className="vera-header-actions">
+            <div className="vera-header__actions">
               <button
                 type="button"
                 className="vera-icon-btn"
@@ -406,6 +489,7 @@ export default function VeraChat({
                 type="button"
                 className="vera-icon-btn"
                 aria-label={minimized ? "Expand chat" : "Minimize chat"}
+                title={minimized ? "Expand" : "Minimize"}
                 onClick={() => setMinimized((m) => !m)}
               >
                 <MinusOutlined />
@@ -414,6 +498,7 @@ export default function VeraChat({
                 type="button"
                 className="vera-icon-btn"
                 aria-label="Close chat"
+                title="Close"
                 onClick={closeWindow}
               >
                 <CloseOutlined />
@@ -423,41 +508,45 @@ export default function VeraChat({
 
           {!minimized && (
             <>
-              <div className="vera-full-name">Virtual Environmental Response Assistant</div>
+              <div className="vera-fullname">Virtual Environmental Response Assistant</div>
 
               <div className="vera-messages" ref={scrollRef} aria-live="polite">
                 {showGreeting && (
-                  <div className="vera-msg vera-msg-assistant">
+                  <div className="vera-msg vera-msg--assistant">
                     <div className="vera-bubble">
-                      {status.greeting ||
-                        "Hi! I'm VERA, your Virtual Environmental Response Assistant. Ask me about submitting disposal data, baselines, haulers, organizing cells, statuses, uploads, or common errors."}
+                      <AnswerText>
+                        {status.greeting ||
+                          "Hi! I'm VERA, your Virtual Environmental Response Assistant. Ask me about submitting disposal data, baselines, haulers, organizing cells, statuses, uploads, or common errors."}
+                      </AnswerText>
                     </div>
                   </div>
                 )}
 
                 {messages.map((m) => (
-                  <div
-                    key={m.id}
-                    className={`vera-msg ${m.role === "user" ? "vera-msg-user" : "vera-msg-assistant"}`}
-                  >
-                    <div className={`vera-bubble${m.source === "error" ? " vera-bubble-error" : ""}`}>
-                      {m.source === "error" && <WarningOutlined className="vera-bubble-warn" />}
-                      {m.content}
-                      {m.retry && !typing && (
-                        <button type="button" className="vera-retry-btn" onClick={retryLast}>
-                          <ReloadOutlined /> Retry
-                        </button>
+                  <div key={m.id} className={`vera-msg vera-msg--${m.role === "user" ? "user" : "assistant"}`}>
+                    <div className={`vera-bubble${m.source === "error" ? " vera-bubble--error" : ""}`}>
+                      {m.role === "user" ? (
+                        <span>{m.content}</span>
+                      ) : (
+                        <>
+                          {m.source === "error" && <WarningOutlined className="vera-bubble__warn" />}
+                          <AnswerText>{m.content}</AnswerText>
+                          {m.retry && !typing && (
+                            <button type="button" className="vera-retry-btn" onClick={retryLast}>
+                              <ReloadOutlined /> Retry
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
                 ))}
 
                 {typing && (
-                  <div className="vera-msg vera-msg-assistant">
+                  <div className="vera-msg vera-msg--assistant">
                     <div className="vera-bubble vera-thinking" aria-live="assertive">
-                      <span className="vera-thinking-flame"><VeraFlameIcon size={28} state="thinking" /></span>
-                      <span className="vera-thinking-text">{thinkingMessages[thinkStage]}</span>
-                      <span className="vera-typing" aria-hidden><span /><span /><span /></span>
+                      <VeraFlame size={22} state={flameState} theme={mode} glow={false} label="" />
+                      <span className="vera-thinking__text">{thinkingMessages[thinkStage]}</span>
                       <button type="button" className="vera-cancel-btn" onClick={cancelRequest} aria-label="Cancel request">
                         Cancel
                       </button>
@@ -467,14 +556,9 @@ export default function VeraChat({
 
                 {showGreeting && starters.length > 0 && (
                   <div className="vera-starters">
-                    <div className="vera-starters-label">Try asking:</div>
+                    <div className="vera-starters__label">Try asking:</div>
                     {starters.map((q) => (
-                      <button
-                        key={q}
-                        type="button"
-                        className="vera-starter-chip"
-                        onClick={() => send(q)}
-                      >
+                      <button key={q} type="button" className="vera-starter-chip" onClick={() => send(q)} disabled={typing}>
                         {q}
                       </button>
                     ))}
@@ -483,23 +567,25 @@ export default function VeraChat({
               </div>
 
               {/* Quick actions — reuse the existing support ticket flow (portal only) */}
-              <div className="vera-quick-actions">
-                {!hideTicketActions && (
-                  <>
-                    <button type="button" className="vera-quick-btn" onClick={onOpenNewTicket}>
-                      <FileAddOutlined /> Open a ticket
+              {(!hideTicketActions || messages.length > 0) && (
+                <div className="vera-quick-actions">
+                  {!hideTicketActions && (
+                    <>
+                      <button type="button" className="vera-quick-btn" onClick={onOpenNewTicket}>
+                        <FileAddOutlined /> Open a ticket
+                      </button>
+                      <button type="button" className="vera-quick-btn" onClick={onOpenMyTickets}>
+                        <ProfileOutlined /> My tickets
+                      </button>
+                    </>
+                  )}
+                  {messages.length > 0 && (
+                    <button type="button" className="vera-quick-btn vera-quick-btn--clear" onClick={clearChat} disabled={typing}>
+                      <DeleteOutlined /> Clear
                     </button>
-                    <button type="button" className="vera-quick-btn" onClick={onOpenMyTickets}>
-                      <ProfileOutlined /> My tickets
-                    </button>
-                  </>
-                )}
-                {messages.length > 0 && (
-                  <button type="button" className="vera-quick-btn vera-quick-clear" onClick={clearChat}>
-                    <DeleteOutlined /> Clear
-                  </button>
-                )}
-              </div>
+                  )}
+                </div>
+              )}
 
               {errorText && <div className="vera-inline-error">{errorText}</div>}
 
@@ -513,9 +599,11 @@ export default function VeraChat({
                   value={input}
                   maxLength={MAX_INPUT}
                   rows={1}
-                  placeholder="Ask VERA about the SLF Portal…"
+                  placeholder={hideTicketActions ? "Ask VERA how to do something…" : "Ask VERA about the SLF Portal…"}
                   aria-label="Message to VERA"
                   onChange={(e) => setInput(e.target.value)}
+                  onFocus={() => setInputFocused(true)}
+                  onBlur={() => setInputFocused(false)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -534,7 +622,8 @@ export default function VeraChat({
               </form>
 
               <div className="vera-disclaimer">
-                <MessageOutlined /> VERA gives guidance, not confirmed record data. Verify statuses in the portal.
+                <MessageOutlined />
+                <span>VERA gives guidance, not confirmed record data. Verify statuses in the portal.</span>
               </div>
             </>
           )}

@@ -187,9 +187,11 @@ test("a batch across many submissions is still exactly one bulkWrite", async () 
     const { status, body } = await bulk({
       assignments: [
         row({ truckCapacity: 14 }),
-        row({ truckIndex: 1, vehicleIndex: 1, cellIndex: 3, cellName: "CELL 04", truckCapacity: 9 }),
+        // Already placed in CELL 01 — the row names its own cell and completes
+        // only the capacity (moving placed waste is refused; see below).
+        row({ truckIndex: 1, vehicleIndex: 1, cellIndex: 0, cellName: "CELL 01", truckCapacity: 9 }),
         row({ _id: String(second._id), submissionId: "SUB-BULK-2", truckCapacity: 14 }),
-        row({ _id: String(second._id), submissionId: "SUB-BULK-2", truckIndex: 1, vehicleIndex: 1, cellIndex: 3, cellName: "CELL 04", truckCapacity: 9 }),
+        row({ _id: String(second._id), submissionId: "SUB-BULK-2", truckIndex: 1, vehicleIndex: 1, cellIndex: 0, cellName: "CELL 01", truckCapacity: 9 }),
       ],
     });
     assert.equal(status, 200, body.message);
@@ -208,11 +210,12 @@ test("a successful apply does not echo back every valid row", async () => {
 });
 
 test("a per-vehicle row writes the capacity to that vehicle only", async () => {
-  const { status } = await bulk({
-    assignments: [row({ truckIndex: 1, vehicleIndex: 1, cellIndex: 3, cellName: "CELL 04", truckCapacity: 9 })],
+  const { status, body } = await bulk({
+    assignments: [row({ truckIndex: 1, vehicleIndex: 1, cellIndex: 0, cellName: "CELL 01", truckCapacity: 9 })],
   });
-  assert.equal(status, 200);
+  assert.equal(status, 200, body.message);
   assert.equal(doc.trucks[1].vehicles[1].capacity, 9);
+  assert.equal(doc.trucks[1].vehicles[1].cellIndex, 0, "its cell is unchanged");
   assert.equal(doc.trucks[1].vehicles[0].capacity, undefined, "its sibling is untouched");
   assert.equal(doc.trucks[1].truckCapacity, undefined, "the truck-level capacity is untouched");
 });
@@ -244,20 +247,53 @@ test("a dry run validates and writes nothing", async () => {
   assert.equal(occupancyRefreshes, 0);
 });
 
-test("moving an already-placed volume records a movement, never a duplicate", async () => {
-  // Truck 1's vehicles already sit in CELL 01; move vehicle 0 to CELL 02.
-  const { status } = await bulk({
+test("REGRESSION — waste that is already placed is not moved by the organizer", async () => {
+  // Truck 1's vehicles already sit in CELL 01. The organizer places UNPLACED
+  // waste; moving placed waste is an EMB correction, so this row is refused and
+  // nothing is written.
+  const { status, body } = await bulk({
     assignments: [row({ truckIndex: 1, vehicleIndex: 0, cellIndex: 1, cellName: "CELL 02" })],
   });
+  assert.equal(status, 400);
+  assert.equal(body.rows[0].code, "already_placed");
+  assert.match(body.rows[0].message, /CELL 01/);
+  assert.equal(doc.trucks[1].vehicles[0].cellIndex, 0, "not moved");
+  assert.equal(doc.cellCorrections.length, 0);
+  assert.equal(writes.length, 0);
+});
+
+test("naming the cell a slot already has completes only its capacity", async () => {
+  const { status, body } = await bulk({
+    dryRun: true,
+    assignments: [row({ truckIndex: 1, vehicleIndex: 0, cellIndex: 0, cellName: "CELL 01", truckCapacity: 12 })],
+  });
   assert.equal(status, 200);
-  assert.equal(doc.trucks[1].vehicles[0].cellIndex, 1, "moved");
-  assert.equal(doc.trucks[1].vehicles[0].actualVolume, 30, "VOLUME UNCHANGED — a move, not an addition");
-  assert.equal(doc.trucks[1].vehicles[1].cellIndex, 0, "its sibling stayed");
-  assert.equal(doc.cellCorrections.length, 1);
-  assert.equal(doc.cellCorrections[0].fromCellIndex, 0);
-  assert.equal(doc.cellCorrections[0].toCellIndex, 1);
-  assert.equal(doc.cellCorrections[0].source, "portal_bulk");
-  assert.equal(doc.trucks.length, 2, "no submission or truck was created");
+  assert.equal(body.rows[0].code, "capacity_only");
+});
+
+test("waste type must fit the cell type", async () => {
+  const prev = FACILITY.cellTypes;
+  FACILITY.cellTypes = ["Residual", "Treated Haz Waste", "Residual", "Residual"];
+  try {
+    const { status, body } = await bulk({ assignments: [row({ truckCapacity: 14 })] }); // Residual → haz cell
+    assert.equal(status, 400);
+    assert.equal(body.rows[0].code, "type_mismatch");
+    assert.equal(writes.length, 0);
+  } finally {
+    FACILITY.cellTypes = prev;
+  }
+});
+
+test("a cell EMB closed for submissions is refused", async () => {
+  FACILITY.cellSubmissionAllowed = [true, false, true, true];
+  try {
+    const { status, body } = await bulk({ assignments: [row({ truckCapacity: 14 })] });
+    assert.equal(status, 400);
+    assert.equal(body.rows[0].code, "unavailable");
+    assert.match(body.rows[0].message, /closed/i);
+  } finally {
+    delete FACILITY.cellSubmissionAllowed;
+  }
 });
 
 test("a ticket that disagrees with the resolved trip is rejected", async () => {
@@ -289,4 +325,74 @@ test("a locked submission is refused", async () => {
   assert.equal(status, 400);
   assert.equal(body.rows[0].code, "locked");
   assert.equal(writes.length, 0);
+});
+
+// ── The single-save route (the organizer's "Save Placement") enforces the same
+//    rulings as the bulk path. ──────────────────────────────────────────────
+async function patchOne(assignments) {
+  const prevFindOne = DataSLF.findOne;
+  // The route loads one hydrated document and save()s it.
+  doc.save = async () => doc;
+  doc.markModified = () => {};
+  DataSLF.findOne = () => doc;
+  try {
+    const res = await fetch(`${baseUrl}/api/data-slf/${SUB_ID}/portal-cell-assignments`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ submittedBy: EMAIL, assignments }),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  } finally {
+    DataSLF.findOne = prevFindOne;
+  }
+}
+
+test("Save Placement places unplaced waste", async () => {
+  const { status, body } = await patchOne([{ truckIndex: 0, cellIndex: 1, cellName: "CELL 02", cellType: "Residual" }]);
+  assert.equal(status, 200, body.message);
+  assert.equal(doc.trucks[0].cellIndex, 1);
+});
+
+test("REGRESSION — Save Placement refuses to move waste that is already placed", async () => {
+  const { status, body } = await patchOne([{ truckIndex: 1, vehicleIndex: 0, cellIndex: 1, cellName: "CELL 02" }]);
+  assert.equal(status, 400);
+  assert.match(body.message, /already placed in CELL 01/);
+  assert.equal(doc.trucks[1].vehicles[0].cellIndex, 0, "not moved");
+});
+
+test("Save Placement completes a capacity for placed waste without touching its cell", async () => {
+  const { status, body } = await patchOne([{ truckIndex: 1, vehicleIndex: 0, truckCapacity: 12, truckCapacityUnit: "tons" }]);
+  assert.equal(status, 200, body.message);
+  assert.equal(doc.trucks[1].vehicles[0].capacity, 12);
+  assert.equal(doc.trucks[1].vehicles[0].cellIndex, 0);
+});
+
+test("REGRESSION — Save Placement checks the COMBINED volume against the cell's room", async () => {
+  const prevFill = FACILITY.cellFillValues;
+  // CELL 02 has 25 t left; truck 0 alone (20 t) fits, but a second unplaced 20 t load does not.
+  FACILITY.cellFillValues = [0, 975, 0, 0];
+  doc.trucks.push({ disposalTicketNo: "DT-3", plateNumber: "DDD-4444", wasteType: "Residual", actualVolume: 20, actualVolumeUnit: "tons", vehicles: [] });
+  try {
+    const { status, body } = await patchOne([
+      { truckIndex: 0, cellIndex: 1, cellName: "CELL 02" },
+      { truckIndex: 2, cellIndex: 1, cellName: "CELL 02" },
+    ]);
+    assert.equal(status, 400);
+    assert.match(body.message, /Row 2 .*remaining capacity/);
+    assert.equal(doc.trucks[0].cellIndex, undefined, "all-or-nothing: the first row is not written either");
+  } finally {
+    FACILITY.cellFillValues = prevFill;
+  }
+});
+
+test("Save Placement refuses waste whose type does not fit the cell", async () => {
+  const prev = FACILITY.cellTypes;
+  FACILITY.cellTypes = ["Residual", "Treated Haz Waste", "Residual", "Residual"];
+  try {
+    const { status, body } = await patchOne([{ truckIndex: 0, cellIndex: 1, cellName: "CELL 02" }]);
+    assert.equal(status, 400);
+    assert.match(body.message, /cannot go into a Treated Haz Waste cell/);
+  } finally {
+    FACILITY.cellTypes = prev;
+  }
 });

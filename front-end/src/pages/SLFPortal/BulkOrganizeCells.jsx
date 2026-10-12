@@ -76,7 +76,11 @@ const STATUS_META = {
 };
 
 const CODE_LABEL = {
-  reassigned: "Already Assigned",
+  // Placed waste is never moved by the organizer (an EMB correction); naming the
+  // cell it already has completes only its Truck Capacity.
+  already_placed: "Already Placed",
+  capacity_only: "Capacity Only",
+  type_mismatch: "Wrong Cell Type",
   capacity: "Capacity Exceeded",
   unavailable: "Cell Unavailable",
   not_found: "Unknown Submission",
