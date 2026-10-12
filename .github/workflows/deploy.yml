@@ -142,5 +142,4 @@ jobs:
             esac
             sleep 10
           done
-          echo "::error::Public health check failed after deploy"
-          exit 1
+          echo "::error::Public health check failed after deploy"; exit 1
