@@ -66,8 +66,19 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: front-end/package-lock.json
+          cache-dependency-path: |
+            front-end/package-lock.json
+            server/package-lock.json
       - run: npm ci
+      # Several front-end suites exercise SERVER code directly — the Data Entry
+      # bulk-upload UAT mounts the real Express routes, the workbook test runs
+      # server/scripts/generateDevTestWorkbook.js, and the feature-tour test loads
+      # VERA's knowledge base (which requires @anthropic-ai/sdk). Without the
+      # server's packages those three failed with "Cannot find module 'express'"
+      # / '@anthropic-ai/sdk', so this job could never go green.
+      - name: Install server dependencies (used by cross-package tests)
+        working-directory: server
+        run: npm ci
       - name: Unit tests
         run: npm test
       - name: Lint (report only)
