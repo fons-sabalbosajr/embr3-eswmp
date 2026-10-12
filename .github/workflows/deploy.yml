@@ -134,7 +134,11 @@ jobs:
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/eswm-pipeline/api/health || true)
             echo "attempt $i → HTTP $code"
             case "$code" in
-              200|403) exit 0 ;;
+              200) exit 0 ;;
+              403)
+                echo "::warning::Public health check received HTTP 403 (edge/WAF block). VPS-local health check already passed."
+                exit 0
+                ;;
             esac
             sleep 10
           done
