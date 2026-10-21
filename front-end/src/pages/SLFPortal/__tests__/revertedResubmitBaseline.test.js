@@ -188,6 +188,20 @@ test("the entry being corrected does not count as an unresolved revert", () => {
   assert.match(src, /\}, \[submissions, editingRevertedId\]\);/);
 });
 
+test("OTHER stale reverts do not block resubmitting a reverted entry", () => {
+  // Excluding only the entry being edited left accounts with 2+ stale reverts in
+  // a deadlock: each reverted entry disabled Review & Submit for the others, so
+  // none could be resubmitted (Prime Waste Solution had 4, Eco Protect 17). The
+  // server's PUT /data-slf/:id runs neither new-submission gate.
+  assert.match(src, /if \(unresolvedRevert && !editingRevertedId\) \{/);
+  assert.match(
+    src,
+    /if \(ORGANIZE_CELLS_ENABLED && unplacedSubmissions\.length > 0 && !editingRevertedId\) \{/,
+  );
+  // …and a NEW submission is still refused while a revert sits unresolved.
+  assert.match(src, /if \(unresolvedRevert\) \{\s*showError\(\{\s*type: "error",\s*title: "Resolve Reverted Submission First"/);
+});
+
 test("the submit blockers NAME the fields that are failing", () => {
   // One sentence ending "(incl. a disposal cell for each entry)" is a single
   // example presented as the whole problem. On SLF-LGU-PA-0016 the failures were

@@ -6725,10 +6725,19 @@ export default function SLFPortal() {
     if (haulerVehiclesMissingCapacity.length > 0) {
       list.push("Add Vehicle Capacity for every accredited-hauler vehicle.");
     }
-    if (unresolvedRevert) {
+    // These two are NEW-submission rules. A resubmission is how a revert gets
+    // resolved, and the server's PUT /data-slf/:id runs neither gate — so they
+    // must not disable Review & Submit while a reverted entry is being corrected.
+    //
+    // Excluding only the entry being edited (see unresolvedRevert) was not
+    // enough: with two or more stale reverts, each one blocked the resubmission
+    // of the others, so none could ever be resubmitted. Live: Prime Waste
+    // Solution had 4 (SLF-LGU-PA-0018, SLF-PVT-PA-0167/0198/0202), Eco Protect 17,
+    // General Tinio 7 — permanently locked out of submitting.
+    if (unresolvedRevert && !editingRevertedId) {
       list.push("Correct and resubmit your reverted submission first.");
     }
-    if (ORGANIZE_CELLS_ENABLED && unplacedSubmissions.length > 0) {
+    if (ORGANIZE_CELLS_ENABLED && unplacedSubmissions.length > 0 && !editingRevertedId) {
       list.push("Organize past submissions in Organize Cells — assign cells and complete any missing truck capacity.");
     }
     return list;
@@ -6747,6 +6756,7 @@ export default function SLFPortal() {
     haulerVehiclesMissingCapacity.length,
     unresolvedRevert,
     unplacedSubmissions.length,
+    editingRevertedId,
   ]);
 
   // Item #2: prominent one-time notice after login when the assigned SLF is
