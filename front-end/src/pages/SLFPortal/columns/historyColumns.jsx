@@ -34,7 +34,7 @@ export function makeHistoryColumns({
   // detail modal, which shows the full record.
   //
   //   xs  (<576)  ID No. · Date · Status · Actions
-  //   md  (>=768) + # · Entries
+  //   md  (>=768) + # · Entries · Remarks
   //   lg  (>=992) + Type · Submitted
   //   xl  (>=1200) + Company/Address · Cell Assigned
   const FROM_MD = ["md", "lg", "xl", "xxl"];
@@ -215,15 +215,13 @@ export function makeHistoryColumns({
             );
           }
           if (v === "reverted" || v === "editApproved") {
+            // Labelled. This was an icon-only tag, so the one status that needs the
+            // operator to act read as a blank orange chip. The revert reason now
+            // lives in the Remarks column.
             return (
-              <Space direction="vertical" size={2}>
-                <Tag icon={<UndoOutlined />} color="volcano" />
-                {r.revertReason && (
-                  <Text type="secondary" style={{ fontSize: 10 }}>
-                    {r.revertReason}
-                  </Text>
-                )}
-              </Space>
+              <Tag icon={<UndoOutlined />} color="volcano">
+                {v === "editApproved" ? "EDIT APPROVED" : "REVERTED"}
+              </Tag>
             );
           }
           if (v === "revert_requested") {
@@ -241,6 +239,81 @@ export function makeHistoryColumns({
             >
               PENDING REVIEW
             </Tag>
+          );
+        },
+      },
+      {
+        title: "Remarks",
+        key: "remarks",
+        width: 220,
+        responsive: FROM_MD,
+        // What the operator needs to know about the row, in words: why it was
+        // reverted (and that it is waiting on them), or that it is a RESUBMISSION
+        // with the note they sent back. Same `resubmission` summary the admin
+        // Submissions Remarks column reads (server utils/resubmission.js).
+        render: (_, r) => {
+          const rows = r.isGroup ? r.children || [] : [r];
+          const reverted = rows.filter(
+            (c) => c.status === "reverted" || c.status === "editApproved",
+          );
+          const resubmitted = rows.filter((c) => c.resubmission);
+          if (!reverted.length && !resubmitted.length) {
+            return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+          }
+          if (r.isGroup) {
+            return (
+              <Space size={4} wrap>
+                {reverted.length > 0 && (
+                  <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                    {reverted.length} need correction
+                  </Tag>
+                )}
+                {resubmitted.length > 0 && (
+                  <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                    <SyncOutlined /> {resubmitted.length} resubmitted
+                  </Tag>
+                )}
+              </Space>
+            );
+          }
+          const resub = r.resubmission;
+          return (
+            <Space direction="vertical" size={2} style={{ width: "100%" }}>
+              {reverted.length > 0 && (
+                <>
+                  <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
+                    Needs correction — Edit &amp; Resubmit
+                  </Tag>
+                  {r.revertReason && (
+                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: r.revertReason }}>
+                      Reason: {r.revertReason}
+                    </Text>
+                  )}
+                </>
+              )}
+              {resub && (
+                <>
+                  <Tooltip
+                    title={
+                      [
+                        resub.at ? `Resubmitted ${dayjs(resub.at).format("MMM D, YYYY h:mm A")}` : "Resubmitted after revert",
+                        resub.previousIdNo ? `was ${resub.previousIdNo}` : "",
+                        resub.revertReason ? `Reverted for: ${resub.revertReason}` : "",
+                      ].filter(Boolean).join(" · ")
+                    }
+                  >
+                    <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
+                      <SyncOutlined /> Resubmission{resub.count > 1 ? ` ×${resub.count}` : ""}
+                    </Tag>
+                  </Tooltip>
+                  {resub.comment && (
+                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: resub.comment }}>
+                      “{resub.comment}”
+                    </Text>
+                  )}
+                </>
+              )}
+            </Space>
           );
         },
       },
@@ -280,7 +353,28 @@ export function makeHistoryColumns({
         key: "actions",
         width: 150,
         align: "center",
-        render: (_, r) => (
+        render: (_, r) => {
+          // A GROUP row is a synthetic parent (its _id is "sid:<submissionId>"),
+          // not a record. When every child shares one status the group inherits
+          // it, so an all-reverted batch used to show Edit & Resubmit and Remove
+          // on the parent — both of which sent that synthetic id to the server.
+          // The per-record actions live on the child rows of the expanded group.
+          if (r.isGroup) {
+            const pending = (r.children || []).filter(
+              (c) => c.status === "reverted" || c.status === "editApproved",
+            ).length;
+            return pending ? (
+              <Tooltip title="Expand this group to correct and resubmit each reverted entry">
+                <Tag color="volcano" style={{ fontSize: 11 }}>
+                  {pending} to resubmit
+                </Tag>
+              </Tooltip>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+            );
+          }
+          const needsResubmit = r.status === "reverted" || r.status === "editApproved";
+          return (
           <Space size="small">
             <Tooltip title="View Details">
               <Button
@@ -311,8 +405,8 @@ export function makeHistoryColumns({
                   Edit Pending
                 </Tag>
               )}
-            {(r.status === "reverted" || r.status === "editApproved") && (
-              <Tooltip title="Edit & Resubmit">
+            {needsResubmit && (
+              <Tooltip title="Correct this entry and send it back for review">
                 <Button
                   type="primary"
                   size="small"
@@ -320,21 +414,28 @@ export function makeHistoryColumns({
                   onClick={() => handleEditRevertedRow(r)}
                   style={{ background: "#fa541c", borderColor: "#fa541c" }}
                 >
-                  Edit
+                  Resubmit
                 </Button>
               </Tooltip>
             )}
-            <Tooltip title="Remove from my history (admin keeps a record)">
-              <Button
-                type="text"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={() => handleHideSubmission(r)}
-              />
-            </Tooltip>
+            {/* Not offered on a reverted row: the server refuses to hide one (it
+                is waiting on this operator), and offering the button anyway is
+                how operators ended up trying to delete the entry they were meant
+                to resubmit (rtabella@piwsi.ph, SLF-PVT-PA-0202, 5 attempts). */}
+            {!needsResubmit && (
+              <Tooltip title="Remove from my history (admin keeps a record)">
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={() => handleHideSubmission(r)}
+                />
+              </Tooltip>
+            )}
           </Space>
-        ),
+          );
+        },
       },
   ];
 }

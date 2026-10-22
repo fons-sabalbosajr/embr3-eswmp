@@ -32,6 +32,7 @@ import {
   CloseCircleOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
+import { isResubmissionRecord } from "../../utils/resubmission";
 import api from "../../api";
 import { classifySlfStatus, presentationFor } from "../../utils/submissionStatus";
 import { getSocket } from "../../utils/socket";
@@ -94,7 +95,6 @@ const groupBySubmission = (records = []) => {
 };
 
 const isPendingStatus = (r) => String(r.status || "").toLowerCase() === "pending";
-const isResubmissionRecord = (r) => Array.isArray(r.previousIdNos) && r.previousIdNos.length > 0;
 
 // One submission event → one tracker bucket. Pending wins over acknowledged so a
 // partly-reviewed event still shows as needing attention, mirroring the
@@ -650,7 +650,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       const unit = normalizeUnit(record.baselineUnit) || "m³";
       const ref = record.idNo || record.submissionId || "—";
       const status = record.status || "—";
-      const isResub = Array.isArray(record.previousIdNos) && record.previousIdNos.length > 0;
+      const isResub = isResubmissionRecord(record);
       const statusKey =
         String(status).toLowerCase() === "pending" && isResub
           ? "resubmitted"

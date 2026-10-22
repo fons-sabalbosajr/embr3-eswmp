@@ -61,6 +61,7 @@ import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import { withSizeChanger } from "../../utils/tablePagination";
 import dayjs from "dayjs";
+import { isResubmissionRecord } from "../../utils/resubmission";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import MergeSlfModal from "./MergeSlfModal";
 import VeraFlameIcon from "../../components/VeraFlameIcon";
@@ -1810,8 +1811,55 @@ export default function SubmissionSettings({
         );
         const color = { error: "red", warning: "orange", info: "blue" };
         const generating = isActing(`${r._id}:vera`);
+        // RESUBMISSION first: the portal user corrected a reverted entry and sent
+        // it back, so the reviewer reads it as a response to their revert. The
+        // review flags below still run on the corrected data as usual. The
+        // summary comes from the server (utils/resubmission.js) — the same one the
+        // portal's Submission History Remarks column shows the operator.
+        const resubs = sources.map((e) => e?.resubmission).filter(Boolean);
+        const latestResub = resubs.reduce(
+          (best, cur) => (!best || new Date(cur.at || 0) > new Date(best.at || 0) ? cur : best),
+          null,
+        );
         return (
           <Space direction="vertical" size={4} style={{ width: "100%" }}>
+            {latestResub && (
+              <Tooltip
+                title={
+                  <span>
+                    {latestResub.at
+                      ? `Resubmitted ${dayjs(latestResub.at).format("MM/DD/YYYY hh:mm A")}`
+                      : "Resubmitted after revert"}
+                    {latestResub.count > 1 ? ` (${latestResub.count} times)` : ""}
+                    {latestResub.previousIdNo ? ` · was ${latestResub.previousIdNo}` : ""}
+                    {latestResub.revertReason ? (
+                      <>
+                        <br />
+                        Reverted for: {latestResub.revertReason}
+                      </>
+                    ) : null}
+                    {latestResub.comment ? (
+                      <>
+                        <br />
+                        Portal user&apos;s note: “{latestResub.comment}”
+                      </>
+                    ) : null}
+                  </span>
+                }
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <Tag color="gold" style={{ fontSize: 10, margin: 0, width: "fit-content" }}>
+                    <ReloadOutlined /> Resubmission
+                    {resubs.length > 1 ? ` (${resubs.length})` : latestResub.count > 1 ? ` ×${latestResub.count}` : ""}
+                  </Tag>
+                  {latestResub.comment && (
+                    <Text type="secondary" style={{ fontSize: 10.5 }} ellipsis>
+                      “{latestResub.comment}”
+                    </Text>
+                  )}
+                </div>
+              </Tooltip>
+            )}
             {items.length ? (
               <Space size={[2, 2]} wrap>
                 {items.map(([text, { level, detail }]) => (
@@ -2409,9 +2457,7 @@ export default function SubmissionSettings({
                   render: (_, entry, index) => {
                     // #6B: a resubmitted record (carries prior idNo in previousIdNos)
                     // is badged and shows its original reference for traceability.
-                    const isResub =
-                      entry.isResubmission ||
-                      (Array.isArray(entry.previousIdNos) && entry.previousIdNos.length > 0);
+                    const isResub = entry.isResubmission || isResubmissionRecord(entry);
                     const origRef = Array.isArray(entry.previousIdNos) && entry.previousIdNos.length
                       ? entry.previousIdNos[entry.previousIdNos.length - 1]
                       : null;

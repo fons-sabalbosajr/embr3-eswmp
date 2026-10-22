@@ -549,7 +549,16 @@ router.post("/:id/submit", async (req, res) => {
         meta: { queueId: record._id },
       });
       const code = submitErr.statusCode || 400;
-      res.status(code).json({ message: record.failureReason, data: record });
+      // Pass the machine-readable reason through (e.g. UNRESOLVED_REVERT + the
+      // blocking entry's id) so the Drafts panel can offer the fix directly.
+      res.status(code).json({
+        message: record.failureReason,
+        data: record,
+        // String codes only — a driver error's numeric `code` (e.g. 11000) is
+        // not one of our rule codes.
+        ...(typeof submitErr.code === "string" ? { code: submitErr.code } : {}),
+        ...(submitErr.ruleContext ? { ruleContext: submitErr.ruleContext } : {}),
+      });
     }
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

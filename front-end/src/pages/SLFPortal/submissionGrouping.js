@@ -22,10 +22,12 @@
 // grows, move this to an aggregation — do NOT start fetching more than the table
 // already needs.
 
+import { isResubmissionRecord } from "../../utils/resubmission.js";
+
 const norm = (v) => String(v || "").trim().toLowerCase();
 
-// A submission is a resubmission once it carries prior idNo(s).
-const isResub = (s) => Array.isArray(s?.previousIdNos) && s.previousIdNos.length > 0;
+// A resubmission: a reverted entry corrected and sent back (see utils/resubmission).
+const isResub = isResubmissionRecord;
 
 // Latest RELEVANT activity for sorting: resubmittedAt (updatedAt) for a
 // resubmission, otherwise submittedAt (createdAt). Missing/invalid → 0 (oldest).

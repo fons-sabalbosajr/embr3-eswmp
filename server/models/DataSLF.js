@@ -264,6 +264,14 @@ const dataSLFSchema = new mongoose.Schema(
     revertFollowUpSubject: { type: String, trim: true },
     revertFollowUpMessage: { type: String, trim: true },
     revertFollowUpSentAt: { type: Date },
+    // Resubmission trail. A resubmission keeps its ID No. (PUT /data-slf/:id), so
+    // `previousIdNos` no longer marks one — these do. Written when a REVERTED
+    // record is corrected and sent back; `resubmittedRevertReason` keeps the
+    // reason it answered, because the resubmit clears `revertReason`.
+    resubmittedAt: { type: Date },
+    resubmitCount: { type: Number, default: 0 },
+    resubmitComment: { type: String, trim: true },
+    resubmittedRevertReason: { type: String, trim: true },
     temporaryDeleteAfter: { type: Date },
     submittedBy: { type: String, trim: true },
     // Soft delete

@@ -29,6 +29,7 @@ const { notifyAdmin } = require("../utils/socketEmit");
 // Report arithmetic lives outside the route: the route's job is identity, the
 // module's is aggregation, and the latter is then testable without a database.
 const { buildPortalReport } = require("../utils/portalReport");
+const { RESUBMISSION_FIELDS, resubmissionSummary } = require("../utils/resubmission");
 const Notification = require("../models/Notification");
 const {
   resolvePortalContext,
@@ -58,6 +59,8 @@ const PORTAL_SUBMISSION_LIST_FIELDS = [
   "dateOfDisposal lguCompanyName companyType address",
   "companyRegion companyProvince companyMunicipality companyBarangay",
   "status revertRequested revertReason revertRequestedAt revertedAt revertedBy",
+  // Drives the history's Remarks column ("Resubmission" + the operator's note).
+  RESUBMISSION_FIELDS,
   "submittedBy createdAt updatedAt isDummy hiddenFromPortal",
   "truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons",
   "hazardousVolumeM3 hazardousVolumeTons",
@@ -1036,7 +1039,13 @@ router.get("/my-submissions", async (req, res) => {
     const rows = submissions.map((entry) => {
       const { cellsAssigned, unplacedCount, missingCapacityCount } = summarizeCellAssignment(entry);
       const { trucks, ...rest } = entry;
-      return { ...rest, cellsAssigned, unplacedCount, missingCapacityCount };
+      return {
+        ...rest,
+        cellsAssigned,
+        unplacedCount,
+        missingCapacityCount,
+        resubmission: resubmissionSummary(entry),
+      };
     });
 
     // REVERTED FIRST — these are the only rows that need the operator to do

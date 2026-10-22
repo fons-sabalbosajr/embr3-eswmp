@@ -52,10 +52,18 @@ export default function AssignedSlfDashboard({
   handleSaveDraft,
   savingDraft = false,
   handleOpenWasteReceived,
+  // The stale reverted entry that is blocking NEW submissions ({ _id, idNo }),
+  // and the handler that opens it in Edit & Resubmit. Lets the blocker list
+  // offer the fix instead of only describing it.
+  revertToResolve = null,
+  onResolveRevert,
+  // ID No. of the reverted entry currently being corrected, if any.
+  resubmittingIdNo = null,
 }) {
   // #5: Review & Submit is disabled until every submission requirement is met.
   const submitDisabled = submitBlockers.length > 0;
   return (
+    <>
             <Card
               className="slf-section slf-facility-card"
               styles={{
@@ -1381,6 +1389,51 @@ export default function AssignedSlfDashboard({
                 </div>
               )}
             </Card>
+      {/* Outside the Card: its body is collapsed (maxHeight 0), so anything
+          placed inside it never renders. */}
+      {resubmittingIdNo && (
+        <Alert
+        type="info"
+        showIcon
+        style={{ marginTop: 12 }}
+        message={
+          <Text style={{ fontSize: 12.5 }}>
+            You are correcting reverted entry <Text strong>{resubmittingIdNo}</Text>.{" "}
+            <Text strong>Review &amp; Submit</Text> will resubmit it for EMB Region III review,
+            labelled as a Resubmission.
+          </Text>
+        }
+      />
+    )}
+      {revertToResolve && onResolveRevert && (
+        <Alert
+        type="error"
+        showIcon
+        style={{ marginTop: 12 }}
+        message={
+          <Text strong style={{ fontSize: 13 }}>
+            Reverted entry {revertToResolve.idNo || ""} is waiting for your correction
+          </Text>
+        }
+        description={
+          <Text style={{ fontSize: 12.5 }}>
+            New submissions and drafts cannot be submitted until it is corrected and resubmitted.
+            {revertToResolve.revertReason ? ` Reason: ${revertToResolve.revertReason}` : ""}
+          </Text>
+        }
+        action={
+          <Button
+            size="small"
+            type="primary"
+            style={{ background: "#fa541c", borderColor: "#fa541c" }}
+            onClick={() => onResolveRevert(revertToResolve)}
+          >
+            Resubmit {revertToResolve.idNo || "now"}
+          </Button>
+        }
+      />
+    )}
+    </>
   );
 }
 

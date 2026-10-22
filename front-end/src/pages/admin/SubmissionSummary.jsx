@@ -39,6 +39,7 @@ import {
   MessageOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
+import { isResubmissionRecord } from "../../utils/resubmission";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 // FullCalendar is heavy; load it only when the disposal calendar modal opens.
 const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
@@ -1090,7 +1091,7 @@ export default function SubmissionSummary({ isDark }) {
       });
       const totalVol = tons + m3;
       const unit = units.size === 1 ? [...units][0] : normalizeUnit(record.baselineUnit || facUnit || "tons");
-      const isResub = Array.isArray(record.previousIdNos) && record.previousIdNos.length > 0;
+      const isResub = isResubmissionRecord(record);
       const acknowledged = String(record.status || "") === "acknowledged";
 
       const issues = [];

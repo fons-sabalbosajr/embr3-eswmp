@@ -6663,6 +6663,14 @@ export default function SLFPortal() {
     );
   }, [submissions, editingRevertedId]);
 
+  // ID No. of the reverted entry open in Edit & Resubmit, for the "you are
+  // correcting …" banner above the form.
+  const resubmittingIdNo = useMemo(() => {
+    if (!editingRevertedId) return null;
+    const row = (submissions || []).find((s) => String(s._id) === String(editingRevertedId));
+    return row?.idNo || "this entry";
+  }, [submissions, editingRevertedId]);
+
   // #5: single source of truth for what still blocks a submission. Drives the
   // disabled state + tooltip on "Review & Submit" (frontend), and mirrors the
   // rules the server re-enforces (validateWasteGeneration + transport checks) plus
@@ -7163,6 +7171,9 @@ export default function SLFPortal() {
         // #2: backend rule block (also enforced server-side to prevent API bypass) —
         // show a clear modal with a direct action to the correction flow.
         const ctxId = err.response?.data?.ruleContext?.idNo;
+        // The server names the blocking entry by id too, so open it straight in
+        // Edit & Resubmit when it can; Submission History is the fallback.
+        const blockingId = err.response?.data?.ruleContext?.id;
         Swal.fire({
           icon: "warning",
           title: "Resolve Reverted Submission First",
@@ -7170,11 +7181,15 @@ export default function SLFPortal() {
             err.response?.data?.message ||
             `Please correct and resubmit your reverted submission${ctxId ? ` (${ctxId})` : ""} before submitting a new transaction.`,
           showCancelButton: true,
-          confirmButtonText: "Review Submission History",
+          confirmButtonText: blockingId
+            ? `Edit & Resubmit${ctxId ? ` ${ctxId}` : ""}`
+            : "Review Submission History",
           cancelButtonText: "Close",
           confirmButtonColor: "#1a3353",
         }).then((r) => {
-          if (r.isConfirmed) setActiveMenu("history");
+          if (!r.isConfirmed) return;
+          if (blockingId) handleEditRevertedRow({ _id: blockingId });
+          else setActiveMenu("history");
         });
       } else {
         showError({
@@ -7984,6 +7999,9 @@ export default function SLFPortal() {
               handleSaveDraft={stableSaveDraft}
               savingDraft={savingDraft}
               handleOpenWasteReceived={stableOpenWasteReceived}
+              revertToResolve={editingRevertedId ? null : unresolvedRevert}
+              onResolveRevert={stableEditRevertedRow}
+              resubmittingIdNo={resubmittingIdNo}
             />
 
             {/* Disposal Data Form */}
@@ -9516,6 +9534,7 @@ export default function SLFPortal() {
               isMobile={isMobile}
               onSubmitted={handleDraftSubmitted}
               onAttentionCountChange={setQueueAttentionCount}
+              onResolveRevert={(id) => stableEditRevertedRow({ _id: id })}
             />
           )}
         </Content>

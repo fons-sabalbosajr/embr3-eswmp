@@ -405,8 +405,12 @@ function matchesSlfIdentity(item, requestedName) {
   return false;
 }
 
-const isResubmissionEntry = (e) =>
-  Array.isArray(e?.previousIdNos) && e.previousIdNos.length > 0;
+// What makes a record a resubmission — shared with the portal history.
+const {
+  IS_RESUBMISSION_EXPR,
+  isResubmissionEntry,
+  resubmissionSummary,
+} = require("../utils/resubmission");
 
 const isSlfNonOperational = (statusOfSLF) => /non/i.test(String(statusOfSLF || ""));
 
@@ -1435,6 +1439,7 @@ function enrichSubmissionRow(raw, { allowancePct = 10, includeTrucks = false, de
   return {
     ...entry,
     isResubmission: isResubmissionEntry(entry),
+    resubmission: resubmissionSummary(entry),
     truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
     // `derive: false` returns the RECORD without the table's computed columns.
     //
@@ -2423,7 +2428,9 @@ async function assertNoUnresolvedRevert(email) {
     // Machine-readable reason so the Portal can show the right rule modal + action
     // (Edit and Resubmit), instead of parsing the human message (#2).
     error.code = "UNRESOLVED_REVERT";
-    error.ruleContext = { idNo: stale.idNo || null };
+    // `id` lets the Portal open THAT entry in Edit & Resubmit directly, instead
+    // of sending the operator to find it in Submission History.
+    error.ruleContext = { idNo: stale.idNo || null, id: String(stale._id) };
     throw error;
   }
 }
@@ -3001,10 +3008,31 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
   try {
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Entry not found" });
+    // A portal user may only resubmit their OWN entry. Without this, any signed-in
+    // operator could overwrite another account's reverted/pending submission by
+    // changing the id in the URL. Developer/admin callers are not the constrained
+    // subject here (Developer Portal Mode is audited elsewhere).
+    if (req.user?.role === "portal_user") {
+      const caller = await UserPortal.findById(req.user.id).select("email").lean();
+      const callerEmail = String(caller?.email || "").trim().toLowerCase();
+      if (!callerEmail || callerEmail !== String(entry.submittedBy || "").trim().toLowerCase()) {
+        writeLog("warn", "submission.resubmit.denied", {
+          message: `Portal user tried to update another account's entry ${entry.idNo || entry._id}`,
+          user: callerEmail || String(req.user.id),
+          ip: req.ip,
+          meta: { id: entry._id },
+        });
+        return res.status(403).json({ message: "You can only update your own submissions." });
+      }
+    }
     await ensurePortalAccountCanSubmit(entry.submittedBy);
     if (entry.status !== "reverted" && entry.status !== "pending") {
       return res.status(400).json({ message: "Only reverted or pending entries can be updated" });
     }
+    // Only correcting a REVERTED entry is a resubmission; editing one that is
+    // still pending is not, and must not be labelled as one.
+    const wasReverted = entry.status === "reverted";
+    const answeredRevertReason = entry.revertReason || "";
 
     const allowedFields = [
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
@@ -3029,6 +3057,16 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
       return res.status(400).json({ message: updateErrors.join(" ") });
     }
     applyEntryUpdates(entry, sanitizedBody, allowedFields, req, "submission.resubmit");
+    const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
+    if (wasReverted) {
+      // Stored on the record so the Remarks columns (admin Submissions and the
+      // portal history) can say "Resubmission" with the operator's note — it used
+      // to live only in the Transaction log, and the ID No. no longer changes.
+      entry.resubmittedAt = new Date();
+      entry.resubmitCount = Number(entry.resubmitCount || 0) + 1;
+      entry.resubmitComment = resubmitComment.slice(0, 1000);
+      entry.resubmittedRevertReason = answeredRevertReason;
+    }
     entry.status = "pending";
     entry.revertReason = "";
     entry.revertedBy = "";
@@ -3069,8 +3107,6 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     // again. Recomputed, never incremented — the pre-revert volume cannot be
     // double-counted alongside the corrected one.
     await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
-
-    const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
 
     try {
       await Transaction.create({
@@ -4464,7 +4500,7 @@ router.get("/today-status", adminOnly, async (req, res) => {
           latestDate: { $first: "$dateOfDisposal" },
           // Keep only the most recent entries (bounded) — enough to cover the
           // latest calendar day plus its resubmission context.
-          entries: { $push: { d: "$dateOfDisposal", s: "$status", resub: { $gt: [ { $size: { $ifNull: ["$previousIdNos", []] } }, 0 ] } } },
+          entries: { $push: { d: "$dateOfDisposal", s: "$status", resub: IS_RESUBMISSION_EXPR } },
           submissionCount: { $sum: 1 },
           totalVolume: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
         } },
@@ -4526,7 +4562,7 @@ router.get("/today-status", adminOnly, async (req, res) => {
         // normalizeStatus maps to "pending", which would misclassify every initial
         // pending as a resubmission and hide the yellow Pending icon).
         resubStatuses: { $push: { $cond: [
-          { $gt: [ { $size: { $ifNull: ["$previousIdNos", []] } }, 0 ] },
+          IS_RESUBMISSION_EXPR,
           "$status",
           null,
         ] } },
@@ -5497,7 +5533,7 @@ router.get("/disposal-calendar", async (req, res) => {
       // `slfGenerator` is what the day modal groups facilities on — without it
       // every group fell back to the NAME key, splitting one SLF in two whenever
       // some of its records still held an older name snapshot.
-      .select("_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfGenerator slfName lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt")
+      .select("_id idNo submissionId previousIdNos resubmittedAt resubmitCount resubmitComment resubmittedRevertReason dateOfDisposal submittedBy slfGenerator slfName lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt")
       .lean();
 
     const emails = [...new Set(records.map((r) => String(r.submittedBy || "").trim().toLowerCase()).filter(Boolean))];
@@ -5591,7 +5627,7 @@ router.get("/disposal-calendar/day", async (req, res) => {
       .setOptions({ includeHiddenYears: true })
       .sort({ dateOfDisposal: -1, createdAt: -1 })
       .select(
-        "_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfGenerator slfName " +
+        "_id idNo submissionId previousIdNos resubmittedAt resubmitCount resubmitComment resubmittedRevertReason dateOfDisposal submittedBy slfGenerator slfName " +
           `lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt ${DISPOSAL_ACTIVITY_TRUCK_FIELDS}`,
       )
       .populate("slfGenerator", "_id lgu slfName cellNames")
@@ -5947,7 +5983,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
             // resubmissions, created date otherwise (updatedAt as fallback).
             _sortDate: {
               $cond: [
-                { $gt: [{ $size: { $ifNull: ["$previousIdNos", []] } }, 0] },
+                IS_RESUBMISSION_EXPR,
                 { $ifNull: ["$updatedAt", "$createdAt"] },
                 { $ifNull: ["$createdAt", "$updatedAt"] },
               ],
@@ -6035,7 +6071,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       const idOrder = [];
       pageGroups.forEach((g) => (g.entryIds || []).forEach((id) => idOrder.push(id)));
       const baseFields =
-        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
+        "slfGenerator slfName submissionId idNo previousIdNos resubmittedAt resubmitCount resubmitComment resubmittedRevertReason dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
       const projection =
         baseFields +
         (includeTrucks
@@ -6148,7 +6184,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         // with its sub-paths (`trucks.cellName`) in one projection — Mongoose 9
         // rejects that with "Path collision at trucks".
         const baseFields =
-          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
+          "slfGenerator slfName submissionId idNo previousIdNos resubmittedAt resubmitCount resubmitComment resubmittedRevertReason dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
         query = query.select(
           baseFields +
             // `cellIndex` rides along with `cellName` on the light projection.

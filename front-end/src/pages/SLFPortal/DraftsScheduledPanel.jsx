@@ -320,6 +320,10 @@ export default function DraftsScheduledPanel({
   // menu, and a badge that only updates while you are looking at the thing is no
   // badge at all).
   onAttentionCountChange,
+  // Opens a reverted submission in Edit & Resubmit, by id. A draft cannot be
+  // submitted while an old revert is unresolved, so the failure offers the fix
+  // itself rather than sending the operator to look for it.
+  onResolveRevert,
 }) {
   const [drafts, setDrafts] = useState([]);
   const [scheduled, setScheduled] = useState([]);
@@ -507,6 +511,30 @@ export default function DraftsScheduledPanel({
         err.response?.data?.code === "DB_TIMEOUT" ||
         !err.response ||
         isTransientFailure(reason);
+      // The draft is blocked by ONE named reverted entry. Pointing the operator
+      // at Submission History was not enough — Prime Waste Solution retried its
+      // drafts repeatedly against SLF-LGU-PA-0018 and never opened it — so the
+      // modal now opens that entry in Edit & Resubmit directly.
+      const blockingRevert =
+        !transient && err.response?.data?.code === "UNRESOLVED_REVERT"
+          ? err.response?.data?.ruleContext
+          : null;
+      if (blockingRevert?.id && onResolveRevert) {
+        const label = blockingRevert.idNo ? ` ${blockingRevert.idNo}` : "";
+        Swal.fire({
+          icon: "warning",
+          title: "Resubmit Your Reverted Entry First",
+          html: `<div style="text-align:left;font-size:13px"><p style="margin:0 0 10px">${readableFailure(reason)}</p><p style="margin:0;color:#555">Your draft is safe. Correct and resubmit the reverted entry${label}, then come back and submit this draft.</p></div>`,
+          showCancelButton: true,
+          confirmButtonText: `Edit & Resubmit${label}`,
+          cancelButtonText: "Later",
+          confirmButtonColor: "#fa541c",
+        }).then((r) => {
+          if (r.isConfirmed) onResolveRevert(blockingRevert.id);
+        });
+        fetchQueue(true);
+        return;
+      }
       const nextStep = transient
         ? "Nothing was submitted and nothing was lost. Use <b>Retry submission</b> on this row in a moment."
         : /reverted submission/i.test(reason)
