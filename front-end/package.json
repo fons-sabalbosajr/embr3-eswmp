@@ -20,6 +20,7 @@
     "animejs": "^4.5.0",
     "antd": "^6.3.2",
     "axios": "^1.13.6",
+    "border-beam": "1.4.1",
     "crypto-js": "^4.2.0",
     "dayjs": "^1.11.19",
     "leaflet": "^1.9.4",

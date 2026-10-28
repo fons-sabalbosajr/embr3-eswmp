@@ -1,10 +1,13 @@
 // VERA — Virtual Environmental Response Assistant (floating SLF Portal chatbot).
 //
-// The look is the EMBR3 UCDS VERA design: a launcher pill with a border beam
-// running round its edge, the animated dotted flame whose state follows what
+// The look is the EMBR3 UCDS VERA design: a launcher pill inside a border beam
+// (border-beam, as in UCDS), the animated dotted flame whose state follows what
 // VERA is doing (burning at rest, listening while you type, thinking /
 // searching / working while an answer is on its way), and a palette derived
-// from the app's own accent in light or dark. See VeraChat.css.
+// from the app's own accent in light or dark. When VERA has something to say
+// unprompted (a contextual nudge) she says it in UCDS's introduction card: her
+// flame ignites, the message types itself out, then she settles. See
+// VeraChat.css.
 //
 // Self-contained: manages its own open/minimize state, conversation, and API
 // calls to /api/vera/chat. Renders assistant replies as PLAIN TEXT only (no HTML
@@ -22,9 +25,9 @@ import {
   ReloadOutlined, QuestionCircleOutlined,
 } from "@ant-design/icons";
 import { theme as antdTheme } from "antd";
-import { animate, utils } from "animejs";
+import { BorderBeam } from "border-beam";
 import api from "../../../api";
-import { VeraEdgeBeam, VeraFlame } from "../../../components/vera/VeraMark";
+import { VeraFlame } from "../../../components/vera/VeraMark";
 import secureStorage from "../../../utils/secureStorage";
 import { buildVeraPageContext } from "../../../utils/veraPageContext";
 import "./VeraChat.css";
@@ -131,8 +134,10 @@ export default function VeraChat({
   const [status, setStatus] = useState({ mode: "fallback", starterQuestions: [], greeting: "" });
   const [errorText, setErrorText] = useState("");
   const [nudge, setNudge] = useState(null); // { id, text, cta } — contextual assist
+  // The floating card's typed length and its flame, reset by showNudge.
+  const [typed, setTyped] = useState(0);
+  const [introFlame, setIntroFlame] = useState("igniting");
 
-  const nudgeRef = useRef(null);
   const launcherRef = useRef(null);
   const nudgeTimerRef = useRef(null);
   const scrollRef = useRef(null);
@@ -206,6 +211,10 @@ export default function VeraChat({
     try { if (secureStorage.sessionGet(key)) return; } catch { /* ignore */ }
     try { secureStorage.sessionSet(key, "1"); } catch { /* ignore */ }
     setNudge({ id, text, cta });
+    // Under reduced motion the message is simply there and the flame at rest.
+    const still = reducedMotion();
+    setTyped(still ? String(text).length : 0);
+    setIntroFlame(still ? "burning" : "igniting");
     if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = setTimeout(() => setNudge(null), NUDGE_TTL_MS);
   }, []);
@@ -245,25 +254,24 @@ export default function VeraChat({
 
   useEffect(() => () => { if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current); }, []);
 
-  // Anime.js: entrance pop for the nudge bubble + a gentle attention bob of the
-  // launcher while a nudge is showing. Skipped under reduced motion.
+  // The nudge card speaks (UCDS introduction): her flame ignites, the message
+  // types itself out while she "speaks", then the flame settles to burning.
+  const nudgeText = nudge?.text || "";
   useEffect(() => {
     if (!nudge || reducedMotion()) return undefined;
-    const created = [];
-    if (nudgeRef.current) {
-      created.push(animate(nudgeRef.current, {
-        opacity: [0, 1], translateY: [10, 0], scale: [0.94, 1], duration: 360, ease: "outBack",
-        onComplete: (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } },
-      }));
-    }
-    if (launcherRef.current) {
-      created.push(animate(launcherRef.current, {
-        translateY: [0, -5], duration: 900, ease: "inOutSine", loop: 4, alternate: true,
-        onComplete: (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } },
-      }));
-    }
-    return () => created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
-  }, [nudge]);
+    const lit = setTimeout(() => setIntroFlame("working"), 1200);
+    const tick = setInterval(() => setTyped((n) => (n >= nudgeText.length ? n : n + 2)), 28);
+    return () => {
+      clearTimeout(lit);
+      clearInterval(tick);
+    };
+  }, [nudge, nudgeText.length]);
+  const speaking = Boolean(nudge) && typed < nudgeText.length;
+  useEffect(() => {
+    if (!nudge || speaking) return undefined;
+    const t = setTimeout(() => setIntroFlame("burning"), 600);
+    return () => clearTimeout(t);
+  }, [nudge, speaking]);
 
   // Lazy-load VERA status (greeting + starter questions + mode) on first open.
   useEffect(() => {
@@ -384,6 +392,8 @@ export default function VeraChat({
     setOpen(false);
     setMinimized(false);
     if (abortRef.current) abortRef.current.abort();
+    // Focus back to the launcher, so keyboard users are not stranded.
+    requestAnimationFrame(() => launcherRef.current?.focus?.());
   }, []);
 
   // Esc closes the window when focus is inside it.
@@ -413,27 +423,57 @@ export default function VeraChat({
     // data-theme scopes the palette in VeraChat.css and is the [data-theme] the
     // canvases fall back to; --v-app-accent is the app's primary colour.
     <div className="vera-root" data-theme={mode} style={{ "--v-app-accent": accent }}>
-      {/* Floating launcher + contextual nudge bubble */}
-      {!open && (
-        <>
-          {nudge && (
-            <div className="vera-nudge" ref={nudgeRef} role="status">
-              <button type="button" className="vera-nudge__close" aria-label="Dismiss" onClick={dismissNudge}>×</button>
-              <span className="vera-nudge__icon"><VeraFlame size={26} state="burning" theme={mode} glow={false} label="" /></span>
-              <div className="vera-nudge__body">
-                <p className="vera-nudge__text">{nudge.text}</p>
-                {nudge.cta && (
-                  <button
-                    type="button"
-                    className="vera-nudge__cta"
-                    onClick={() => { dismissNudge(); setOpen(true); setMinimized(false); }}
-                  >
-                    Yes, guide me
-                  </button>
-                )}
-              </div>
+      {/* VERA's floating card: a contextual nudge, said the way UCDS's VERA
+          introduces herself. On the portal the Messages button sits between
+          the card and the launcher, so the card is lifted above both and
+          drops the tail that would otherwise point at Messages. */}
+      {!open && nudge && (
+        <div className={`vera-intro${hideTicketActions ? "" : " vera-intro--stacked"}`} role="status">
+          <div className="vera-intro__head">
+            <span className={`vera-intro__mark${speaking ? " is-speaking" : ""}`}>
+              <VeraFlame size={44} state={introFlame} theme={mode} label="" />
+            </span>
+            <div className="vera-intro__who">
+              <span className="vera-intro__name">VERA</span>
+              <span className="vera-intro__role">Virtual Environmental Response Assistant</span>
+            </div>
+            <button type="button" className="vera-icon-btn vera-intro__close" aria-label="Dismiss" title="Dismiss" onClick={dismissNudge}>
+              ×
+            </button>
+          </div>
+          {/* Screen readers get the whole message once, not every typed frame. */}
+          <span className="vera-sr-only">{nudgeText}</span>
+          <p className="vera-intro__text" aria-hidden="true">
+            {nudgeText.slice(0, typed)}
+            {speaking ? <span className="vera-intro__caret" /> : null}
+          </p>
+          {nudge.cta && (
+            <div className="vera-intro__actions">
+              <button
+                type="button"
+                className="vera-intro__primary"
+                onClick={() => { dismissNudge(); setOpen(true); setMinimized(false); }}
+              >
+                Yes, guide me
+              </button>
+              <button type="button" className="vera-intro__secondary" onClick={dismissNudge}>
+                Maybe later
+              </button>
             </div>
           )}
+        </div>
+      )}
+
+      {!open && (
+        // The beam's box (border-beam, as in UCDS) is what sits fixed in the
+        // corner; the button inside it takes the beam's shape.
+        <BorderBeam
+          className={`vera-launcher-dock${nudge ? " is-nudging" : ""}`}
+          size="sm"
+          colorVariant="ocean"
+          theme={mode}
+          duration={2.6}
+        >
           <button
             type="button"
             ref={launcherRef}
@@ -441,9 +481,7 @@ export default function VeraChat({
             aria-label="Open VERA, the Virtual Environmental Response Assistant"
             onClick={() => { setOpen(true); setMinimized(false); }}
           >
-            {/* border={1}: the launcher has a 1px outline; the beam runs on it. */}
-            <VeraEdgeBeam radius="pill" border={1} theme={mode} color={accent} />
-            <VeraFlame size={isMobile ? 40 : 34} state="burning" theme={mode} glow={false} label="" />
+            <VeraFlame size={isMobile ? 40 : 36} state="burning" theme={mode} glow={false} label="" />
             <span className="vera-launcher__text">
               <span className="vera-launcher__label">Ask VERA</span>
               <span className="vera-launcher__sub">
@@ -451,7 +489,7 @@ export default function VeraChat({
               </span>
             </span>
           </button>
-        </>
+        </BorderBeam>
       )}
 
       {/* Chat window */}
@@ -545,7 +583,7 @@ export default function VeraChat({
                 {typing && (
                   <div className="vera-msg vera-msg--assistant">
                     <div className="vera-bubble vera-thinking" aria-live="assertive">
-                      <VeraFlame size={22} state={flameState} theme={mode} glow={false} label="" />
+                      <VeraFlame size={26} state={flameState} theme={mode} label="" className="vera-thinking__mark" />
                       <span className="vera-thinking__text">{thinkingMessages[thinkStage]}</span>
                       <button type="button" className="vera-cancel-btn" onClick={cancelRequest} aria-label="Cancel request">
                         Cancel

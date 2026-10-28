@@ -1,9 +1,10 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    VERA — floating assistant (SLF Portal + Admin)
    ═══════════════════════════════════════════════════════════════════════════
-   The EMBR3 UCDS VERA design: a launcher pill with a border beam on its edge,
-   the animated dotted flame, and a palette derived from ONE accent — the app's
-   own primary colour, set inline as --v-app-accent by VeraChat.
+   The EMBR3 UCDS VERA design: a launcher pill inside a border beam
+   (border-beam), the animated dotted flame, the introduction card she speaks
+   from, and a palette derived from ONE accent — the app's own primary colour,
+   set inline as --v-app-accent by VeraChat.
 
    Every colour is a token on .vera-root, keyed by its data-theme (the app's
    light/dark mode), so VERA follows the app rather than the operating system.
@@ -12,7 +13,7 @@
 
    Positions are this app's, not the UCDS ones: the bottom-right corner holds a
    STACK — the VERA launcher (bottom 32), the portal's Messages FAB
-   (.slf-msg-fab, bottom 92 — see SLFPortal.css) and the nudge bubble above
+   (.slf-msg-fab, bottom 92 — see SLFPortal.css) and the floating card above
    both — so the offsets below keep all three reachable at once.
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -74,11 +75,6 @@
   pointer-events: none;
 }
 
-.vera-launcher > :not(.vera-edge-beam) {
-  position: relative;
-  z-index: 1;
-}
-
 .vera-header__mark {
   display: inline-flex;
   flex: none;
@@ -86,16 +82,38 @@
 
 /* ═══ Launcher ═════════════════════════════════════════════════════════════ */
 
-.vera-launcher {
-  position: fixed;
+/* The beam's box (border-beam) holds the launcher in the corner; the library
+   gives it position: relative, hence the !important. */
+.vera-launcher-dock {
+  position: fixed !important;
   bottom: 32px;
   right: 32px;
   z-index: 1000;
+  border-radius: 999px;
+  transition: transform 0.18s ease;
+}
+
+.vera-launcher-dock:hover {
+  transform: translateY(-2px);
+}
+
+/* A gentle bob while the floating card is speaking, so the eye finds VERA. */
+.vera-launcher-dock.is-nudging {
+  animation: vera-dock-bob 0.9s ease-in-out 4 alternate;
+}
+
+@keyframes vera-dock-bob {
+  to {
+    transform: translateY(-5px);
+  }
+}
+
+.vera-launcher {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  height: 48px;
-  padding: 6px 20px 6px 8px;
+  padding: 6px 20px 6px 10px;
   border: 1px solid var(--v-line);
   border-radius: 999px;
   background: var(--v-surface);
@@ -108,7 +126,6 @@
 }
 
 .vera-launcher:hover {
-  transform: translateY(-2px);
   border-color: var(--v-accent);
 }
 
@@ -134,79 +151,209 @@
   color: var(--v-muted);
 }
 
-/* ═══ Contextual nudge ═════════════════════════════════════════════════════ */
+/* ═══ Floating card (contextual nudge) ═════════════════════════════════════
+   UCDS's VERA introduction card: it rises in above the launcher, her flame
+   pops and ignites, bobs while the message types itself out, then settles.
+   On the admin side it sits just above the launcher with a tail pointing at
+   it, exactly as in UCDS. On the portal (--stacked) the Messages button sits
+   between them, so the card clears it and drops the tail. */
 
-.vera-nudge {
+.vera-intro {
   position: fixed;
   right: 32px;
-  /* 92 (Messages FAB offset) + 48 (FAB height) + 12 (gap): opaque and above
-     the FAB, a lower bubble hid that button entirely while it showed. */
-  bottom: 152px;
+  bottom: 100px;
   z-index: 1001;
-  max-width: 300px;
-  display: flex;
-  gap: 10px;
-  padding: 14px 18px 14px 14px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 16px 16px 14px;
+  border: 1px solid var(--v-line);
+  border-radius: 16px;
   background: var(--v-surface);
   color: var(--v-ink);
-  border: 1px solid var(--v-line);
-  border-radius: 18px 18px 5px 18px;
-  box-shadow: var(--v-shadow);
   font-family: var(--v-font);
+  box-shadow: var(--v-shadow);
+  animation: vera-intro-rise 0.55s cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
 }
 
-.vera-nudge__icon {
-  flex: 0 0 auto;
-  display: inline-flex;
+/* A tail pointing down at the launcher. */
+.vera-intro::after {
+  content: "";
+  position: absolute;
+  right: 44px;
+  bottom: -7px;
+  width: 14px;
+  height: 14px;
+  background: var(--v-surface);
+  border-right: 1px solid var(--v-line);
+  border-bottom: 1px solid var(--v-line);
+  transform: rotate(45deg);
+}
+
+/* 92 (Messages FAB offset) + 48 (FAB height) + 12 (gap): a lower card hid
+   that button entirely while it showed. */
+.vera-intro--stacked {
+  bottom: 152px;
+}
+
+.vera-intro--stacked::after {
+  display: none;
+}
+
+.vera-intro__head {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  background: var(--v-chip);
+  gap: 10px;
 }
 
-.vera-nudge__body {
+.vera-intro__mark {
+  display: inline-flex;
+  flex: none;
+  border-radius: 50%;
+  animation: vera-mark-pop 0.7s cubic-bezier(0.2, 0.9, 0.25, 1.4) both;
+}
+
+.vera-intro__mark.is-speaking {
+  animation: vera-mark-pop 0.7s cubic-bezier(0.2, 0.9, 0.25, 1.4) both, vera-mark-speak 1.1s ease-in-out 0.7s infinite;
+}
+
+@keyframes vera-mark-pop {
+  0% {
+    transform: scale(0.3) rotate(-12deg);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.12) rotate(4deg);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes vera-mark-speak {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    transform: translateY(-3px) scale(1.06);
+    filter: drop-shadow(0 4px 10px color-mix(in srgb, var(--v-accent) 45%, transparent));
+  }
+}
+
+.vera-intro__who {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.25;
 }
 
-.vera-nudge__text {
-  margin: 0;
+.vera-intro__name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.vera-intro__role {
+  font-size: 12px;
+  color: var(--v-muted);
+}
+
+.vera-intro__close {
+  align-self: flex-start;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.vera-intro__text {
+  margin: 10px 0 12px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  min-height: 3.1em;
+}
+
+.vera-intro__text:last-child {
+  margin-bottom: 0;
+}
+
+.vera-intro__caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--v-accent);
+  animation: vera-caret 0.9s steps(1) infinite;
+}
+
+.vera-intro__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vera-intro__primary,
+.vera-intro__secondary {
+  border-radius: 999px;
+  padding: 6px 14px;
+  font: inherit;
   font-size: 13px;
-  line-height: 1.5;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.vera-intro__primary {
+  border: 1px solid var(--v-accent);
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
+}
+
+.vera-intro__secondary {
+  border: 1px solid var(--v-line);
+  background: transparent;
   color: var(--v-ink);
 }
 
-.vera-nudge__cta {
-  align-self: flex-start;
-  border: none;
-  cursor: pointer;
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--v-accent-ink);
-  padding: 6px 14px;
-  border-radius: 999px;
-  background: var(--v-accent);
+.vera-intro__primary:hover,
+.vera-intro__secondary:hover {
+  transform: translateY(-1px);
 }
 
-.vera-nudge__cta:focus-visible {
+.vera-intro__primary:focus-visible,
+.vera-intro__secondary:focus-visible {
   outline: 2px solid var(--v-accent);
   outline-offset: 2px;
 }
 
-.vera-nudge__close {
+@keyframes vera-intro-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes vera-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.vera-sr-only {
   position: absolute;
-  top: 6px;
-  right: 8px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  color: var(--v-muted);
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ═══ Window ═══════════════════════════════════════════════════════════════ */
@@ -509,6 +656,10 @@ ul.vera-answer__list {
   gap: 8px;
 }
 
+.vera-thinking__mark {
+  flex: none;
+}
+
 .vera-thinking__text {
   font-size: 12.5px;
   color: var(--v-muted);
@@ -754,20 +905,26 @@ ul.vera-answer__list {
 @media (prefers-reduced-motion: reduce) {
   .vera-window,
   .vera-launcher,
+  .vera-launcher-dock,
   .vera-send-btn,
-  .vera-status-dot--busy {
+  .vera-status-dot--busy,
+  .vera-intro,
+  .vera-intro__caret,
+  .vera-intro__mark,
+  .vera-intro__mark.is-speaking {
     animation: none;
     transition: none;
   }
-  .vera-launcher:hover {
+  .vera-launcher-dock:hover {
     transform: none;
   }
 }
 
 @media print {
+  .vera-launcher-dock,
   .vera-launcher,
   .vera-window,
-  .vera-nudge {
+  .vera-intro {
     display: none !important;
   }
 }
@@ -788,22 +945,21 @@ ul.vera-answer__list {
   .vera-bubble {
     max-width: 88%;
   }
-  .vera-nudge {
+  .vera-intro--stacked {
     /* 88 + 44 + 12 */
     bottom: 144px;
-    right: 24px;
   }
 }
 
 /* ═══ Phone: the flame alone, in a round button with the beam on its edge ══ */
 @media (max-width: 576px) {
-  .vera-launcher {
+  .vera-launcher-dock {
     bottom: 20px;
     right: 20px;
-    width: 52px;
-    height: 52px;
-    padding: 5px;
-    justify-content: center;
+    border-radius: 50%;
+  }
+  .vera-launcher {
+    padding: 6px;
     border-radius: 50%;
   }
   .vera-launcher__text {
@@ -812,12 +968,19 @@ ul.vera-answer__list {
   .vera-bubble {
     max-width: 92%;
   }
-  /* The Messages FAB becomes a 52px circle at bottom 84, so the bubble clears
-     84 + 52 + 12, and it has to fit a 320px screen beside its own inset. */
-  .vera-nudge {
+  /* It has to fit a 320px screen beside its own inset. The round launcher is
+     at bottom 20 (52px), so the card clears 20 + 52 + 16. */
+  .vera-intro {
+    right: 16px;
+    left: 16px;
+    width: auto;
+    bottom: 88px;
+  }
+  .vera-intro::after {
+    right: 32px;
+  }
+  /* The Messages FAB becomes a 52px circle at bottom 84: 84 + 52 + 12. */
+  .vera-intro--stacked {
     bottom: 148px;
-    right: 20px;
-    left: 20px;
-    max-width: none;
   }
 }

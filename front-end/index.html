@@ -5,6 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="/emblogo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
     <title>EMBR3 Ecological Solid Waste Management Pipeline</title>
+    <!-- VERA's display face (as in EMBR3 UCDS). Loaded without blocking the
+         first paint (media swap), so a network that cannot reach Google Fonts
+         just keeps the system font instead of holding the page. -->
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" media="print" onload="this.media='all'"
+          href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700&display=swap">
   </head>
   <body>
     <div id="root"></div>
