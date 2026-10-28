@@ -36,6 +36,10 @@
 //
 // Pure: no hooks, no component state.
 
+// The ONE definition of "this client has an address" — the same function the
+// Accredited Haulers table's Client Address column renders with.
+import { clientAddressOf } from "./columns/haulerFilters.js";
+
 const text = (value) => String(value ?? "").trim();
 
 /**
@@ -75,7 +79,11 @@ export const clientGaps = (client = {}) => {
   if (!text(client.clientType)) required.push("Client Type");
   if (!text(client.provinceName || client.province)) required.push("Province");
   if (!text(client.municipalityName || client.municipality)) required.push("Municipality");
-  if (!text(client.clientAddress || client.address)) recommended.push("Client Address");
+  // An address given through the Region / Province / City pickers IS an address.
+  // Reading only the free-text box flagged every such client as having none —
+  // while the hauler table beside this panel showed that very address (live:
+  // 56 of Maria Aurora's clients, 29 of Limay's, all fully located).
+  if (!clientAddressOf(client)) recommended.push("Client Address");
   return { required, recommended };
 };
 

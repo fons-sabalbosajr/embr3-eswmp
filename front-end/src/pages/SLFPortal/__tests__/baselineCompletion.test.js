@@ -180,3 +180,35 @@ test("the edit count ignores rows that were only opened, not filled", () => {
   assert.equal(countCompletionEdits({ a: {}, b: { clientType: "" } }), 0);
   assert.equal(countCompletionEdits({ a: { clientType: "LGU" }, b: { officeAddress: "  " } }), 1);
 });
+
+test("an address given through the location pickers counts as an address", () => {
+  // Live shape (Maria Aurora): Region / Province / City picked, the free-text
+  // Client Address box left empty. The hauler table shows this client WITH an
+  // address, so the completeness panel must not call it missing.
+  const located = {
+    clientName: "Puregold",
+    clientType: "LGU",
+    clientAddress: "",
+    region: "030000000",
+    regionName: "Central Luzon",
+    province: "037700000",
+    provinceName: "Aurora",
+    municipality: "037707000",
+    municipalityName: "Maria Aurora",
+  };
+  const nowhere = { clientName: "Nowhere Corp", clientType: "Private", clientAddress: "" };
+  const summary = summarizeBaselineCompleteness([
+    { haulerName: "LGU Maria Aurora", officeAddress: "Maria Aurora, Aurora", privateSectorClients: [located, nowhere] },
+  ]);
+  assert.equal(summary.clientsMissingAddress, 1);
+  const rows = summary.rows.filter((row) => row.kind === "client");
+  assert.deepEqual(rows.map((row) => row.client), ["Nowhere Corp"]);
+});
+
+test("a bare PSGC code is not an address", () => {
+  const codeOnly = { clientName: "X", clientType: "LGU", province: "037700000", municipality: "037707000" };
+  const summary = summarizeBaselineCompleteness([
+    { haulerName: "H", officeAddress: "A", privateSectorClients: [codeOnly] },
+  ]);
+  assert.equal(summary.clientsMissingAddress, 1);
+});

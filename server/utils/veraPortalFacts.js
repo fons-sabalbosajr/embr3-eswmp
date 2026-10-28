@@ -143,7 +143,12 @@ function summarizeBaselineGaps(baselines = []) {
       if (!province) missing.push("province");
       if (!municipality) missing.push("municipality");
       if (missing.length) clientsMissingLocation.push(`${label} (no ${missing.join(", ")})`);
-      if (!trimmed(client.clientAddress) && !trimmed(client.address)) {
+      // A location picked through the Region / Province / City cascade is an
+      // address — the portal's hauler table shows it as one (clientAddressOf in
+      // front-end/src/pages/SLFPortal/columns/haulerFilters.js). Only a client
+      // with neither a street address nor any location has none.
+      const region = placeName(client.regionName, client.region);
+      if (!trimmed(client.clientAddress) && !trimmed(client.address) && !municipality && !province && !region) {
         clientsMissingAddress.push(label);
       }
     });
@@ -402,4 +407,6 @@ module.exports = {
   getPortalFacts,
   factsToPromptBlock,
   FACTS_QUESTION_RE,
+  // Exposed for testing: must agree with the portal's baselineCompleteness rule.
+  summarizeBaselineGaps,
 };
