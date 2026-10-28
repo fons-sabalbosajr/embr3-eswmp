@@ -3071,6 +3071,9 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     entry.revertReason = "";
     entry.revertedBy = "";
     entry.revertedAt = undefined;
+    // The resubmission is the answer to any edit request that led here.
+    entry.revertRequested = false;
+    entry.revertRequestedAt = undefined;
 
     // ── The ID No. SURVIVES a resubmission ─────────────────────────────────────
     //
@@ -9351,6 +9354,12 @@ router.patch("/:id/admin-revert", async (req, res) => {
     // clear it. Un-hiding is scoped to the revert itself and does not touch
     // deletedAt or any other visibility rule.
     entry.hiddenFromPortal = false;
+    // A revert ANSWERS any open edit request, same as approve-edit and
+    // bulk-revert. Left set, it survived the resubmit and re-approval, and the
+    // portal kept showing "Revert Requested" on an approved entry with Request
+    // Edit hidden for good — 12 of Maria Aurora's entries were stuck that way.
+    entry.revertRequested = false;
+    entry.revertRequestedAt = undefined;
     if (sendFollowUp) {
       const days = Math.max(1, Number(temporaryDeleteAfterDays) || 3);
       entry.revertFollowUpSubject = followUpSubject || "Follow-Up Required: Reverted SLF Submission";

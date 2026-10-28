@@ -132,6 +132,11 @@ async function getPortalReadiness(portalUser) {
     const cutoff = Date.now() - REVERT_GRACE_MS;
     const staleReverts = submissions.filter((s) => {
       if (s.status !== "reverted") return false;
+      // Same scope as the submit gate (assertNoUnresolvedRevert): a reverted
+      // baseline container has no transport entries to correct and never blocks.
+      // Counting it had VERA tell four operators (General Tinio, Dingalan, Santa
+      // Rosa, Iba) to resubmit a revert that their history does not list.
+      if (!Array.isArray(s.trucks) || s.trucks.length === 0) return false;
       const ts = s.revertedAt || s.updatedAt;
       return ts && new Date(ts).getTime() <= cutoff;
     });
