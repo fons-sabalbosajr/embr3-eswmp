@@ -197,6 +197,36 @@ export function validateTransportUnits(trucks, baselineUnit) {
   return issues;
 }
 
+// Largest plausible waste-truck capacity per unit. Mirrors the server copy — a
+// figure above it is a capacity in the wrong unit (BESLF entered kilograms as
+// "tons"), which the unit check cannot see when the label is right.
+export const MAX_TRUCK_CAPACITY = { tons: 60, "m³": 120 };
+
+function checkCapacityMagnitude(value, unitRaw, baselineUnit) {
+  if (!isPositiveNumber(value)) return null;
+  const unit = normUnit(unitRaw || baselineUnit) === "tons" ? "tons" : "m³";
+  const max = MAX_TRUCK_CAPACITY[unit];
+  if (Number(value) <= max) return null;
+  const hint = unit === "tons"
+    ? ` If it is in kilograms, divide by 1,000 (e.g. ${Number(value).toLocaleString("en-US")} kg = ${Number(value) / 1000} tons).`
+    : " If it is in litres, divide by 1,000 to get m³.";
+  return `Truck Capacity ${value} ${unit} is not a realistic truck capacity (max ${max} ${unit}).${hint}`;
+}
+
+export function validateCapacityMagnitude(trucks, baselineUnit) {
+  const list = Array.isArray(trucks) ? trucks : [];
+  const issues = [];
+  list.forEach((truck, t) => {
+    const msg = checkCapacityMagnitude(truck?.truckCapacity, truck?.truckCapacityUnit, baselineUnit);
+    if (msg) issues.push(issue(t, "truckCapacity", msg));
+    (Array.isArray(truck?.vehicles) ? truck.vehicles : []).forEach((v, vi) => {
+      const vmsg = checkCapacityMagnitude(v?.capacity, v?.capacityUnit, baselineUnit);
+      if (vmsg) issues.push(issue(t, "capacity", vmsg, vi));
+    });
+  });
+  return issues;
+}
+
 // The entered truck/vehicle capacity may not exceed the declared (registered)
 // capacity for that plate by more than 10%. `getDeclaredCapacity(hauler, plate)`
 // returns the declared capacity (or null when unknown — unknown plates are not

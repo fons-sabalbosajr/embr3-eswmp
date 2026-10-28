@@ -154,6 +154,7 @@ import {
   validateWasteGeneration,
   formatWasteGenIssues,
   validateTransportUnits,
+  validateCapacityMagnitude,
   validateTruckCapacityElevation,
   TRUCK_CAPACITY_ELEVATION_FACTOR,
 } from "./wasteGenValidation";
@@ -6972,6 +6973,7 @@ export default function SLFPortal() {
     // authoritatively against the SLF's registered hauler capacities.
     const transportRuleIssues = [
       ...validateTransportUnits(trucks, baselineUnit),
+      ...validateCapacityMagnitude(trucks, baselineUnit),
       ...validateTruckCapacityElevation(trucks, getDeclaredVehicleCapacity),
     ];
     if (transportRuleIssues.length) {

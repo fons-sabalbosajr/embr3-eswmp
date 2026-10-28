@@ -192,6 +192,19 @@ const KNOWLEDGE_BASE = [
     related: ["validation-errors", "update-baseline", "vehicle-capacity"],
   },
   {
+    id: "truck-capacity-unit",
+    category: "errors",
+    question: "What unit is Truck Capacity in — kilograms, tons or m³? Do I use L × W × H?",
+    keywords: [
+      "truck capacity", "vehicle capacity", "volume capacity", "capacity unit", "kilogram",
+      "kilograms", "kg", "l x w x h", "lxwxh", "length width height", "not a realistic truck capacity",
+      "unit of measurement",
+    ],
+    answer:
+      "Truck Capacity uses your SLF's declared baseline unit, like every other figure — you cannot mix units. If your baseline is in tons, enter the truck's rated load in tons: a weight in kilograms divided by 1,000 (5,000 kg = 5 tons). L × W × H gives cubic meters, so use it only if your baseline unit is m³. Changing the baseline unit itself would convert all your past records with a fixed density, so ask an admin before doing that. A capacity above 60 tons or 120 m³ is rejected as “not a realistic truck capacity” — that almost always means kilograms or litres were entered.",
+    related: ["units-and-conversion", "vehicle-capacity", "validation-errors"],
+  },
+  {
     id: "submission-not-saved",
     category: "errors",
     question: "My submission failed or didn't save — what should I do?",

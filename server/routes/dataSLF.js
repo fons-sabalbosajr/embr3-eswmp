@@ -68,6 +68,8 @@ const {
   validateWasteGeneration,
   validateTransportUnits,
   validateTruckCapacityElevation,
+  validateCapacityMagnitude,
+  validateFleetCapacityMagnitude,
 } = require("../utils/wasteGenerationValidation");
 // Named to avoid colliding with this file's own `normalizeVolumeUnit`, which is a
 // lenient SANITIZER for Excel-imported free text (it always yields a unit). These
@@ -2626,6 +2628,9 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
       validateTransportUnits(item?.trucks, item?.baselineUnit).forEach((i) => {
         transportIssues.push({ ...i, entryIndex });
       });
+      validateCapacityMagnitude(item?.trucks, item?.baselineUnit).forEach((i) => {
+        transportIssues.push({ ...i, entryIndex });
+      });
       const capMap = await getDeclaredCapacityMap(item);
       const getDeclared = (_hauler, plate) =>
         capMap.get(String(plate || "").trim().toLowerCase()) || null;
@@ -3055,6 +3060,21 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     const sanitizedBody = sanitizeSubmissionEntry(req.body || {}, updateErrors);
     if (updateErrors.length) {
       return res.status(400).json({ message: updateErrors.join(" ") });
+    }
+    // A resubmission is how a wrong-unit capacity gets corrected, so it must not
+    // be able to send one back unchanged.
+    const capacityIssues = validateCapacityMagnitude(
+      sanitizedBody.trucks || entry.trucks,
+      sanitizedBody.baselineUnit || entry.baselineUnit,
+    );
+    if (capacityIssues.length) {
+      return res.status(400).json({
+        message: capacityIssues
+          .slice(0, 5)
+          .map((i) => `Truck ${i.truckIndex + 1}: ${i.message}`)
+          .join(" | "),
+        validationIssues: capacityIssues,
+      });
     }
     applyEntryUpdates(entry, sanitizedBody, allowedFields, req, "submission.resubmit");
     const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
@@ -9758,6 +9778,18 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
           message: "You can only update baseline data for the SLF facility assigned to your account.",
         });
       }
+    }
+
+    // The fleet's declared capacities are what every transport entry is checked
+    // against (+10%), so a kilogram figure here propagates to every submission.
+    const fleetCapacityIssues = validateFleetCapacityMagnitude(
+      accreditedHaulers,
+      baselineUnit || totalVolumeAcceptedUnit,
+    );
+    if (fleetCapacityIssues.length) {
+      return res.status(400).json({
+        message: `Accredited Haulers — ${fleetCapacityIssues.slice(0, 5).join(" | ")}${fleetCapacityIssues.length > 5 ? ` (+${fleetCapacityIssues.length - 5} more)` : ""}`,
+      });
     }
 
     const updateFields = {

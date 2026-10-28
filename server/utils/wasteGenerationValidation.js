@@ -209,6 +209,54 @@ function validateTransportUnits(trucks, baselineUnit) {
   return issues;
 }
 
+// Largest capacity a waste-hauling truck can plausibly have, per unit. A figure
+// above it is a capacity in the wrong unit, not a big truck: BESLF entered every
+// capacity in KILOGRAMS under "tons" (5000 "tons" carrying 2.5 t loads), which
+// the unit check cannot see because the label was right. No other facility's
+// data comes near these limits (largest: 36 t, 32 m³).
+const MAX_TRUCK_CAPACITY = { tons: 60, "m³": 120 };
+
+function capacityMagnitudeMessage(value, unit) {
+  const max = MAX_TRUCK_CAPACITY[unit];
+  const hint = unit === "tons"
+    ? ` If it is in kilograms, divide by 1,000 (e.g. ${Number(value).toLocaleString("en-US")} kg = ${Number(value) / 1000} tons).`
+    : " If it is in litres, divide by 1,000 to get m³.";
+  return `Truck Capacity ${value} ${unit} is not a realistic truck capacity (max ${max} ${unit}).${hint}`;
+}
+
+// A missing unit falls back to the declared baseline unit.
+function checkCapacityMagnitude(value, unitRaw, baselineUnit) {
+  if (!isPositiveNumber(value)) return null;
+  const unit = normUnit(unitRaw || baselineUnit) === "tons" ? "tons" : "m³";
+  return Number(value) > MAX_TRUCK_CAPACITY[unit] ? capacityMagnitudeMessage(value, unit) : null;
+}
+
+function validateCapacityMagnitude(trucks, baselineUnit) {
+  const list = Array.isArray(trucks) ? trucks : [];
+  const issues = [];
+  list.forEach((truck, t) => {
+    const msg = checkCapacityMagnitude(truck?.truckCapacity, truck?.truckCapacityUnit, baselineUnit);
+    if (msg) issues.push(issue(t, "truckCapacity", msg));
+    (Array.isArray(truck?.vehicles) ? truck.vehicles : []).forEach((v, vi) => {
+      const vmsg = checkCapacityMagnitude(v?.capacity, v?.capacityUnit, baselineUnit);
+      if (vmsg) issues.push(issue(t, "capacity", vmsg, vi));
+    });
+  });
+  return issues;
+}
+
+// Same rule for the accredited-hauler fleet saved with the baseline.
+function validateFleetCapacityMagnitude(haulers, baselineUnit) {
+  const messages = [];
+  (Array.isArray(haulers) ? haulers : []).forEach((h) => {
+    (Array.isArray(h?.vehicles) ? h.vehicles : []).forEach((v) => {
+      const msg = checkCapacityMagnitude(v?.capacity, v?.capacityUnit, baselineUnit);
+      if (msg) messages.push(`${h?.haulerName || "Hauler"} / ${v?.plateNumber || "vehicle"}: ${msg}`);
+    });
+  });
+  return messages;
+}
+
 // The entered truck/vehicle capacity may not exceed the declared capacity for
 // that plate by more than 10%. `getDeclaredCapacity(hauler, plate)` returns the
 // declared capacity, or a falsy value when unknown (unknown plates are skipped).
@@ -245,6 +293,9 @@ function validateTruckCapacityElevation(trucks, getDeclaredCapacity) {
 module.exports = {
   WASTE_GENERATION_TAB: TAB,
   TRUCK_CAPACITY_ELEVATION_FACTOR,
+  MAX_TRUCK_CAPACITY,
+  validateCapacityMagnitude,
+  validateFleetCapacityMagnitude,
   isBlank,
   isPositiveNumber,
   validateWasteGeneration,
