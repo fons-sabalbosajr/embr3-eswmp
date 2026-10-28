@@ -3,6 +3,7 @@ import { Card, Space, Typography, Button, Table, Empty, Select, DatePicker, Inpu
 import { HistoryOutlined, ReloadOutlined, SearchOutlined, WarningOutlined, ClearOutlined, FilePdfOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { groupSubmissions } from "./submissionGrouping";
+import { fitColumnsToWidth } from "./columns/fitColumns";
 import PortalReportModal from "./PortalReportModal";
 
 const { Text } = Typography;
@@ -39,6 +40,11 @@ const isActionRequired = (s) => s?.status === "reverted" || s?.status === "editA
 // so they are respected rather than treated as hints.
 const COMPACT_WIDTHS = { idNo: 104, dateOfDisposal: 82, status: 108, actions: 96 };
 const COMPACT_TOTAL = Object.values(COMPACT_WIDTHS).reduce((a, b) => a + b, 0);
+
+// From md up the columns FIT the table instead of scrolling it: each visible
+// column takes its share of the table's width (columns/fitColumns), with this
+// much kept for antd's expand toggle so the row sums to exactly 100%.
+const EXPAND_COLUMN_PCT = 3;
 
 // Waste types carried on a submission (truck/vehicle level).
 const wasteTypesOf = (sub) => {
@@ -114,13 +120,22 @@ export default function HistoryPanel({
   );
 
   // Below md, swap in the compact widths for the four columns that remain.
-  // Untouched at md and up, where the wider columns come back.
+  // From md up, every visible column takes its share of the table's width, so
+  // the columns fit the table at any card width instead of scrolling it.
   const columns = useMemo(() => {
-    if (screens.md) return historyColumns;
+    if (screens.md) return fitColumnsToWidth(historyColumns, screens, EXPAND_COLUMN_PCT);
     return (historyColumns || []).map((col) =>
       COMPACT_WIDTHS[col.key] ? { ...col, width: COMPACT_WIDTHS[col.key] } : col,
     );
-  }, [historyColumns, screens.md]);
+  }, [historyColumns, screens]);
+  // An expanded group's rows sit inside one cell that spans the expand toggle
+  // too, so they lead with a blank track of the same share to stay in line.
+  const childColumns = useMemo(
+    () => (screens.md ? [{ key: "__expandPad", width: `${EXPAND_COLUMN_PCT}%`, render: () => null }, ...columns] : columns),
+    [columns, screens.md],
+  );
+  // Phones keep the compact horizontal scroll; from md up nothing scrolls.
+  const tableScroll = screens.md ? undefined : { x: COMPACT_TOTAL };
 
   // Group, then float action-required (reverted) rows to the top, then by newest.
   const rows = useMemo(() => {
@@ -273,21 +288,22 @@ export default function HistoryPanel({
               }
             },
           }}
-          scroll={{ x: screens.lg ? 1100 : screens.md ? 760 : COMPACT_TOTAL }}
+          scroll={tableScroll}
           expandable={{
+            columnWidth: screens.md ? `${EXPAND_COLUMN_PCT}%` : undefined,
             rowExpandable: (r) => !!r.isGroup,
             expandedRowRender: (r) => (
               <Table
                 className="slf-history-table"
                 dataSource={r.children}
-                columns={columns}
+                columns={childColumns}
                 rowKey="_id"
                 size="small"
                 pagination={false}
                 showHeader={false}
                 // The child table must track the parent's tracks, or the two grids
                 // drift apart and an expanded group reads as a different table.
-                scroll={{ x: screens.lg ? 1100 : screens.md ? 760 : COMPACT_TOTAL }}
+                scroll={tableScroll}
               />
             ),
           }}

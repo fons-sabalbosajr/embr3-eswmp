@@ -1158,6 +1158,22 @@
   table-layout: fixed !important;
 }
 
+/* From md up the column widths are SHARES of the table (HistoryPanel →
+   fitColumnsToWidth), so the table must be exactly the card's width. The global
+   `width: max-content` made a fixed-layout table as wide as its columns' sum,
+   which is what pushed Submission History past the card on a desktop. */
+@media (min-width: 768px) {
+  .ant-table-wrapper.slf-history-table .ant-table table {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  /* An expanded group's rows align with the parent's tracks only if the cell
+     holding them adds no padding of its own. */
+  .ant-table-wrapper.slf-history-table .ant-table-expanded-row > td {
+    padding: 0 !important;
+  }
+}
+
 .ant-table-wrapper.slf-history-table .ant-table-thead > tr > th,
 .ant-table-wrapper.slf-history-table .ant-table-tbody > tr > td {
   white-space: normal;
