@@ -984,3 +984,60 @@ ul.vera-answer__list {
     bottom: 148px;
   }
 }
+
+/* ═══ Auth pages (sign-in, sign-up, recovery) ══════════════════════════════
+   VeraAuthAssistant uses this same design with the placement contract the auth
+   pages need:
+   • z-index 900, BELOW antd's modal layer (1000): those pages open real modals
+     (credential prompt, developer PIN, error card), and VERA must not float on
+     top of their overlays. The root is a stacking context, so lowering it
+     lowers everything VERA draws.
+   • Bottom offsets clear `.auth-page-footer` (Auth.css): absolute at the
+     bottom on desktop, in the normal flow below 992px — so VERA rises there.
+   • env(safe-area-inset-*) keeps it off the iOS home indicator. */
+.vera-root--auth {
+  z-index: 900;
+}
+
+.vera-root--auth .vera-launcher-dock {
+  right: max(20px, env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+}
+
+.vera-root--auth .vera-window:not(.vera-window--mobile) {
+  right: max(20px, env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  height: min(560px, calc(100dvh - 40px));
+}
+
+/* Just above the launcher, tail pointing down at it. */
+.vera-root--auth .vera-intro {
+  right: max(20px, env(safe-area-inset-right, 0px));
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+}
+
+@media (max-width: 992px) {
+  .vera-root--auth .vera-launcher-dock {
+    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+  }
+  .vera-root--auth .vera-window:not(.vera-window--mobile) {
+    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+    height: min(560px, calc(100dvh - 96px));
+  }
+  .vera-root--auth .vera-intro {
+    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* The round phone launcher is 52px at 18–20px from the edge (rule above). */
+@media (max-width: 576px) {
+  .vera-root--auth .vera-intro {
+    left: 16px;
+    right: 16px;
+    width: auto;
+    bottom: calc(124px + env(safe-area-inset-bottom, 0px));
+  }
+  .vera-root--auth .vera-intro::after {
+    right: 34px;
+  }
+}

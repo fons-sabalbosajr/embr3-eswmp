@@ -10,19 +10,26 @@
 // authenticated session (tickets, nudges, page context, persisted history). This one
 // holds its conversation in component state only — nothing is written to storage,
 // since an anonymous visitor on a shared machine should leave no trace behind.
+//
+// It LOOKS like the portal VeraChat, though — the EMBR3 UCDS VERA design, as UCDS
+// shows on its own sign-in pages: the launcher pill inside a border beam, the
+// dotted flame whose state follows what VERA is doing, and the introduction card
+// for a sign-in problem the page reports. Styles: pages/SLFPortal/Vera/VeraChat.css
+// (the `vera-root--auth` block carries the auth-page placement).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Input, Typography, Space, Tooltip, Alert, Badge } from "antd";
+import { Button, Grid, theme as antdTheme } from "antd";
 import {
   SendOutlined, CloseOutlined, MessageOutlined, ReloadOutlined,
 } from "@ant-design/icons";
+import { BorderBeam } from "border-beam";
 import api from "../api";
-import VeraFlameIcon from "./VeraFlameIcon";
-import { VeraEdgeBeam } from "./vera/VeraMark";
+import { VeraFlame } from "./vera/VeraMark";
+import "../pages/SLFPortal/Vera/VeraChat.css";
 
-const { Text } = Typography;
 const MAX_INPUT = 500;
 const HINT_TTL_MS = 13000;
+const SUPPORT_EMAIL = "eswmr3@emb.gov.ph";
 
 // Contextual hints, keyed by the issue an auth page reports. `ask` is the question
 // pre-loaded into the chat, so a stuck user reaches a real answer in one click
@@ -77,13 +84,21 @@ export function reportVeraAuthIssue(kind) {
 }
 
 export default function VeraAuthAssistant({ page = "portal-login" }) {
+  // The palette is derived from the app's accent, exactly as in the portal.
+  // The auth pages are light-only, so the theme is fixed.
+  const accent = antdTheme.useToken().token.colorPrimary;
+  const screens = Grid.useBreakpoint();
+  const isPhone = !screens.sm;
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [inputFocused, setInputFocused] = useState(false);
   const [sending, setSending] = useState(false);
   const [meta, setMeta] = useState(null);
   const [hint, setHint] = useState(null);
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+  const launcherRef = useRef(null);
   const hintTimerRef = useRef(null);
   // Each issue nudges once per page visit. Held in a ref, not storage — an
   // anonymous visitor on a shared machine should leave nothing behind.
@@ -103,7 +118,7 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
       })
       .catch(() => {
         if (cancelled) return;
-        setMeta({ enabled: true, supportEmail: "eswmr3@emb.gov.ph", starterQuestions: [] });
+        setMeta({ enabled: true, supportEmail: SUPPORT_EMAIL, starterQuestions: [] });
         setMessages((m) =>
           m.length
             ? m
@@ -116,6 +131,13 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, sending, open]);
+
+  // Focus the composer when the window opens.
+  useEffect(() => {
+    if (!open) return undefined;
+    const t = setTimeout(() => inputRef.current?.focus?.(), 120);
+    return () => clearTimeout(t);
+  }, [open]);
 
   // Opened from elsewhere on the page (e.g. the "didn't get the code?" prompt on the
   // recovery screen), optionally seeded with the question already asked.
@@ -150,9 +172,17 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (open) setHint(null);
-  }, [open]);
+  const openChat = (seed) => {
+    setHint(null);
+    setOpen(true);
+    if (seed) setInput(String(seed).slice(0, MAX_INPUT));
+  };
+
+  const closeChat = () => {
+    setOpen(false);
+    // Focus back to the launcher, so keyboard users are not stranded.
+    requestAnimationFrame(() => launcherRef.current?.focus?.());
+  };
 
   const send = useCallback(
     async (text) => {
@@ -170,7 +200,7 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
           ...m,
           {
             role: "assistant",
-            content: data?.answer || "I couldn't answer that. Please email eswmr3@emb.gov.ph.",
+            content: data?.answer || `I couldn't answer that. Please email ${SUPPORT_EMAIL}.`,
           },
         ]);
       } catch (err) {
@@ -179,11 +209,12 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
           ...m,
           {
             role: "assistant",
+            error: true,
             content:
               status === 429
                 ? err.response?.data?.message ||
-                  "Too many messages just now — please wait a few minutes, or email eswmr3@emb.gov.ph."
-                : `I couldn't reach the assistant service. For account help, email ${meta?.supportEmail || "eswmr3@emb.gov.ph"}.`,
+                  `Too many messages just now — please wait a few minutes, or email ${SUPPORT_EMAIL}.`
+                : `I couldn't reach the assistant service. For account help, email ${meta?.supportEmail || SUPPORT_EMAIL}.`,
           },
         ]);
       } finally {
@@ -193,140 +224,181 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
     [input, sending, messages, page, meta],
   );
 
-  if (!open) {
-    return (
-      <div className="vera-auth-dock">
-        {hint && (
-          // Live region so a screen reader announces the offer of help rather than
-          // it being purely visual.
-          <div className="vera-auth-hint" role="status" aria-live="polite">
-            <button
-              type="button"
-              className="vera-auth-hint-body"
-              onClick={() => { setOpen(true); setInput(hint.ask.slice(0, MAX_INPUT)); }}
-            >
-              <VeraFlameIcon size={16} />
-              <span>{hint.text}</span>
-            </button>
-            <button
-              type="button"
-              className="vera-auth-hint-x"
-              aria-label="Dismiss VERA suggestion"
-              onClick={(e) => { e.stopPropagation(); setHint(null); }}
-            >
-              <CloseOutlined />
-            </button>
-          </div>
-        )}
-        <Tooltip
-          title={hint ? hint.text : "Need help signing in or recovering your account? Ask VERA"}
-          placement="left"
-          open={hint ? false : undefined}
-        >
-          <Badge dot={!!hint} color="#ff4d4f" offset={[-6, 6]}>
-            <button
-              type="button"
-              onClick={() => setOpen(true)}
-              aria-label="Open VERA account help"
-              className={`vera-auth-fab${hint ? " has-issue" : ""}`}
-            >
-              {/* The UCDS VERA launcher: the flame in a round button with the
-                  border beam running round its edge. Red while a sign-in issue
-                  is being offered, so the beam carries the same signal the
-                  pulse does. */}
-              <VeraEdgeBeam radius="pill" pad={8} theme="light" color={hint ? "#ff4d4f" : "vera"} />
-              <span className="vera-auth-fab-mark">
-                <VeraFlameIcon size={34} /></span>
-            </button>
-          </Badge>
-        </Tooltip>
-        <style>{dockCss}</style>
-      </div>
-    );
-  }
+  // One state for every flame: thinking while an answer is on its way,
+  // listening while a question is typed, burning at rest.
+  const flameState = sending ? "thinking" : inputFocused && input.trim() ? "listening" : "burning";
+  const starters = meta?.starterQuestions || [];
 
   return (
-    <div className="vera-auth-panel" role="dialog" aria-label="VERA account help">
-      <div className="vera-auth-head">
-        <Space size={8}>
-          {/* Same reason as the button: the flame is a blue→teal→green gradient, so
-              on the gradient header bar it disappeared. White disc behind it. */}
-          <span className="vera-auth-head-icon">
-            <VeraFlameIcon size={18} anime />
-          </span>
-          <Text strong style={{ color: "#fff" }}>VERA — Account Help</Text>
-        </Space>
-        <Space size={4}>
-          <Tooltip title="Start over">
-            <Button
-              type="text"
-              size="small"
-              icon={<ReloadOutlined style={{ color: "#fff" }} />}
-              onClick={() => setMessages(meta?.greeting ? [{ role: "assistant", content: meta.greeting }] : [])}
-              aria-label="Reset conversation"
-            />
-          </Tooltip>
-          <Button
-            type="text"
-            size="small"
-            icon={<CloseOutlined style={{ color: "#fff" }} />}
-            onClick={() => setOpen(false)}
-            aria-label="Close"
-          />
-        </Space>
-      </div>
-
-      <Alert
-        type="info"
-        showIcon={false}
-        banner
-        message={
-          <Text style={{ fontSize: 11 }}>
-            I can&apos;t look up accounts or confirm whether an email is registered. Never share a
-            password or reset code here.
-          </Text>
-        }
-        style={{ padding: "4px 10px" }}
-      />
-
-      <div className="vera-auth-body" ref={scrollRef}>
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "vera-auth-msg user" : "vera-auth-msg bot"}>
-            {m.content}
+    <div className="vera-root vera-root--auth" data-theme="light" style={{ "--v-app-accent": accent }}>
+      {/* A sign-in problem the page reported, said from VERA's introduction
+          card (the portal's floating card). */}
+      {!open && hint && (
+        <div className="vera-intro" role="status" aria-live="polite">
+          <div className="vera-intro__head">
+            <span className="vera-intro__mark">
+              <VeraFlame size={40} state="working" theme="light" label="" />
+            </span>
+            <div className="vera-intro__who">
+              <span className="vera-intro__name">VERA</span>
+              <span className="vera-intro__role">Sign-in &amp; account help</span>
+            </div>
+            <button
+              type="button"
+              className="vera-icon-btn vera-intro__close"
+              aria-label="Dismiss VERA suggestion"
+              title="Dismiss"
+              onClick={() => setHint(null)}
+            >
+              ×
+            </button>
           </div>
-        ))}
-        {sending && <div className="vera-auth-msg bot vera-auth-typing">VERA is thinking…</div>}
-        {messages.length <= 1 && !sending && (meta?.starterQuestions || []).length > 0 && (
-          <div className="vera-auth-starters">
-            {meta.starterQuestions.map((q) => (
-              <button key={q} type="button" onClick={() => send(q)}>{q}</button>
-            ))}
+          <p className="vera-intro__text">{hint.text}</p>
+          <div className="vera-intro__actions">
+            <button type="button" className="vera-intro__primary" onClick={() => openChat(hint.ask)}>
+              Ask VERA
+            </button>
+            <button type="button" className="vera-intro__secondary" onClick={() => setHint(null)}>
+              Not now
+            </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div className="vera-auth-foot">
-        <Input.TextArea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onPressEnter={(e) => {
-            if (!e.shiftKey) { e.preventDefault(); send(); }
+      {!open && (
+        // Red beam while a problem is being offered, so the launcher carries the
+        // same signal as the card above it.
+        <BorderBeam
+          className={`vera-launcher-dock${hint ? " is-nudging" : ""}`}
+          size="sm"
+          colorVariant={hint ? "sunset" : "ocean"}
+          theme="light"
+          duration={2.6}
+        >
+          <button
+            type="button"
+            ref={launcherRef}
+            className="vera-launcher"
+            aria-label="Open VERA account help"
+            onClick={() => openChat()}
+          >
+            <VeraFlame size={isPhone ? 40 : 36} state="burning" theme="light" glow={false} label="" />
+            <span className="vera-launcher__text">
+              <span className="vera-launcher__label">Ask VERA</span>
+              <span className="vera-launcher__sub">Sign-in &amp; account help</span>
+            </span>
+          </button>
+        </BorderBeam>
+      )}
+
+      {open && (
+        <section
+          className={`vera-window${isPhone ? " vera-window--mobile" : ""}`}
+          role="dialog"
+          aria-label="VERA account help"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") closeChat();
           }}
-          placeholder="Describe the problem…"
-          autoSize={{ minRows: 1, maxRows: 3 }}
-          maxLength={MAX_INPUT}
-          disabled={sending}
-        />
-        <Button
-          type="primary"
-          icon={<SendOutlined />}
-          loading={sending}
-          onClick={() => send()}
-          disabled={!input.trim()}
-          aria-label="Send"
-        />
-      </div>
-      <style>{panelCss}</style>
+        >
+          <header className="vera-header">
+            <div className="vera-header__id">
+              <span className="vera-header__mark">
+                <VeraFlame size={34} state={flameState} theme="light" label="" />
+              </span>
+              <div className="vera-header__text">
+                <div className="vera-header__name">VERA</div>
+                <div className="vera-header__sub">
+                  <span className={`vera-status-dot vera-status-dot--${sending ? "busy" : "online"}`} />
+                  {sending ? "Answering…" : "Sign-in & account help"}
+                </div>
+              </div>
+            </div>
+            <div className="vera-header__actions">
+              <button
+                type="button"
+                className="vera-icon-btn"
+                aria-label="Start over"
+                title="Start over"
+                onClick={() => setMessages(meta?.greeting ? [{ role: "assistant", content: meta.greeting }] : [])}
+              >
+                <ReloadOutlined />
+              </button>
+              <button type="button" className="vera-icon-btn" aria-label="Close" title="Close" onClick={closeChat}>
+                <CloseOutlined />
+              </button>
+            </div>
+          </header>
+
+          <div className="vera-fullname">Virtual Environmental Response Assistant</div>
+
+          <div className="vera-messages" ref={scrollRef} aria-live="polite">
+            {messages.map((m, i) => (
+              <div key={i} className={`vera-msg vera-msg--${m.role === "user" ? "user" : "assistant"}`}>
+                <div className={`vera-bubble${m.error ? " vera-bubble--error" : ""}`} style={{ whiteSpace: "pre-wrap" }}>
+                  {m.content}
+                </div>
+              </div>
+            ))}
+            {sending && (
+              <div className="vera-msg vera-msg--assistant">
+                <div className="vera-bubble vera-thinking" aria-live="assertive">
+                  <VeraFlame size={26} state="thinking" theme="light" label="" className="vera-thinking__mark" />
+                  <span className="vera-thinking__text">VERA is thinking…</span>
+                </div>
+              </div>
+            )}
+            {messages.length <= 1 && !sending && starters.length > 0 && (
+              <div className="vera-starters">
+                <div className="vera-starters__label">Try asking:</div>
+                {starters.map((q) => (
+                  <button key={q} type="button" className="vera-starter-chip" onClick={() => send(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <form
+            className="vera-input-row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              send();
+            }}
+          >
+            <textarea
+              ref={inputRef}
+              className="vera-input"
+              value={input}
+              maxLength={MAX_INPUT}
+              rows={1}
+              placeholder="Describe the problem…"
+              aria-label="Message to VERA"
+              disabled={sending}
+              onChange={(e) => setInput(e.target.value)}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+            <button type="submit" className="vera-send-btn" aria-label="Send" disabled={!input.trim() || sending}>
+              <SendOutlined />
+            </button>
+          </form>
+
+          <div className="vera-disclaimer">
+            <MessageOutlined />
+            <span>
+              VERA can&apos;t look up accounts or confirm whether an email is registered. Never share a
+              password or reset code here.
+            </span>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -350,151 +422,3 @@ export function VeraAuthHelpLink({ children, ask }) {
     </Button>
   );
 }
-
-/* Shared positioning contract for the collapsed dock and the open panel, so the
-   panel opens exactly where the button was.
-
-   z-index 900 is deliberate and sits BELOW antd's modal layer (1000): the auth
-   pages open real modals (the credential prompt, the developer PIN dialog, the
-   error card), and at 1200 the button floated ON TOP of their overlays.
-
-   The bottom offset clears `.auth-page-footer` in Auth.css. On desktop that footer
-   is `position: absolute; bottom: 16px` full-width centred text; below 992px it
-   joins the normal flow at the page bottom, so the offset grows to clear it there.
-   `env(safe-area-inset-bottom)` keeps the button off the iOS home indicator. */
-const dockPosition = `
-  position: fixed;
-  right: max(20px, env(safe-area-inset-right, 0px));
-  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  z-index: 900;
-`;
-
-const dockCss = `
-.vera-auth-dock {
-  ${dockPosition}
-  display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
-  pointer-events: none;
-}
-.vera-auth-dock > * { pointer-events: auto; }
-
-/* WHITE, not the brand gradient: the flame carries the colour, and on a
-   coloured button it all but disappears. The border beam (VeraEdgeBeam, laid
-   over the button's edge) is the UCDS VERA launcher treatment; the mark sits
-   above it so the beam's glow never washes over the flame. */
-.vera-auth-fab {
-  position: relative;
-  width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: #fff;
-  box-shadow:
-    inset 0 0 0 2px rgba(19,194,194,0.30),
-    0 6px 20px rgba(26,51,83,0.28);
-  transition: transform .18s ease, box-shadow .18s ease;
-}
-.vera-auth-fab:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    inset 0 0 0 2px rgba(19,194,194,0.55),
-    0 10px 26px rgba(26,51,83,0.34);
-}
-.vera-auth-fab:focus-visible { outline: 3px solid #91caff; outline-offset: 3px; }
-.vera-auth-fab .vera-edge-beam { position: absolute; z-index: 0; pointer-events: none; }
-.vera-auth-fab-mark { position: relative; z-index: 1; display: inline-flex; line-height: 0; }
-.vera-auth-fab.has-issue {
-  box-shadow:
-    inset 0 0 0 2px rgba(255,77,79,0.45),
-    0 6px 20px rgba(26,51,83,0.28);
-  animation: veraAuthPulse 2s ease-in-out infinite;
-}
-@keyframes veraAuthPulse {
-  0%, 100% { box-shadow: inset 0 0 0 2px rgba(255,77,79,0.45), 0 6px 20px rgba(26,51,83,0.28); }
-  50%      { box-shadow: inset 0 0 0 2px rgba(255,77,79,0.85), 0 6px 26px rgba(255,77,79,0.45); }
-}
-
-/* Hint bubble. Width is capped against the viewport so it can never push the page
-   sideways on a phone. */
-.vera-auth-hint {
-  display: flex; align-items: stretch; max-width: min(268px, calc(100vw - 40px));
-  background: #fff; border: 1px solid #ffccc7; border-radius: 12px;
-  box-shadow: 0 10px 28px rgba(16,38,64,0.20);
-  overflow: hidden; animation: veraAuthHintIn .22s ease-out both;
-}
-.vera-auth-hint-body {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  padding: 9px 10px; border: none; background: transparent; cursor: pointer;
-  font-size: 12.5px; line-height: 1.35; color: #22364d; text-align: left;
-}
-.vera-auth-hint-body:hover { background: #fff1f0; }
-.vera-auth-hint-x {
-  border: none; background: transparent; cursor: pointer; padding: 0 8px;
-  color: #8c8c8c; font-size: 11px; border-left: 1px solid #f0f0f0;
-}
-.vera-auth-hint-x:hover { color: #ff4d4f; }
-@keyframes veraAuthHintIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* Clear the stacked in-flow footer once Auth.css switches to a column layout. */
-@media (max-width: 992px) {
-  .vera-auth-dock { bottom: calc(58px + env(safe-area-inset-bottom, 0px)); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .vera-auth-fab, .vera-auth-hint { transition: none; animation: none; }
-  .vera-auth-fab.has-issue { animation: none; }
-}
-`;
-
-const panelCss = `
-.vera-auth-panel {
-  ${dockPosition}
-  width: min(360px, calc(100vw - 32px));
-  /* dvh, not vh: on mobile browsers vh ignores the collapsing toolbar and the
-     on-screen keyboard, which pushed the input out of reach. */
-  max-height: min(560px, calc(100dvh - 96px));
-  display: flex; flex-direction: column; overflow: hidden;
-  background: #fff; border-radius: 14px; border: 1px solid #e4ebf2;
-  box-shadow: 0 18px 48px rgba(16,38,64,0.24);
-}
-@media (max-width: 992px) {
-  .vera-auth-panel { bottom: calc(58px + env(safe-area-inset-bottom, 0px)); }
-}
-@media (max-width: 480px) {
-  .vera-auth-panel {
-    right: 12px; left: 12px; width: auto;
-    max-height: min(70dvh, calc(100dvh - 110px));
-  }
-}
-.vera-auth-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 10px 12px;
-  background: linear-gradient(135deg, #0958d9 0%, #13c2c2 100%);
-}
-.vera-auth-head-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px; border-radius: 50%;
-  background: #fff; box-shadow: inset 0 0 0 2px rgba(19,194,194,0.25);
-}
-.vera-auth-body {
-  flex: 1; min-height: 180px; overflow-y: auto; padding: 12px;
-  display: flex; flex-direction: column; gap: 8px; background: #fbfdff;
-}
-.vera-auth-msg {
-  max-width: 86%; padding: 8px 11px; border-radius: 12px;
-  font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word;
-}
-.vera-auth-msg.bot { align-self: flex-start; background: #fff; border: 1px solid #e4ebf2; color: #22364d; }
-.vera-auth-msg.user { align-self: flex-end; background: #1677ff; color: #fff; }
-.vera-auth-typing { color: #5a7089; font-style: italic; }
-.vera-auth-starters { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-.vera-auth-starters button {
-  text-align: left; font-size: 12px; padding: 7px 10px; cursor: pointer;
-  background: #fff; border: 1px dashed #91caff; border-radius: 9px; color: #0958d9;
-}
-.vera-auth-starters button:hover { background: #e6f4ff; }
-.vera-auth-foot {
-  display: flex; gap: 8px; align-items: flex-end;
-  padding: 10px; border-top: 1px solid #e4ebf2; background: #fff;
-}
-.vera-auth-foot .ant-input { font-size: 13px; }
-`;
