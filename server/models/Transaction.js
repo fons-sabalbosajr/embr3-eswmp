@@ -31,6 +31,13 @@ const transactionSchema = new mongoose.Schema(
         "revert_approved",   // admin approved revert
         "baseline_update_request", // portal user requested baseline field update
         "baseline_update_approved", // admin approved baseline update request
+        // Written by routes/dataSLF.js but missing from this list, so every one
+        // failed validation inside a silent try/catch and was never recorded —
+        // no audit row for a lock, and My Requests could not see it as the
+        // answer to a baseline request.
+        "baseline_update_rejected", // admin rejected baseline update request
+        "baseline_locked",          // admin re-locked baseline data
+        "baseline_clients_updated", // admin corrected hauler clients on the baseline
         "baseline_update",   // admin updated baseline data
         "baseline_delete",   // admin cleared baseline data
         "admin_edit",        // admin edited a portal submission
@@ -82,5 +89,8 @@ transactionSchema.index({ performedBy: 1, type: 1, createdAt: -1 });
 // written, on the hot path of an operation the user is waiting on. Sparse — only
 // batched writes carry a batchId.
 transactionSchema.index({ "meta.batchId": 1 }, { sparse: true });
+// My Requests resolves each edit request by the ENTRY it is about (the admin's
+// approve / reject / revert of that entry) — utils/requestStatus.
+transactionSchema.index({ dataEntry: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Transaction", transactionSchema, "transactions");

@@ -4,6 +4,12 @@ const DataSLF = require("../models/DataSLF");
 const UserPortal = require("../models/UserPortal");
 const { backfillTransactions } = require("../utils/backfillTransactions");
 const { wantsIncludeDummy } = require("../utils/dummyFilter");
+const SupportTicket = require("../models/SupportTicket");
+const {
+  annotateRequestStatuses,
+  EDIT_ANSWER_TYPES,
+  BASELINE_ANSWER_TYPES,
+} = require("../utils/requestStatus");
 
 const router = express.Router();
 
@@ -192,9 +198,75 @@ router.get("/my-requests", async (req, res) => {
       byId.set(String(row._id), row);
     });
 
-    const transactions = [...byId.values()]
+    const rows = [...byId.values()]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, limit);
+
+    // Each request's status, resolved from the admin's actual answer to it (see
+    // utils/requestStatus). The answers are read by the entry / facility / ticket
+    // the requests name — not by this user — because an admin's revert or lock
+    // is logged under the admin, not the requester.
+    const entryIds = [
+      ...new Set(
+        rows
+          .filter((r) => r.type === "submission_edit_request" && r.dataEntry)
+          .map((r) => String(r.dataEntry)),
+      ),
+    ];
+    const companies = [
+      ...new Set(
+        rows
+          .filter((r) => r.type === "baseline_update_request" && r.companyName)
+          .map((r) => r.companyName),
+      ),
+    ];
+    const ticketNos = [
+      ...new Set(
+        rows
+          .filter((r) => r.type === "support_ticket")
+          .map((r) => String(r.meta?.ticketNo || r.submissionId || ""))
+          .filter(Boolean),
+      ),
+    ];
+    const answerQuery = [
+      ...(entryIds.length ? [{ dataEntry: { $in: entryIds }, type: { $in: EDIT_ANSWER_TYPES } }] : []),
+      ...(companies.length ? [{ companyName: { $in: companies }, type: { $in: BASELINE_ANSWER_TYPES } }] : []),
+    ];
+    const [answers, entries, tickets, knownFacilities, requestedFacilities] = await Promise.all([
+      answerQuery.length
+        ? Transaction.find({ $or: answerQuery })
+            .select("type createdAt dataEntry companyName meta.action meta.reason meta.slfName")
+            .lean()
+        : [],
+      entryIds.length
+        ? DataSLF.find({ _id: { $in: entryIds } })
+            .setOptions({ includeHiddenYears: true, includeNonOperationalSlf: true })
+            .select("revertRequested")
+            .lean()
+        : [],
+      ticketNos.length
+        ? SupportTicket.find({ ticketNo: { $in: ticketNos } }).select("ticketNo status").lean()
+        : [],
+      // Which facilities are known, and which still have a baseline request
+      // open — a request on a facility that has none open was answered.
+      companies.length ? DataSLF.distinct("slfName", { slfName: { $in: companies } }) : [],
+      companies.length
+        ? DataSLF.distinct("slfName", { slfName: { $in: companies }, baselineUpdateRequested: true })
+        : [],
+    ]);
+
+    const requestedSet = new Set(requestedFacilities.map((n) => String(n).trim().toLowerCase()));
+    const transactions = annotateRequestStatuses(rows, {
+      answers,
+      revertFlagById: new Map(entries.map((e) => [String(e._id), Boolean(e.revertRequested)])),
+      ticketStatusByNo: new Map(tickets.map((t) => [String(t.ticketNo), t.status])),
+      baselineRequestedByCompany: new Map(
+        knownFacilities.map((n) => {
+          const key = String(n).trim().toLowerCase();
+          return [key, requestedSet.has(key)];
+        }),
+      ),
+    });
 
     res.json({ transactions, total: transactions.length });
   } catch (error) {

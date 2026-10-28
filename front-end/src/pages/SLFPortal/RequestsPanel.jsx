@@ -49,6 +49,35 @@ const threadKey = (record = {}) => {
   return `id:${record._id}`;
 };
 
+// The type a row is SHOWN as (a baseline rejection is logged under the request
+// type; the server marks it with displayType).
+const rowType = (record = {}) => record.displayType || record.type || "";
+
+// The status of a row, as the admin side labels it. Resolved by the server from
+// the admin's actual answer to this request (server/utils/requestStatus.js);
+// the inference below is only the fallback for a server that predates it.
+const statusOf = (record, all = []) => {
+  if (record?.requestStatus?.label) return record.requestStatus;
+  const type = record?.type || "";
+  if (type.includes("approved")) return { label: "Approved", color: "green" };
+  if (type.includes("rejected") || record?.meta?.action === "rejected") return { label: "Rejected", color: "red" };
+  if (type.includes("request")) {
+    const company = record.companyName || record.meta?.slfName;
+    const base = type.replace("_request", "");
+    const resolved = all.find(
+      (t) =>
+        t._id !== record._id &&
+        new Date(t.createdAt) >= new Date(record.createdAt) &&
+        (t.companyName === company || t.meta?.slfName === company) &&
+        (t.type === `${base}_approved` || t.type === `${base}_rejected` || t.meta?.action === "rejected"),
+    );
+    if (resolved?.type?.includes("approved")) return { label: "Approved", color: "green" };
+    if (resolved) return { label: "Rejected", color: "red" };
+    return { label: "Pending", color: "orange" };
+  }
+  return { label: "Info", color: "blue" };
+};
+
 const fmtDateTime = (v) =>
   v
     ? new Date(v).toLocaleString("en-PH", {
@@ -152,8 +181,9 @@ export default function RequestsPanel({
                   value: val,
                 }),
               ),
-              onFilter: (value, record) => record.type === value,
-              render: (t) => {
+              onFilter: (value, record) => rowType(record) === value,
+              render: (_, record) => {
+                const t = rowType(record);
                 const cfg = REQUEST_TYPE_MAP[t] || {
                   label: t,
                   color: "default",
@@ -182,42 +212,17 @@ export default function RequestsPanel({
             },
             {
               title: "Status",
-              dataIndex: "type",
               key: "status",
-              width: 120,
-              render: (type, record) => {
-                const approved = type.includes("approved");
-                const rejected =
-                  type.includes("rejected") ||
-                  record.meta?.action === "rejected";
-                if (approved) return <Tag color="green">APPROVED</Tag>;
-                if (rejected) return <Tag color="red">REJECTED</Tag>;
-                // For request types, check if a resolution exists in the list
-                if (type.includes("request")) {
-                  const company = record.companyName || record.meta?.slfName;
-                  const resolutionType = type.replace("_request", "");
-                  const resolved = myRequests.find(
-                    (t) =>
-                      t._id !== record._id &&
-                      new Date(t.createdAt) >= new Date(record.createdAt) &&
-                      (t.companyName === company ||
-                        t.meta?.slfName === company) &&
-                      (t.type === `${resolutionType}_approved` ||
-                        t.type === `${resolutionType}_rejected` ||
-                        t.meta?.action === "rejected"),
-                  );
-                  if (resolved) {
-                    if (resolved.type.includes("approved"))
-                      return <Tag color="green">APPROVED</Tag>;
-                    if (
-                      resolved.type.includes("rejected") ||
-                      resolved.meta?.action === "rejected"
-                    )
-                      return <Tag color="red">REJECTED</Tag>;
-                  }
-                  return <Tag color="orange">PENDING</Tag>;
-                }
-                return <Tag color="blue">INFO</Tag>;
+              width: 150,
+              // Options from the statuses actually present, so nothing unused is
+              // offered.
+              filters: [
+                ...new Set((myRequests || []).map((r) => statusOf(r, myRequests).label)),
+              ].map((label) => ({ text: label, value: label })),
+              onFilter: (value, record) => statusOf(record, myRequests).label === value,
+              render: (_, record) => {
+                const status = statusOf(record, myRequests);
+                return <Tag color={status.color}>{status.label}</Tag>;
               },
             },
             {
@@ -262,7 +267,7 @@ export default function RequestsPanel({
             <Space>
               <AuditOutlined style={{ color: "#1a3353" }} />
               <span>
-                {(REQUEST_TYPE_MAP[viewing.type] || { label: viewing.type })
+                {(REQUEST_TYPE_MAP[rowType(viewing)] || { label: rowType(viewing) })
                   .label}
               </span>
             </Space>
@@ -284,12 +289,17 @@ export default function RequestsPanel({
               <Descriptions.Item label="Type">
                 <Tag
                   color={
-                    (REQUEST_TYPE_MAP[viewing.type] || { color: "default" })
+                    (REQUEST_TYPE_MAP[rowType(viewing)] || { color: "default" })
                       .color
                   }
                 >
-                  {(REQUEST_TYPE_MAP[viewing.type] || { label: viewing.type })
+                  {(REQUEST_TYPE_MAP[rowType(viewing)] || { label: rowType(viewing) })
                     .label}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Status">
+                <Tag color={statusOf(viewing, myRequests).color}>
+                  {statusOf(viewing, myRequests).label}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="Submitted">
@@ -317,8 +327,8 @@ export default function RequestsPanel({
               {thread.length ? (
                 <Timeline
                   items={thread.map((entry) => {
-                    const cfg = REQUEST_TYPE_MAP[entry.type] || {
-                      label: entry.type,
+                    const cfg = REQUEST_TYPE_MAP[rowType(entry)] || {
+                      label: rowType(entry),
                       color: "blue",
                     };
                     const color = entry.type.includes("approved")

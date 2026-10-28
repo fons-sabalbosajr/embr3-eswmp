@@ -25,6 +25,13 @@ export const REQUEST_TYPE_MAP = {
     label: "Baseline Update Approved",
     color: "green",
   },
+  // A rejection is logged under the request type with meta.action "rejected";
+  // the server names it this way (row.displayType) so it does not read as a
+  // second request.
+  baseline_update_rejected: {
+    label: "Baseline Update Rejected",
+    color: "red",
+  },
   submission_edit_request: { label: "Edit Request", color: "blue" },
   submission_edit_approved: { label: "Edit Approved", color: "green" },
   submission_edit_rejected: { label: "Edit Rejected", color: "red" },
