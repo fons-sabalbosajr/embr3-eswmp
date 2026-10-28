@@ -6,7 +6,7 @@ import {
 import {
   FileTextOutlined, ClockCircleOutlined, ReloadOutlined, SendOutlined,
   DeleteOutlined, StopOutlined, EyeOutlined, CheckCircleOutlined, DownloadOutlined,
-  CloseCircleOutlined, ExclamationCircleOutlined, RedoOutlined,
+  CloseCircleOutlined, ExclamationCircleOutlined, RedoOutlined, EditOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import Swal from "sweetalert2";
@@ -324,6 +324,9 @@ export default function DraftsScheduledPanel({
   // submitted while an old revert is unresolved, so the failure offers the fix
   // itself rather than sending the operator to look for it.
   onResolveRevert,
+  // Loads a draft (full record) into Data Entry for correcting. Without it a
+  // draft rejected for its own content could only be retried unchanged.
+  onEditDraft,
 }) {
   const [drafts, setDrafts] = useState([]);
   const [scheduled, setScheduled] = useState([]);
@@ -555,6 +558,23 @@ export default function DraftsScheduledPanel({
     }
   };
 
+  // The list carries no payload, so the full record is read before it is handed
+  // to Data Entry — same read as openRecord.
+  const editInDataEntry = async (record) => {
+    if (!onEditDraft) return;
+    setBusyId(record._id);
+    try {
+      const { data } = record.payload
+        ? { data: record }
+        : await api.get(`/portal-queue/${record._id}`, { params: { email } });
+      onEditDraft(data);
+    } catch {
+      Swal.fire("Error", "Could not open this draft for editing. Please try again.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const cancelScheduled = async (record) => {
     setBusyId(record._id);
     try {
@@ -600,6 +620,19 @@ export default function DraftsScheduledPanel({
         <Tooltip title="View data">
           <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => openRecord(record)} />
         </Tooltip>
+        {/* Drafts only: a scheduled run carries its own time, edited elsewhere. */}
+        {!isScheduled && retryable && onEditDraft && (
+          <Tooltip title="Edit in Data Entry">
+            <Button
+              size="small"
+              type="text"
+              icon={<EditOutlined />}
+              style={{ color: "#1a3353" }}
+              disabled={busyId === record._id}
+              onClick={() => editInDataEntry(record)}
+            />
+          </Tooltip>
+        )}
         {retryable && (
           <Tooltip title={record.status === "failed" ? "Retry submission" : "Submit now"}>
             <Button

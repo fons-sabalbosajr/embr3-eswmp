@@ -2437,6 +2437,35 @@ async function assertNoUnresolvedRevert(email) {
   }
 }
 
+// A non-operational SLF cannot receive an OFFICIAL submission. POST /data-slf
+// turns such an attempt into a draft before it ever gets here — but a draft
+// submitted from Drafts & Scheduled, and a scheduled run fired by the worker,
+// call submitEntries directly, so the restriction has to live here too or the
+// draft it created is one click away from becoming an official record.
+async function assertSlfsOperational(items) {
+  const ids = [
+    ...new Set(
+      items
+        .map((entry) => String(entry?.slfGenerator || ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  if (!ids.length) return;
+  const blocked = await SlfFacility.find({ _id: { $in: ids } })
+    .setOptions({ includeHiddenYears: true })
+    .select("statusOfSLF slfName lgu")
+    .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
+    .lean();
+  const nonOperational = blocked.find((facility) => isSlfNonOperational(facility.statusOfSLF));
+  if (!nonOperational) return;
+  const error = new Error(
+    `${nonOperational.slfName || nonOperational.lgu || "Your assigned SLF"} is tagged non-operational and its cell is subject to EMB Region III verification, so it cannot receive an official submission. Keep this as a draft until the restriction is lifted.`,
+  );
+  error.statusCode = 409;
+  error.code = "SLF_NON_OPERATIONAL";
+  throw error;
+}
+
 async function submitEntries(params = {}) {
   const key = params.idempotencyKey ? String(params.idempotencyKey) : null;
   if (key) {
@@ -2516,6 +2545,7 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
     error.statusCode = 400;
     throw error;
   }
+  await timeStage("non-operational", () => assertSlfsOperational(items));
 
   // Validate + normalize every entry up front so an invalid entry can't cause a
   // partial save or a Mongoose 500.

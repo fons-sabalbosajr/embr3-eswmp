@@ -6027,6 +6027,10 @@ export default function SLFPortal() {
   // ── Edit reverted entry ──
   const [editingRevertedId, setEditingRevertedId] = useState(null);
   const [resubmitComment, setResubmitComment] = useState("");
+  // ── Edit a saved draft ── { id, label } of the Drafts & Scheduled record whose
+  // data is loaded into Data Entry. Save as Draft updates THAT record, and a
+  // successful Review & Submit removes it from the queue.
+  const [editingDraft, setEditingDraft] = useState(null);
 
   // The history LIST is lean (no trucks / haulers / baseline blobs — see
   // portalAuth PORTAL_SUBMISSION_LIST_FIELDS), so Edit & Resubmit pulls the FULL
@@ -6194,6 +6198,7 @@ export default function SLFPortal() {
         recordBaselineUnit,
       ),
     );
+    setEditingDraft(null);
     setEditingRevertedId(record._id);
     setSubmitted(false);
     setBaselineSaved(true);
@@ -6221,6 +6226,70 @@ export default function SLFPortal() {
       html: `<b>Reason for revert:</b> ${record.revertReason || "Not specified"}<br/><br/>Please review and update the data across all tabs, then submit again.`,
       confirmButtonColor: "#1a3353",
     });
+  };
+
+  // Load a saved draft (full record, payload included) into Data Entry so the
+  // operator can correct it. A draft rejected for its own content — "At least
+  // one truck entry is required" (General Tinio) — could otherwise only be
+  // retried unchanged, which failed again, or deleted.
+  //
+  // Only the DISPOSAL data comes from the draft. Baseline and haulers are the
+  // facility's and stay as loaded, same rule as Edit & Resubmit above.
+  const handleEditDraft = (record) => {
+    const payload = record?.payload || {};
+    setEditingRevertedId(null);
+    setResubmitComment("");
+    entryForm.setFieldsValue({
+      dateOfDisposal: payload.dateOfDisposal ? dayjs(payload.dateOfDisposal) : null,
+    });
+    // Company details only where the draft carries them — setFieldsValue with
+    // `undefined` would CLEAR what the form already holds.
+    const companyFields = [
+      "lguCompanyName", "companyType", "address",
+      "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
+    ].reduce((acc, field) => {
+      if (payload[field] !== undefined && payload[field] !== null && payload[field] !== "") {
+        acc[field] = payload[field];
+      }
+      return acc;
+    }, {});
+    if (Object.keys(companyFields).length) companyForm.setFieldsValue(companyFields);
+    setTrucks(
+      (Array.isArray(payload.trucks) ? payload.trucks : []).map((t, i) => ({
+        ...t,
+        key: `draft-${i}-${Date.now()}`,
+      })),
+    );
+    setTruckDraft({ ...EMPTY_TRUCK });
+    setEditingTruckKey(null);
+    setEditingDraft({
+      id: record._id,
+      label: payload.dateOfDisposal ? dayjs(payload.dateOfDisposal).format("MMM D, YYYY") : "undated",
+    });
+    setSubmitted(false);
+    setActiveMenu("data-entry");
+    setActiveTab("disposal");
+    const keepSelection = { preserveSelection: true };
+    if (companyFields.companyRegion) fetchProvinces(companyFields.companyRegion, keepSelection);
+    if (companyFields.companyProvince) fetchMunicipalities(companyFields.companyProvince, keepSelection);
+    if (companyFields.companyMunicipality) fetchBarangays(companyFields.companyMunicipality, keepSelection);
+    Swal.fire({
+      icon: "info",
+      title: "Editing Draft",
+      html: record?.failureReason
+        ? `<b>Why it was not submitted:</b> ${String(record.failureReason).replace(/[<>&]/g, "")}<br/><br/>Correct it here, then use <b>Review &amp; Submit</b> — or <b>Save as Draft</b> to keep working later.`
+        : "Your draft is loaded. Use <b>Review &amp; Submit</b> when it is complete, or <b>Save as Draft</b> to keep working later.",
+      confirmButtonColor: "#1a3353",
+    });
+  };
+
+  // Leave draft editing and start a fresh entry. The draft stays in the queue.
+  const stopEditingDraft = () => {
+    setEditingDraft(null);
+    setTrucks([]);
+    setTruckDraft({ ...EMPTY_TRUCK });
+    setEditingTruckKey(null);
+    entryForm.resetFields();
   };
 
   const handleResubmitReverted = async () => {
@@ -7095,6 +7164,14 @@ export default function SLFPortal() {
       }
       submitKeyRef.current = null; // confirmed persisted — retire the key
       setReviewModalOpen(false);
+      // The draft this entry was opened from has been submitted (or, for a
+      // non-operational SLF, re-saved by the server as a fresh draft) — either
+      // way the old queue record is superseded. Best effort: a failure here
+      // leaves a stale draft, never a lost submission.
+      if (editingDraft) {
+        api.delete(`/portal-queue/${editingDraft.id}`).catch(() => {});
+        setEditingDraft(null);
+      }
       // Item #2: the backend saved this as a DRAFT (HTTP 202) because the assigned
       // SLF is tagged non-operational and pending EMB Region III verification — it
       // is NOT an official submission. Explain clearly instead of "Submitted".
@@ -7236,23 +7313,35 @@ export default function SLFPortal() {
     setSavingDraft(true);
     try {
       const entry = buildSubmissionEntry();
-      const { data } = await api.post("/portal-queue", {
-        type: "draft",
-        payload: entry,
-        clientRequestId: newClientRequestId(),
-        slfName: activeSlfName,
-        slfGenerator: activeSlfId || null,
-      });
+      // Editing a draft opened from Drafts & Scheduled: update THAT record, even
+      // if its disposal date was changed (the facility+date match below would
+      // otherwise file a second draft and leave the original behind).
+      const { data } = editingDraft
+        ? await api.put(`/portal-queue/${editingDraft.id}`, {
+            type: "draft",
+            payload: entry,
+            slfName: activeSlfName,
+            slfGenerator: activeSlfId || null,
+          })
+        : await api.post("/portal-queue", {
+            type: "draft",
+            payload: entry,
+            clientRequestId: newClientRequestId(),
+            slfName: activeSlfName,
+            slfGenerator: activeSlfId || null,
+          });
       setReviewModalOpen(false);
       // Saving the same facility + disposal date again REPLACES the draft that
       // already holds it rather than stacking another copy beside it, so the
       // message has to say which of the two just happened — "Saved as Draft"
       // after an update reads as though a second draft now exists.
-      const updatedExisting = Boolean(data?.updatedExisting);
+      const updatedExisting = Boolean(editingDraft) || Boolean(data?.updatedExisting);
       Swal.fire({
         icon: "success",
         title: updatedExisting ? "Draft Updated" : "Saved as Draft",
-        text: updatedExisting
+        text: editingDraft
+          ? "Your draft was updated. Submit it from Drafts & Scheduled, or open it again to keep editing."
+          : updatedExisting
           ? "Your existing draft for this facility and disposal date was updated. Submit it from Drafts & Scheduled when it is complete."
           : "Your encoded data was saved. You can submit it later from Drafts & Scheduled.",
         confirmButtonColor: "#1a3353",
@@ -8004,6 +8093,8 @@ export default function SLFPortal() {
               revertToResolve={editingRevertedId ? null : unresolvedRevert}
               onResolveRevert={stableEditRevertedRow}
               resubmittingIdNo={resubmittingIdNo}
+              editingDraftLabel={editingDraft?.label || null}
+              onStopEditingDraft={stopEditingDraft}
             />
 
             {/* Disposal Data Form */}
@@ -9537,6 +9628,7 @@ export default function SLFPortal() {
               onSubmitted={handleDraftSubmitted}
               onAttentionCountChange={setQueueAttentionCount}
               onResolveRevert={(id) => stableEditRevertedRow({ _id: id })}
+              onEditDraft={handleEditDraft}
             />
           )}
         </Content>

@@ -59,6 +59,10 @@ export default function AssignedSlfDashboard({
   onResolveRevert,
   // ID No. of the reverted entry currently being corrected, if any.
   resubmittingIdNo = null,
+  // The saved draft currently loaded for editing (its disposal date), and the
+  // handler that leaves it for a fresh entry.
+  editingDraftLabel = null,
+  onStopEditingDraft,
 }) {
   // #5: Review & Submit is disabled until every submission requirement is met.
   const submitDisabled = submitBlockers.length > 0;
@@ -1405,6 +1409,27 @@ export default function AssignedSlfDashboard({
         }
       />
     )}
+      {editingDraftLabel && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 12 }}
+          message={
+            <Text style={{ fontSize: 12.5 }}>
+              You are editing your draft for <Text strong>{editingDraftLabel}</Text>.{" "}
+              <Text strong>Save as Draft</Text> updates it; <Text strong>Review &amp; Submit</Text>{" "}
+              submits it and removes it from Drafts &amp; Scheduled.
+            </Text>
+          }
+          action={
+            onStopEditingDraft ? (
+              <Button size="small" onClick={onStopEditingDraft}>
+                Start a new entry
+              </Button>
+            ) : null
+          }
+        />
+      )}
       {revertToResolve && onResolveRevert && (
         <Alert
         type="error"
