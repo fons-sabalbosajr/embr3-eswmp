@@ -84,6 +84,41 @@ function clearCurrentAnnouncement(settings) {
   settings.portalAnnouncementCtaUrl = "";
 }
 
+// The flat portalAnnouncement* fields are a DERIVED COPY of the active item in
+// portalAnnouncements[] — the login page and the portal read them. They used to
+// be writable through PUT /settings/app, and the Developer Settings save sent
+// `portalAnnouncementStartAt/EndAt: null` on every save (no form field holds
+// them), so the copy lost its dates while keeping `enabled: true`. The login
+// page then read an announcement that ended 2026-08-23 as open-ended and kept
+// showing it. These keys are now stripped from that write, and the copy is
+// re-derived from the item on every read and write.
+const DERIVED_ANNOUNCEMENT_KEYS = [
+  "portalAnnouncementActiveId", "portalAnnouncementEnabled", "portalAnnouncementType",
+  "portalAnnouncementTitle", "portalAnnouncementMessage", "portalAnnouncementStartAt",
+  "portalAnnouncementEndAt", "portalAnnouncementShowOnLogin", "portalAnnouncementShowInPortal",
+  "portalAnnouncementDismissible", "portalAnnouncementCtaLabel", "portalAnnouncementCtaUrl",
+];
+
+function reconcileActiveAnnouncement(settings) {
+  const list = settings.portalAnnouncements || [];
+  if (!list.length) return;
+  const activeId = String(settings.portalAnnouncementActiveId || "");
+  const item = (activeId && list.find((a) => String(a._id) === activeId)) || list.find((a) => a.enabled);
+  if (!item || item.enabled === false) {
+    if (settings.portalAnnouncementEnabled || settings.portalAnnouncementActiveId) clearCurrentAnnouncement(settings);
+    return;
+  }
+  syncCurrentAnnouncement(settings, item);
+}
+
+/** Enabled AND inside its start/end window, judged by the server clock. */
+function isAnnouncementLive(out, now = Date.now()) {
+  if (!out?.portalAnnouncementEnabled) return false;
+  const start = out.portalAnnouncementStartAt ? new Date(out.portalAnnouncementStartAt).getTime() : null;
+  const end = out.portalAnnouncementEndAt ? new Date(out.portalAnnouncementEndAt).getTime() : null;
+  return (!start || start <= now) && (!end || end >= now);
+}
+
 function migrateLegacyAnnouncement(settings) {
   if ((settings.portalAnnouncements || []).length || !settings.portalAnnouncementTitle && !settings.portalAnnouncementMessage) return;
   const legacy = {
@@ -200,9 +235,11 @@ router.get("/app", async (req, res) => {
       settings = await AppSettings.create({});
     }
     migrateLegacyAnnouncement(settings);
+    reconcileActiveAnnouncement(settings);
     if (settings.isModified?.()) await settings.save();
     // Use flattenMaps so Mongoose Map fields (e.g. dashboardTabs) serialize as plain objects
     const out = settings.toObject({ flattenMaps: true });
+    out.portalAnnouncementLive = isAnnouncementLive(out);
     if (out.smtpPass) out.smtpPass = "••••••••";
     // #5: never return the Automation Agent API key in plain text — expose only
     // whether one is stored so the UI can show a "stored" hint.
@@ -245,12 +282,16 @@ router.put("/app", authMiddleware, adminOnly, async (req, res) => {
           incoming.provider.apiKey = settings.automationAgent?.provider?.apiKey || "";
         }
       }
-      Object.assign(settings, req.body);
+      const body = { ...req.body };
+      DERIVED_ANNOUNCEMENT_KEYS.forEach((k) => { delete body[k]; });
+      Object.assign(settings, body);
+      reconcileActiveAnnouncement(settings);
     }
     await settings.save();
     clearYearVisibilityCache();
     clearSlfVisibilityCache();
     const outData = settings.toObject({ flattenMaps: true });
+    outData.portalAnnouncementLive = isAnnouncementLive(outData);
     if (outData.automationAgent?.provider) {
       outData.automationAgent.apiKeySet = !!(outData.automationAgent.provider.apiKeyEnc || outData.automationAgent.provider.apiKey);
       outData.automationAgent.provider.apiKey = "";

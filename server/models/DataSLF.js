@@ -235,6 +235,10 @@ const dataSLFSchema = new mongoose.Schema(
       // true when VERA reviewed the submission on its own, false when an admin
       // asked for it.
       auto: { type: Boolean },
+      // true when the model was CALLED and failed (rate limit, overload,
+      // timeout) and the rule-based text was stored instead. Such a remark is
+      // retried on a later list read; false means no model call was attempted.
+      degraded: { type: Boolean },
     },
 
     // Denormalized metric fields — computed from trucks/dateOfDisposal on save.

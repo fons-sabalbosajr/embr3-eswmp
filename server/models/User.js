@@ -11,6 +11,15 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ["developer", "admin", "user"], default: "user" },
     position: { type: String, trim: true, default: "" },
     designation: { type: String, trim: true, default: "" },
+    // Profile picture (routes/profilePhoto.js). Stored privately in Google Drive
+    // (images folder › "Profile Pictures"), or encrypted locally when Drive is
+    // unavailable; `url` is a server-signed proxy URL an <img> can load.
+    profilePhoto: {
+      url: { type: String, default: "" },
+      storage: { type: String, enum: ["", "drive", "local"], default: "" },
+      fileRef: { type: String, default: "" }, // Drive file id or local file name
+      updatedAt: { type: Date, default: null },
+    },
     permissions: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({

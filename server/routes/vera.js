@@ -57,6 +57,16 @@ function startOfToday() {
   return d;
 }
 
+// The model to record for an answer: the one that ACTUALLY answered (the router
+// may have fallen back or led with the light model), "cache" for a semantic-cache
+// hit, "fallback" for the help library or a guard. The settings screen's per-model
+// status reads these.
+function usageModelOf(result, a) {
+  if (result?.source === "cache") return "cache";
+  if (!result?.usedModel) return "fallback";
+  return result.model || agent.resolveModel(a);
+}
+
 function requireAdminOrDeveloper(req, res) {
   const role = req.user?.role;
   if (role !== "admin" && role !== "developer") {
@@ -220,8 +230,17 @@ function publicChatThrottled(ip) {
   return rec.count > PUBLIC_CHAT_MAX;
 }
 
+// Which side of the app an auth page belongs to — "admin-login", "admin-signup",
+// "admin-forgot-password" are the admin side; every other page is the portal's.
+const authSideOf = (page) => (/^admin/i.test(String(page || "")) ? "admin" : "portal");
+const shownOnSide = (settings, side) =>
+  side === "admin" ? settings?.veraOnAdminLogin !== false : settings?.veraOnPortalLogin !== false;
+
 router.post("/public-chat", async (req, res) => {
-  if (!VERA_ENABLED()) {
+  const settings = await loadSettings().catch(() => null);
+  // Off for this side in VERA's settings ("VERA on the sign-in pages"): the
+  // widget is not rendered there, and a direct call is refused the same way.
+  if (!VERA_ENABLED() || !shownOnSide(settings, authSideOf(req.body?.page))) {
     return res.status(200).json({
       ok: false,
       code: "disabled",
@@ -243,7 +262,6 @@ router.post("/public-chat", async (req, res) => {
   const history = Array.isArray(req.body?.history) ? req.body.history.slice(-6) : [];
   const page = String(req.body?.page || "").slice(0, 40);
 
-  const settings = await loadSettings().catch(() => null);
   const a = settings?.automationAgent || {};
   const started = Date.now();
 
@@ -260,7 +278,7 @@ router.post("/public-chat", async (req, res) => {
     UsageLog.create({
       userRole: "public",
       feature: "vera_public_chat",
-      model: result.usedModel ? agent.resolveModel(a) : "fallback",
+      model: usageModelOf(result, a),
       success: true,
       durationMs: Date.now() - started,
       inputTokens: result.inputTokens || 0,
@@ -289,11 +307,15 @@ router.post("/public-chat", async (req, res) => {
   }
 });
 
-// Starter content for the public widget — static, no account data.
-router.get("/public-status", (_req, res) => {
+// Starter content for the public widget — static, no account data — and whether
+// the widget is shown on each side's sign-in pages.
+router.get("/public-status", async (_req, res) => {
   const ctx = vera.contextFor("public");
+  const settings = await loadSettings().catch(() => null);
   res.json({
     enabled: VERA_ENABLED(),
+    showOnAdminLogin: VERA_ENABLED() && shownOnSide(settings, "admin"),
+    showOnPortalLogin: VERA_ENABLED() && shownOnSide(settings, "portal"),
     realm: "public",
     name: ASSISTANT_NAME,
     fullName: ASSISTANT_FULL_NAME,
@@ -669,7 +691,7 @@ router.post("/chat", requireAnyAuth, requirePortalRule("can_view_vera_responses"
       userEmail: req.user?.email || "",
       userRole: req.user?.role || "",
       feature: "vera_chat",
-      model: result.usedModel ? model : "fallback",
+      model: usageModelOf(result, a),
       success: true,
       durationMs,
       inputTokens: result.inputTokens || 0,

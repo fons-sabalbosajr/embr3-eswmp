@@ -16,8 +16,21 @@ const portal = require("./veraKnowledge");
 const adminKb = require("./veraAdminKnowledge");
 const authKb = require("./veraAuthKnowledge");
 const agent = require("./automationAgent");
+const guardrails = require("./veraGuardrails");
+const semanticCache = require("./veraSemanticCache");
 
 const MAX_INPUT_CHARS = 1000;
+// Token efficiency (approach from VERA in embr3-ucds). Only the articles that
+// actually compete with the best match travel to the model — a weak 4th/5th hit
+// was ~40% of the KNOWLEDGE block and almost never used — and only the recent
+// turns of a conversation, each trimmed.
+const PROMPT_HITS_MAX = 3;
+const PROMPT_HIT_MIN_SHARE = 0.35; // of the top hit's score
+const PROMPT_HISTORY_TURNS = 6;
+const PROMPT_HISTORY_CHARS = 400;
+// A question this short, with no live data and no conversation, goes to the
+// provider's light model first: a fraction of the tokens, and its own quota.
+const LIGHT_QUESTION_CHARS = 160;
 const MAX_OUTPUT_CHARS = 4000;
 const MAX_HISTORY_TURNS = Number(process.env.VERA_MAX_HISTORY) || 8;
 
@@ -553,6 +566,13 @@ async function answer({ message, history = [], page = "", agentConfig, signal, r
     return { answer: ctx.greeting, source: "guard", usedModel: false, hitIds: [] };
   }
 
+  // Prompt injection is refused for every role, before anything else is done
+  // with the message (veraGuardrails).
+  const guardsOn = guardrails.enabled(agentConfig);
+  if (guardsOn && guardrails.looksLikeInjection(msg)) {
+    return { answer: guardrails.INJECTION_REPLY, source: "guard", usedModel: false, hitIds: [], guard: "injection" };
+  }
+
   // PUBLIC realm only: a visitor pasting what looks like a live credential is
   // answered locally and the text never reaches the model or any log. Warning them
   // is more useful than silently proceeding.
@@ -620,27 +640,79 @@ async function answer({ message, history = [], page = "", agentConfig, signal, r
     };
   }
 
-  const system = buildSystemPrompt({ page, hits, ctx, role, devMode: scopeWide, insightsBlock, readinessBlock, pageDataBlock });
-  const prompt = buildUserPrompt({ message: msg, history: hist });
-  const resp = await agent.complete(agentConfig, { system, prompt, signal });
-  const text = sanitizeOutput(resp.text);
+  // Only the articles that compete with the best match reach the model.
+  const topScore = hits[0]?.score || 0;
+  const promptHits = hits.filter((h, i) => i < PROMPT_HITS_MAX && h.score >= topScore * PROMPT_HIT_MIN_SHARE);
+  const promptHistory = hist.slice(-PROMPT_HISTORY_TURNS).map((m) => ({ ...m, content: m.content.slice(0, PROMPT_HISTORY_CHARS) }));
+  const hitIds = promptHits.map((h) => h.entry.id);
+
+  // Semantic cache: only a question answered from the help library alone, with
+  // no live data and no conversation behind it, may be answered from memory.
+  const live = !!(insightsBlock || readinessBlock || pageDataBlock);
+  const cacheable = semanticCache.enabled(agentConfig) && !live && !promptHistory.length && !GREETING_RE.test(msg);
+  const cacheQuery = cacheable
+    ? semanticCache.queryOf({
+        partition: semanticCache.partitionOf({
+          realm: ctx.realm,
+          role,
+          devMode: scopeWide,
+          page,
+          // A provider or model change starts afresh.
+          version: `${agent.resolveProvider(agentConfig)}:${agent.resolveModel(agentConfig)}`,
+        }),
+        message: msg,
+        stems: tokenize(msg),
+        hitIds,
+      })
+    : null;
+  if (cacheQuery) {
+    const cached = semanticCache.lookup(cacheQuery);
+    if (cached) {
+      return { answer: cached.answer, source: "cache", usedModel: false, hitIds, similarity: cached.similarity };
+    }
+  }
+
+  const system = buildSystemPrompt({ page, hits: promptHits, ctx, role, devMode: scopeWide, insightsBlock, readinessBlock, pageDataBlock });
+  const prompt = buildUserPrompt({ message: msg, history: promptHistory });
+  const light = !live && !promptHistory.length && msg.length <= LIGHT_QUESTION_CHARS;
+  // chat: true — the user turn is a person's question, so no DATA_FENCE; the
+  // answer is screened below with the realm-aware rules.
+  const resp = await agent.complete(agentConfig, { system, prompt, signal, light, chat: true });
+  let text = sanitizeOutput(resp.text);
+  let redactions = 0;
+  if (text && guardsOn) {
+    const screened = guardrails.screenOutput(text, {
+      realm: ctx.realm,
+      allowedEmails: [adminKb.SUPPORT_EMAIL, authKb.SUPPORT_EMAIL].filter(Boolean),
+    });
+    redactions = screened.redactions;
+    // An answer reciting VERA's instructions is withheld: the help library answers.
+    text = screened.leaked ? "" : screened.text;
+  }
   if (!text) {
     return {
       answer: sanitizeOutput(fallbackAnswer(msg, hits, ctx)),
       source: "fallback",
       usedModel: false,
-      hitIds: hits.map((h) => h.entry.id),
+      hitIds,
+      redactions,
     };
+  }
+  // Only a clean answer is kept: one that needed a redaction is never re-served.
+  if (cacheQuery && !redactions) {
+    semanticCache.remember(cacheQuery, text, (resp.inputTokens || 0) + (resp.outputTokens || 0));
   }
   return {
     answer: text,
     source: "model",
     usedModel: true,
-    hitIds: hits.map((h) => h.entry.id),
+    hitIds,
     inputTokens: resp.inputTokens || 0,
     outputTokens: resp.outputTokens || 0,
     model: resp.model,
     provider: resp.provider,
+    fellBack: !!resp.fellBack,
+    redactions,
   };
 }
 

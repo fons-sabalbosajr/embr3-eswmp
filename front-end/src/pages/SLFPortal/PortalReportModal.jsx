@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Button, DatePicker, Empty, Modal, Space, Spin, Table, Tag, Typography,
 } from "antd";
@@ -6,6 +6,7 @@ import { FilePdfOutlined, FileWordOutlined, PrinterOutlined, ReloadOutlined } fr
 import dayjs from "dayjs";
 
 import api from "../../api";
+import { getSocket } from "../../utils/socket";
 import {
   buildReportDocument,
   wrapPrintable,
@@ -117,8 +118,11 @@ export default function PortalReportModal({ open, onClose }) {
   const [range, setRange] = useState(null);
   const printRef = useRef(null);
 
-  const load = useCallback(async (nextRange) => {
-    setLoading(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [liveUpdatedAt, setLiveUpdatedAt] = useState(null);
+  const load = useCallback(async (nextRange, { silent = false } = {}) => {
+    if (silent) setRefreshing(true);
+    else setLoading(true);
     setError("");
     try {
       const params = {};
@@ -126,16 +130,50 @@ export default function PortalReportModal({ open, onClose }) {
       if (nextRange?.[1]) params.to = nextRange[1].endOf("day").toISOString();
       const { data } = await api.get("/portal-auth/my-report", { params });
       setReport(data);
+      setLiveUpdatedAt(dayjs());
     } catch (err) {
-      setReport(null);
-      setError(
-        err.response?.data?.message ||
-          "Your report could not be generated right now. Please try again.",
-      );
+      // A failed BACKGROUND refresh keeps the report already on screen.
+      if (!silent) {
+        setReport(null);
+        setError(
+          err.response?.data?.message ||
+            "Your report could not be generated right now. Please try again.",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (silent) setRefreshing(false);
+      else setLoading(false);
     }
   }, []);
+
+  // REAL-TIME while open. The report used to be read once when it opened, so an
+  // approval, a revert or a new submission while it was on screen never reached
+  // it. The portal's socket already carries those events ("data-refresh" with
+  // target submissions/baselines/facility, and status notifications); a burst of
+  // them collapses into one silent re-read for the same reporting period.
+  const rangeRef = useRef(range);
+  useEffect(() => {
+    rangeRef.current = range;
+  }, [range]);
+  useEffect(() => {
+    if (!open) return undefined;
+    const socket = getSocket();
+    if (!socket) return undefined;
+    let timer = null;
+    const handler = (payload = {}) => {
+      const target = payload?.target;
+      if (target && !["submissions", "baselines", "facility"].includes(target)) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => load(rangeRef.current, { silent: true }), 600);
+    };
+    socket.on("data-refresh", handler);
+    socket.on("notification", handler);
+    return () => {
+      clearTimeout(timer);
+      socket.off("data-refresh", handler);
+      socket.off("notification", handler);
+    };
+  }, [open, load]);
 
   // Fetched on the modal's own open EVENT, and re-fetched every time it opens, so
   // a report is always built from a fresh read rather than whatever was cached
@@ -310,6 +348,15 @@ export default function PortalReportModal({ open, onClose }) {
                 Reporting period: {dt(report.scope?.from)} — {dt(report.scope?.to)} ·
                 Generated {dt(report.generatedAt, "MMM D, YYYY h:mm A")}
               </Text>
+              <Tag
+                className="no-print"
+                color={refreshing ? "processing" : "green"}
+                style={{ marginInlineStart: 8, fontSize: 10.5 }}
+              >
+                {refreshing
+                  ? "Updating…"
+                  : `Live${liveUpdatedAt ? ` · updated ${liveUpdatedAt.format("h:mm:ss A")}` : ""}`}
+              </Tag>
             </div>
             {/* The scope is PRINTED, not just enforced. A reader of the paper copy
                 has to know whose submissions it covers. */}

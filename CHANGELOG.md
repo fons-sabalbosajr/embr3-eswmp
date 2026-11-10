@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-11-10
+
+### Added — Profile pictures
+- Admin and portal users can add, change or remove their own profile picture
+  from **My Profile** (crop to a square with zoom/position; resized to 512×512
+  in the browser). Stored privately in the Google Drive images folder, in a
+  **"Profile Pictures"** subfolder created on first use, and shown through the
+  signed media proxy. Falls back to encrypted local storage when Drive is
+  unavailable. A developer in a portal-user context cannot change that account's
+  picture. (`routes/profilePhoto.js`, `components/ProfilePhotoEditor.jsx`)
+
+### Added — VERA (approach from VERA in embr3-ucds)
+- **Settings screen** (Developer Settings › VERA & AI Agent): status header,
+  per-model live status table (ready / resting / no key, today's requests and
+  tokens), usage tiles, and grouped switches. The provider cards, the query
+  playground and the long info panels were removed.
+- **Show/hide VERA on the sign-in pages**, separately for the admin side and the
+  SLF Portal side (login, sign-up, forgot password).
+- **Semantic cache**: a reworded repeat of an answered help question is answered
+  from server memory with no model call; never for live data, page data or
+  follow-ups, never across account types.
+- **Guardrails**: prompt-injection refusal for every role; secrets and
+  credential-shaped text cut from every model answer; prompt-recital withheld;
+  records sent to the model fenced as data.
+- **Token efficiency**: short questions go to the light model first; fewer
+  knowledge articles and trimmed history in the prompt.
+
+### Fixed
+- **Expired portal announcement shown on the login page**: the Developer
+  Settings save wiped the active announcement's dates. Announcement fields are
+  now derived from the active announcement on every read/write, and the server
+  sends a live flag.
+- **Choosing the AI provider**: a stored API key without a provider tag was read
+  as Anthropic's, so a saved Gemini key was ignored; untagged keys are now
+  attributed by their prefix.
+- **Generate Reports**: "Too many re-renders" when opening the Existing PDF
+  Report; the report now also receives the per-cell rollup.
+
+### Changed
+- **Generate Reports** preview tables: merged related columns, word wrap, fit to
+  the page width; province/municipality/region codes shown as names.
+- **Reporting Summary** modal tables: fit the modal width (column widths
+  normalised to 100%), word wrap, smaller type, icons on headers and sections.
+
 ### Added — CI/CD
 - **CI** (`.github/workflows/ci.yml`): every pull request and push to `main` runs
   the server suite (with a syntax check of every module), the front-end tests, a

@@ -22,6 +22,13 @@ test("submitEntries checks the facilities' operational status", () => {
 });
 
 test("the draft submit and the scheduled worker both go through submitEntries", () => {
-  assert.match(read("routes", "portalQueue.js"), /await submitEntries\(\{/);
-  assert.match(read("utils", "scheduledSubmissionWorker.js"), /await submitEntries\(\{/);
+  // Both now share utils/queueSubmission.js, so they cannot disagree. A record
+  // that is NOT the correction of a reverted entry still files through
+  // submitEntries — which is where the non-operational restriction lives.
+  assert.match(read("routes", "portalQueue.js"), /await submitQueueRecord\(record, req\)/);
+  assert.match(read("utils", "scheduledSubmissionWorker.js"), /await submitQueueRecord\(record\)/);
+  assert.match(
+    read("utils", "queueSubmission.js"),
+    /if \(!record\?\.resubmitOf\) \{\s*return submitEntries\(\{ entries: \[record\.payload\]/,
+  );
 });

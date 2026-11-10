@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Modal, Space, Spin, Table, Tag, Typography } from "antd";
-import { PrinterOutlined, FileWordOutlined, FilePdfOutlined, CloseCircleOutlined, UndoOutlined } from "@ant-design/icons";
+import { Alert, Button, Modal, Space, Spin, Table, Tag, Tooltip as AntTooltip, Typography } from "antd";
+import {
+  PrinterOutlined, FileWordOutlined, FilePdfOutlined, CloseCircleOutlined, UndoOutlined,
+  TeamOutlined, UserOutlined, BankOutlined, EnvironmentOutlined, FileTextOutlined, CarOutlined,
+  DatabaseOutlined, CalendarOutlined, CheckCircleOutlined, ClockCircleOutlined, AppstoreOutlined,
+  PauseCircleOutlined, StopOutlined, ToolOutlined, QuestionCircleOutlined, InboxOutlined,
+  CloudUploadOutlined, PieChartOutlined, ColumnWidthOutlined, ExperimentOutlined, WarningOutlined,
+  DashboardOutlined, BarChartOutlined, LineChartOutlined, BulbOutlined, NotificationOutlined, InfoCircleOutlined,
+} from "@ant-design/icons";
 import {
   Bar,
   BarChart,
@@ -19,11 +26,13 @@ import {
 } from "recharts";
 import dayjs from "dayjs";
 import api from "../../api";
-import { tonsFromMetricPair } from "../../utils/volumeUnits";
+import { tonsFromMetricPair, convertVolume } from "../../utils/volumeUnits";
+import { facilityTally, fromOccupancyCell } from "./slf-monitoring/cellTally";
 // The ONE place that decides which announcement is current — the same resolver
 // the announcements admin screen uses, so the report cannot call a different one
 // "active" than the console does.
 import { selectLatestAnnouncement } from "../../utils/announcementLifecycle";
+import { fitColumnWidths } from "./reportColumns.js";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -140,11 +149,34 @@ const RECENT_UPDATES = {
 const PRINT_STYLE_ID = "slf-report-print-styles";
 function ensurePrintStyles() {
   if (typeof document === "undefined") return;
-  if (document.getElementById(PRINT_STYLE_ID)) return;
-  const style = document.createElement("style");
+  // The rules are (re)written even when the tag exists: a page that was already
+  // open kept an older copy and never picked up new rules.
+  const style = document.getElementById(PRINT_STYLE_ID) || document.createElement("style");
   style.id = PRINT_STYLE_ID;
   style.innerHTML = `
     .slf-print-root { display: none; }
+    /* Report tables (screen + print): fit the modal width, wrap every cell,
+       compact type. Column widths are percentages on a fixed layout. */
+    .slf-report-table .ant-table { font-size: 11.5px; }
+    .slf-report-table table { width: 100% !important; min-width: 0 !important; table-layout: fixed !important; }
+    .slf-report-table .ant-table-content, .slf-report-table .ant-table-container { overflow: hidden !important; }
+    .slf-report-table .ant-table-thead > tr > th {
+      font-size: 11px; font-weight: 600; line-height: 1.25; padding: 6px 6px !important;
+      white-space: normal; word-break: normal; overflow-wrap: anywhere; vertical-align: bottom;
+      background: #f5f7fb; color: #1a3353;
+    }
+    .slf-report-table .ant-table-tbody > tr > td {
+      padding: 5px 6px !important; line-height: 1.35; vertical-align: top;
+      white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+    }
+    .slf-report-table .ant-tag {
+      font-size: 10.5px; line-height: 17px; padding: 0 5px; margin-inline-end: 0;
+      max-width: 100%; white-space: normal; height: auto;
+    }
+    .slf-report-table .slf-th { display: flex; align-items: flex-start; gap: 4px; min-width: 0; }
+    .slf-report-table .slf-th > span { min-width: 0; }
+    .slf-report-table .slf-th .anticon { color: #2f54eb; font-size: 11px; margin-top: 2px; flex: none; }
+    .slf-report-table .slf-sub { display: block; font-size: 10.5px; color: #8c8c8c; }
     @media print {
       body.slf-printing > *:not(.slf-print-root) { display: none !important; }
       body.slf-printing .slf-print-root { display: block !important; }
@@ -176,7 +208,7 @@ function ensurePrintStyles() {
       @page { size: A4; margin: 12mm; }
     }
   `;
-  document.head.appendChild(style);
+  if (!style.parentNode) document.head.appendChild(style);
 }
 
 // Render a live Recharts <svg> to a PNG data URL (for DOCX embedding). The
@@ -235,13 +267,41 @@ function StatCard({ label, value, sub, color = "#2f54eb" }) {
   );
 }
 
-function Section({ title, children }) {
+function Section({ title, icon, children }) {
   return (
     <div className="slf-report-card" style={{ marginTop: 20 }}>
       <Title level={5} style={{ margin: "0 0 8px", color: "#1a3353" }}>
+        {icon ? <span style={{ color: "#2f54eb", marginRight: 6 }}>{icon}</span> : null}
         {title}
       </Title>
       {children}
+    </div>
+  );
+}
+
+/** A column header with its icon. */
+const th = (icon, text) => (
+  <span className="slf-th">
+    {icon}
+    <span>{text}</span>
+  </span>
+);
+
+// Every report table: fixed layout with widths normalised to exactly 100%
+// (see reportColumns.js for why), wrapped cells, compact type (CSS above).
+function ReportTable({ columns, ...props }) {
+  const fitted = useMemo(() => fitColumnWidths(columns), [columns]);
+  return (
+    <div style={{ width: "100%", maxWidth: "100%", overflow: "hidden" }}>
+      <Table
+        size="small"
+        pagination={false}
+        tableLayout="fixed"
+        className="slf-report-table"
+        style={{ width: "100%" }}
+        columns={fitted}
+        {...props}
+      />
     </div>
   );
 }
@@ -275,19 +335,32 @@ const cellStatusBucket = (status, capacity, fill) => {
   return "other";
 };
 
+// Stable fallbacks for omitted props. A default written inline (`= []`, `= {}`)
+// is a NEW object on every render, and the "data changed" check below compares
+// inputs by identity — so a caller that omitted one (Generate Reports › Existing
+// PDF Report never passed cellOccupancy) re-stamped state on every render and
+// React stopped it with "Too many re-renders".
+const NO_ROWS = Object.freeze([]);
+const NO_OCCUPANCY = Object.freeze({});
+
 export default function SlfSubmissionReport({
   open,
   onClose,
   tiles,
-  slfRows = [],
-  portalUsers = [],
-  facilities = [],
-  baselines = [],
+  slfRows = NO_ROWS,
+  portalUsers = NO_ROWS,
+  facilities = NO_ROWS,
+  baselines = NO_ROWS,
   totals,
   // Live portal announcement(s) + recent portal/admin changes (transactions) so the
   // "Recent Updates" section reflects the CURRENT state, not a static release note.
-  announcements = [],
-  recentChanges = [],
+  announcements = NO_ROWS,
+  recentChanges = NO_ROWS,
+  // GET /data-slf/cell-occupancy → byFacility: the server's per-cell rollup
+  // (baseline vs submitted, admin declarations, unplaced). The page keeps it
+  // current from the same socket events as everything else, so the report
+  // follows portal submissions while it is open.
+  cellOccupancy = NO_OCCUPANCY,
 }) {
   const [trend, setTrend] = useState([]);
   const [trendLoading, setTrendLoading] = useState(false);
@@ -297,6 +370,32 @@ export default function SlfSubmissionReport({
   const [removedOpKeys, setRemovedOpKeys] = useState(() => new Set());
   const [removedBaselineKeys, setRemovedBaselineKeys] = useState(() => new Set());
   const printRef = useRef(null);
+  // When the data behind the report last changed. The page re-reads its data on
+  // every portal submission / baseline / facility event, and the report re-renders
+  // from those props — this says so, and when it last happened.
+  // Re-stamped during render when any input changes (React's pattern for state
+  // derived from props) rather than in an effect.
+  const [dataUpdatedAt, setDataUpdatedAt] = useState(() => dayjs());
+  const dataInputs = [tiles, slfRows, facilities, baselines, cellOccupancy, recentChanges];
+  const [seenDataInputs, setSeenDataInputs] = useState(dataInputs);
+  if (dataInputs.some((input, i) => input !== seenDataInputs[i])) {
+    setSeenDataInputs(dataInputs);
+    setDataUpdatedAt(dayjs());
+  }
+
+  // Is cell i of facility f full? The rollup's capacity is already converted to
+  // the rollup's unit; the fallback converts the stored fill into the capacity's
+  // unit. Comparing the raw numbers miscounted any cell whose fill and capacity
+  // were recorded in different units (m³ vs tons).
+  const isCellFull = (fac, i) => {
+    const occCell = cellOccupancy?.[String(fac?._id)]?.cells?.find((c) => c.index === i);
+    if (occCell) return Number(occCell.capacity) > 0 && Number(occCell.used) >= Number(occCell.capacity);
+    const cap = Number(fac?.cellCapacities?.[i] || 0);
+    if (cap <= 0) return false;
+    const capUnit = fac?.cellCapacityUnits?.[i] || fac?.volumeCapacityUnit || "tons";
+    const fill = convertVolume(Number(fac?.cellFillValues?.[i] || 0), fac?.cellFillUnits?.[i] || fac?.wasteReceivedUnit || capUnit, capUnit);
+    return Number.isFinite(Number(fill)) && Number(fill) >= cap;
+  };
 
   // ONE announcement, selected once and read by both the on-screen report and the
   // DOCX export — the two are required to agree, and had already drifted apart
@@ -520,21 +619,18 @@ export default function SlfSubmissionReport({
         (f.cellCapacities || []).length,
       );
       const statuses = f.cellStatuses || [];
-      const caps = f.cellCapacities || [];
-      const fills = f.cellFillValues || [];
       for (let i = 0; i < count; i += 1) {
         let label = statuses[i] || (i === 0 ? "Active Cell" : "Unspecified");
         // Derived "Full" — no explicit Full status field exists in the schema.
-        const cap = Number(caps[i] || 0);
-        const fill = Number(fills[i] || 0);
-        if (cap > 0 && fill >= cap) label = "Full (derived)";
+        if (isCellFull(f, i)) label = "Full (derived)";
         counts[label] = (counts[label] || 0) + 1;
       }
     });
     return Object.entries(counts)
       .map(([status, count]) => ({ status, count }))
       .sort((a, b) => b.count - a.count);
-  }, [cellFacilities]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cellFacilities, cellOccupancy]);
 
   const totalCells = cellStatusBreakdown.reduce((s, r) => s + r.count, 0);
   const activeCells = cellChartData.reduce((s, r) => s + r.active, 0);
@@ -574,17 +670,49 @@ export default function SlfSubmissionReport({
         g.facSeen.add(id);
         const count = Math.max(f.numberOfCell || 0, (f.cellStatuses || []).length, (f.cellCapacities || []).length);
         const statuses = f.cellStatuses || [];
-        const caps = f.cellCapacities || [];
-        const fills = f.cellFillValues || [];
         for (let i = 0; i < count; i += 1) {
           g.total += 1;
-          g[cellStatusBucket(statuses[i] || (i === 0 ? "Active Cell" : ""), Number(caps[i] || 0), Number(fills[i] || 0))] += 1;
+          // capacity/fill passed as 1/1 or 0/0 so cellStatusBucket's own
+          // "fill >= capacity" test reflects the unit-safe isCellFull.
+          const full = isCellFull(f, i);
+          g[cellStatusBucket(statuses[i] || (i === 0 ? "Active Cell" : ""), full ? 1 : 0, full ? 1 : 0)] += 1;
         }
       });
       groups.set(key, g);
     });
     return [...groups.values()].filter((g) => g.total > 0).sort((a, b) => b.active - a.active);
-  }, [operators, facilities]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operators, facilities, cellOccupancy]);
+
+  // Waste Cell Breakdown — baseline vs portal submissions per SLF, from the
+  // server's per-cell rollup. Same per-cell rule as the SLF Data Table, so
+  // Baseline + Submissions = Waste in cells on every row.
+  const wasteCellRows = useMemo(
+    () =>
+      cellFacilities
+        .map((fac) => {
+          const occ = cellOccupancy?.[String(fac._id)];
+          if (!occ?.cells?.length) return null;
+          const t = facilityTally(occ.cells.map(fromOccupancyCell), occ.totals?.unplaced);
+          const capacity = occ.cells.reduce((sum, c) => sum + Number(c.capacity || 0), 0);
+          return {
+            key: String(fac._id),
+            slf: fac.lgu || fac.slfName || "—",
+            unit: occ.unit || "",
+            baseline: t.baseline,
+            submitted: t.submitted,
+            inCells: t.inCells,
+            unplaced: t.unplaced,
+            capacity,
+            pct: capacity > 0 ? Math.min(100, (t.inCells / capacity) * 100) : null,
+            declaredCells: t.declaredCells,
+            submissions: Number(occ.submissionCount || 0),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1)),
+    [cellFacilities, cellOccupancy],
+  );
 
   // Chart data (top 12 by active) with a short label for the axis.
   const operatorCellChart = useMemo(
@@ -798,6 +926,18 @@ export default function SlfSubmissionReport({
         ),
       );
 
+      const fmtVol = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
+      const wasteCellTable = table(
+        ["SLF", "Unit", "Baseline in Cells", "Portal Submissions in Cells", "Waste in Cells", "Awaiting Placement", "Cell Capacity", "% Used"],
+        wasteCellRows.map((r) =>
+          tr([
+            r.declaredCells ? `${r.slf} *` : r.slf, r.unit, fmtVol(r.baseline), fmtVol(r.submitted),
+            fmtVol(r.inCells), r.unplaced > 0 ? fmtVol(r.unplaced) : "—",
+            r.capacity > 0 ? fmtVol(r.capacity) : "—", r.pct != null ? `${r.pct.toFixed(1)}%` : "—",
+          ]),
+        ),
+      );
+
       const baseTable = table(
         ["SLF", "Unit", "Total Accepted", "Active Residual", "Active Inert", "Active Hazardous", "Accepts Haz.", "Last Updated"],
         baselineRows.map((r) =>
@@ -871,6 +1011,9 @@ export default function SlfSubmissionReport({
         <br style="page-break-before:always"/>
         <h3 style="color:#2f54eb">Cell Infrastructure Status Report (per SLF Operator)</h3>${operatorCellTable}
         <br style="page-break-before:always"/>
+        <h3 style="color:#2f54eb">Waste Cell Breakdown — Baseline vs Portal Submissions</h3>${wasteCellTable}
+        <p style="font-size:10px;color:#888">* includes an admin-declared cell figure (declared base + submissions recorded since). Data as of ${esc(dataUpdatedAt.format("MMMM D, YYYY h:mm A"))}.</p>
+        <br style="page-break-before:always"/>
         <h3 style="color:#2f54eb">SLF Baseline Data</h3>${baseTable}
         <br style="page-break-before:always"/>
         ${updatesHtml}
@@ -917,23 +1060,25 @@ export default function SlfSubmissionReport({
   // "Remove from Report" column — hidden from the printed/exported output via
   // slf-report-noprint. onRemove receives the row and excludes it from the
   // centralized filtered dataset (no DB change).
+  // Icon-only (with a tooltip) so it costs one narrow column, not 96 px.
   const removeColumn = (onRemove) => ({
-    title: "Report",
+    title: "",
     key: "__remove",
-    width: 96,
+    width: 40,
     align: "center",
     className: "slf-report-noprint",
     onHeaderCell: () => ({ className: "slf-report-noprint" }),
     render: (_, r) => (
-      <Button
-        size="small"
-        danger
-        type="text"
-        icon={<CloseCircleOutlined />}
-        onClick={() => onRemove(r)}
-      >
-        Remove
-      </Button>
+      <AntTooltip title="Remove from this report (no data is deleted)">
+        <Button
+          size="small"
+          danger
+          type="text"
+          icon={<CloseCircleOutlined />}
+          aria-label="Remove from this report"
+          onClick={() => onRemove(r)}
+        />
+      </AntTooltip>
     ),
   });
 
@@ -987,11 +1132,15 @@ export default function SlfSubmissionReport({
           </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
             EMB Region III — Ecological Solid Waste Management Pipeline · Generated {generatedAt}
+            {" · "}
+            <Tag color="green" style={{ fontSize: 10, marginInlineEnd: 0 }}>
+              Live — data updated {dataUpdatedAt.format("h:mm:ss A")}
+            </Tag>
           </Text>
         </div>
 
         {/* Summary cards */}
-        <Section title="Key Totals">
+        <Section title="Key Totals" icon={<DashboardOutlined />}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
             <StatCard label="Total SLF Operators" value={operatorGroups.length} color="#2f54eb" />
             <StatCard label="Operators With Submissions" value={withSubs} color="#52c41a" />
@@ -1012,7 +1161,7 @@ export default function SlfSubmissionReport({
         </Section>
 
         {/* Charts */}
-        <Section title="Operator Submission Coverage">
+        <Section title="Operator Submission Coverage" icon={<PieChartOutlined />}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
             <div data-chart-title="Operator Submission Coverage">
             <PieChart width={280} height={220}>
@@ -1048,7 +1197,7 @@ export default function SlfSubmissionReport({
           </div>
         </Section>
 
-        <Section title="Submissions per SLF (Top 10)">
+        <Section title="Submissions per SLF (Top 10)" icon={<BarChartOutlined />}>
           {barData.length ? (
             <div data-chart-title="Submissions per SLF (Top 10)">
             <BarChart width={820} height={260} data={barData} margin={{ top: 8, right: 16, bottom: 60, left: 0 }}>
@@ -1066,7 +1215,7 @@ export default function SlfSubmissionReport({
           )}
         </Section>
 
-        <Section title="Monthly Submission Trend">
+        <Section title="Monthly Submission Trend" icon={<LineChartOutlined />}>
           {trendLoading ? (
             <Spin />
           ) : trend.length ? (
@@ -1086,7 +1235,7 @@ export default function SlfSubmissionReport({
           )}
         </Section>
 
-        <Section title="Waste Volume per Company (Top 10, tons)">
+        <Section title="Waste Volume per Company (Top 10, tons)" icon={<BarChartOutlined />}>
           {volumeBarData.length ? (
             <div data-chart-title="Waste Volume per Company (Top 10, tons)">
             <BarChart width={820} height={240} data={volumeBarData} margin={{ top: 8, right: 16, bottom: 60, left: 10 }}>
@@ -1107,44 +1256,44 @@ export default function SlfSubmissionReport({
         <div className="slf-page-break" />
 
         {/* Operator table */}
-        <Section title="Submissions per SLF Operator">
-          <Table
-            size="small"
-            pagination={false}
+        <Section title="Submissions per SLF Operator" icon={<TeamOutlined />}>
+          <ReportTable
             dataSource={[...operatorGroups].sort((a, b) => b.submissions - a.submissions)}
             rowKey="key"
             columns={[
               {
-                title: "Operator / LGU",
+                title: th(<UserOutlined />, "Operator / LGU"),
                 dataIndex: "operator",
-                ellipsis: true,
-                render: (v, r) =>
-                  r.memberCount > 1 ? (
-                    <span>{v} <Tag color="blue" style={{ marginLeft: 4 }}>{r.memberCount} accounts</Tag></span>
-                  ) : (
-                    v
-                  ),
+                width: "19%",
+                render: (v, r) => (
+                  <>
+                    {v}
+                    {r.memberCount > 1 && (
+                      <div><Tag color="blue" style={{ marginTop: 2 }}>{r.memberCount} accounts</Tag></div>
+                    )}
+                  </>
+                ),
               },
-              { title: "Company", dataIndex: "company", ellipsis: true },
-              { title: "Assigned SLF", dataIndex: "slf", ellipsis: true },
-              { title: "Subs.", dataIndex: "submissions", align: "center", width: 60 },
-              { title: "Trucks", dataIndex: "trucks", align: "center", width: 64 },
-              { title: "Volume", dataIndex: "volume", width: 130 },
+              { title: th(<BankOutlined />, "Company"), dataIndex: "company", width: "17%" },
+              { title: th(<EnvironmentOutlined />, "Assigned SLF"), dataIndex: "slf", width: "19%" },
+              { title: th(<FileTextOutlined />, "Subs."), dataIndex: "submissions", align: "center", width: "7%" },
+              { title: th(<CarOutlined />, "Trucks"), dataIndex: "trucks", align: "center", width: "7%" },
+              { title: th(<DatabaseOutlined />, "Volume"), dataIndex: "volume", width: "11%" },
               {
-                title: "Last Disposal",
+                title: th(<CalendarOutlined />, "Last Disposal"),
                 dataIndex: "lastDate",
-                width: 110,
+                width: "10%",
                 render: (d) => (d ? d.format("MM/DD/YYYY") : "—"),
               },
               {
-                title: "Status",
+                title: th(<CheckCircleOutlined />, "Status"),
                 key: "status",
-                width: 90,
+                width: "10%",
                 render: (_, r) =>
                   r.hasSubmission ? (
-                    <Tag color="green">Submitted</Tag>
+                    <Tag color="green" icon={<CheckCircleOutlined />}>Submitted</Tag>
                   ) : (
-                    <Tag color="orange">None</Tag>
+                    <Tag color="orange" icon={<ClockCircleOutlined />}>None</Tag>
                   ),
               },
               removeColumn((r) => removeOperator(r.key)),
@@ -1155,7 +1304,7 @@ export default function SlfSubmissionReport({
         <div className="slf-page-break" />
 
         {/* Cell infrastructure */}
-        <Section title={`SLF Cell Infrastructure (${activeCells} active of ${totalCells} cells)`}>
+        <Section title={`SLF Cell Infrastructure (${activeCells} active of ${totalCells} cells)`} icon={<AppstoreOutlined />}>
           {cellChartData.length ? (
             <>
               <div data-chart-title="SLF Cell Infrastructure (Active vs Other cells)">
@@ -1195,7 +1344,7 @@ export default function SlfSubmissionReport({
         <div className="slf-page-break" />
 
         {/* Cell infrastructure status per operator */}
-        <Section title="Cell Infrastructure Status Report (per SLF Operator)">
+        <Section title="Cell Infrastructure Status Report (per SLF Operator)" icon={<ToolOutlined />}>
           {operatorCellReport.length ? (
             <>
               {operatorCellChart.length > 0 && (
@@ -1224,20 +1373,18 @@ export default function SlfSubmissionReport({
                   </BarChart>
                 </div>
               )}
-              <Table
-                size="small"
-                pagination={false}
+              <ReportTable
                 dataSource={operatorCellReport}
                 rowKey="key"
                 style={{ marginTop: 8 }}
                 columns={[
-                  { title: "SLF Operator / Company", dataIndex: "label", ellipsis: true },
-                  { title: "Total", dataIndex: "total", align: "center", width: 64 },
-                  { title: "Active", dataIndex: "active", align: "center", width: 64, render: (v) => <Tag color="green" style={{ margin: 0 }}>{v}</Tag> },
-                  { title: "Inactive", dataIndex: "inactive", align: "center", width: 72 },
-                  { title: "Full/Closed", dataIndex: "full", align: "center", width: 84 },
-                  { title: "Under Dev.", dataIndex: "underDev", align: "center", width: 84 },
-                  { title: "Other", dataIndex: "other", align: "center", width: 64 },
+                  { title: th(<TeamOutlined />, "SLF Operator / Company"), dataIndex: "label", width: "34%" },
+                  { title: th(<AppstoreOutlined />, "Total"), dataIndex: "total", align: "center", width: "10%" },
+                  { title: th(<CheckCircleOutlined />, "Active"), dataIndex: "active", align: "center", width: "10%", render: (v) => <Tag color="green">{v}</Tag> },
+                  { title: th(<PauseCircleOutlined />, "Inactive"), dataIndex: "inactive", align: "center", width: "10%" },
+                  { title: th(<StopOutlined />, "Full / Closed"), dataIndex: "full", align: "center", width: "11%" },
+                  { title: th(<ToolOutlined />, "Under Dev."), dataIndex: "underDev", align: "center", width: "11%" },
+                  { title: th(<QuestionCircleOutlined />, "Other"), dataIndex: "other", align: "center", width: "9%" },
                   removeColumn((r) => removeOperator(r.key)),
                 ]}
               />
@@ -1254,24 +1401,67 @@ export default function SlfSubmissionReport({
 
         <div className="slf-page-break" />
 
+        {/* Waste Cell Breakdown — baseline vs portal submissions */}
+        <Section title="Waste Cell Breakdown — Baseline vs Portal Submissions" icon={<DatabaseOutlined />}>
+          {wasteCellRows.length ? (
+            <>
+              <ReportTable
+                dataSource={wasteCellRows}
+                rowKey="key"
+                columns={[
+                  {
+                    title: th(<EnvironmentOutlined />, "SLF"),
+                    dataIndex: "slf",
+                    width: "26%",
+                    render: (v, r) => (
+                      <>
+                        {v}
+                        {r.declaredCells > 0 && <div><Tag color="purple" style={{ marginTop: 2 }}>declared</Tag></div>}
+                      </>
+                    ),
+                  },
+                  { title: th(<InboxOutlined />, "Baseline in Cells"), dataIndex: "baseline", align: "right", width: "15%", render: (v, r) => `${Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${r.unit}` },
+                  { title: th(<CloudUploadOutlined />, "Portal Submissions"), dataIndex: "submitted", align: "right", width: "15%", render: (v, r) => <Text strong style={{ color: "#2f54eb", fontSize: "inherit" }}>+{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> },
+                  { title: th(<DatabaseOutlined />, "Waste in Cells"), dataIndex: "inCells", align: "right", width: "15%", render: (v, r) => <Text strong style={{ fontSize: "inherit" }}>{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> },
+                  { title: th(<ClockCircleOutlined />, "Awaiting Placement"), dataIndex: "unplaced", align: "right", width: "16%", render: (v, r) => (v > 0 ? <Text style={{ color: "#d46b08", fontSize: "inherit" }}>{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> : "—") },
+                  { title: th(<PieChartOutlined />, "% Used"), dataIndex: "pct", align: "center", width: "13%", render: (v) => (v == null ? "—" : <Tag color={v >= 90 ? "red" : v >= 70 ? "orange" : "green"}>{v.toFixed(1)}%</Tag>) },
+                ]}
+              />
+              <Text type="secondary" style={{ fontSize: 10, display: "block", marginTop: 4 }}>
+                Baseline + Portal Submissions = Waste in Cells for every SLF (same rule as the SLF Data
+                Table). "declared" marks an SLF with an admin-declared cell figure, counted as its declared
+                base plus submissions recorded since. Awaiting Placement is submitted waste the operator has
+                not organized into a cell yet.
+              </Text>
+            </>
+          ) : (
+            <Text type="secondary">No per-cell rollup is available yet.</Text>
+          )}
+        </Section>
+
+        <div className="slf-page-break" />
+
         {/* Baseline table */}
-        <Section title="SLF Baseline Data">
+        <Section title="SLF Baseline Data" icon={<InboxOutlined />}>
           {baselineRows.length ? (
-            <Table
-              size="small"
+            <ReportTable
               dataSource={baselineRows}
               rowKey="key"
-              pagination={false}
-              scroll={{ x: "max-content" }}
               columns={[
-                { title: "SLF", dataIndex: "slfName", ellipsis: true },
-                { title: "Unit", dataIndex: "unit", width: 56 },
-                { title: "Total Accepted", dataIndex: "totalAccepted", align: "right", render: (v) => Math.round(v).toLocaleString() },
-                { title: "Active Residual", dataIndex: "activeResidual", align: "right", render: (v) => Math.round(v).toLocaleString() },
-                { title: "Active Inert", dataIndex: "activeInert", align: "right", render: (v) => Math.round(v).toLocaleString() },
-                { title: "Active Hazardous", dataIndex: "activeHazardous", align: "right", render: (v) => Math.round(v).toLocaleString() },
-                { title: "Accepts Haz.", dataIndex: "acceptsHazardous", width: 90, align: "center" },
-                { title: "Last Updated", dataIndex: "lastUpdated", width: 110 },
+                { title: th(<EnvironmentOutlined />, "SLF"), dataIndex: "slfName", width: "23%" },
+                { title: th(<ColumnWidthOutlined />, "Unit"), dataIndex: "unit", width: "7%" },
+                { title: th(<InboxOutlined />, "Total Accepted"), dataIndex: "totalAccepted", align: "right", width: "12%", render: (v) => Math.round(v).toLocaleString() },
+                { title: th(<DatabaseOutlined />, "Active Residual"), dataIndex: "activeResidual", align: "right", width: "12%", render: (v) => Math.round(v).toLocaleString() },
+                { title: th(<AppstoreOutlined />, "Active Inert"), dataIndex: "activeInert", align: "right", width: "11%", render: (v) => Math.round(v).toLocaleString() },
+                { title: th(<ExperimentOutlined />, "Active Hazardous"), dataIndex: "activeHazardous", align: "right", width: "12%", render: (v) => Math.round(v).toLocaleString() },
+                {
+                  title: th(<WarningOutlined />, "Accepts Haz."),
+                  dataIndex: "acceptsHazardous",
+                  width: "10%",
+                  align: "center",
+                  render: (v) => (/^yes$/i.test(String(v)) ? <Tag color="red">Yes</Tag> : /^no$/i.test(String(v)) ? <Tag>No</Tag> : v || "—"),
+                },
+                { title: th(<CalendarOutlined />, "Last Updated"), dataIndex: "lastUpdated", width: "11%" },
                 removeColumn((r) => removeBaseline(r.key)),
               ]}
             />
@@ -1283,7 +1473,7 @@ export default function SlfSubmissionReport({
         <div className="slf-page-break" />
 
         {/* Key findings */}
-        <Section title="Key Findings">
+        <Section title="Key Findings" icon={<BulbOutlined />}>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
             <li>
               Submission coverage: <b>{withSubs}</b> submitting vs <b>{withoutSubs}</b> non-submitting
@@ -1309,7 +1499,7 @@ export default function SlfSubmissionReport({
 
         {/* Recent updates — LIVE announcements + portal/admin changes first, then
             the static release notes. Reflects the current portal/admin state. */}
-        <Section title="Recent Announcements & Changes">
+        <Section title="Recent Announcements & Changes" icon={<NotificationOutlined />}>
           <div style={{ fontSize: 12, lineHeight: 1.7 }}>
             <Text strong style={{ color: "#722ed1" }}>Current Announcement</Text>
             {latestAnnouncement ? (
@@ -1361,7 +1551,7 @@ export default function SlfSubmissionReport({
 
         {/* Data gaps — preview only; excluded from the exported/printed PDF. */}
         <div className="slf-report-noprint">
-        <Section title="Data Gaps & Limitations">
+        <Section title="Data Gaps & Limitations" icon={<InfoCircleOutlined />}>
           <Alert
             type="warning"
             showIcon
@@ -1382,14 +1572,15 @@ export default function SlfSubmissionReport({
                   </li>
                 )}
                 <li>
-                  A strict <b>baseline-vs-submitted</b> comparison is not available: facilities store a
-                  design/receiving <i>capacity</i>, not a per-period expected volume, so only cumulative
-                  utilisation can be approximated — omitted here to avoid misleading figures.
+                  The <b>Waste Cell Breakdown</b> compares the baseline already in each cell with the
+                  portal submissions placed since, from the server's per-cell calculation. There is no
+                  per-period <i>expected</i> volume, so it reports cumulative use against cell capacity.
                 </li>
                 <li>
                   Cell status uses the facility <b>cellStatuses</b> field. There is no dedicated
-                  "Full" or "Inactive" status — "Full (derived)" is inferred from cell fill ≥
-                  capacity; all non-active statuses are grouped under "Other cells" in the chart.
+                  "Full" or "Inactive" status — "Full (derived)" is inferred from waste in cell ≥
+                  capacity, compared in the same unit; all non-active statuses are grouped under
+                  "Other cells" in the chart.
                 </li>
                 <li>Dummy/test operators and submissions are excluded from all figures above.</li>
               </ul>

@@ -83,7 +83,49 @@ export function reportVeraAuthIssue(kind) {
   window.dispatchEvent(new CustomEvent("vera:auth-issue", { detail: { kind } }));
 }
 
+// ── Shown or hidden per side ─────────────────────────────────────────────────
+// Developer Settings › VERA & AI Agent has a switch for the admin sign-in pages
+// and one for the SLF Portal's. /vera/public-status says which are on; it is
+// fetched once per page load and shared by the widget and the help links, so a
+// hidden VERA leaves no "Ask VERA" link pointing at nothing. Until it answers
+// the widget stays hidden — a late launcher is better than one that flashes
+// and disappears.
+let publicStatusPromise = null;
+const loadPublicStatus = () => {
+  if (!publicStatusPromise) {
+    publicStatusPromise = api
+      .get("/vera/public-status")
+      .then(({ data }) => data)
+      .catch(() => {
+        publicStatusPromise = null;
+        return null;
+      });
+  }
+  return publicStatusPromise;
+};
+const sideOf = (page) => (/^admin/i.test(String(page || "")) ? "admin" : "portal");
+const visibleOn = (data, page) => {
+  if (!data) return true; // status unreachable: keep the help available
+  if (data.enabled === false) return false;
+  return sideOf(page) === "admin" ? data.showOnAdminLogin !== false : data.showOnPortalLogin !== false;
+};
+// For the help links, which are not told their page: /slfportal/* is the portal.
+const pageSide = () => (/^\/slfportal/i.test(window.location.pathname) ? "portal-auth" : "admin-auth");
+
+function useVeraAuthVisible(page) {
+  const [state, setState] = useState({ ready: false, visible: false, data: null });
+  useEffect(() => {
+    let alive = true;
+    loadPublicStatus().then((data) => {
+      if (alive) setState({ ready: true, visible: visibleOn(data, page), data });
+    });
+    return () => { alive = false; };
+  }, [page]);
+  return state;
+}
+
 export default function VeraAuthAssistant({ page = "portal-login" }) {
+  const { visible, data: publicStatus } = useVeraAuthVisible(page);
   // The palette is derived from the app's accent, exactly as in the portal.
   // The auth pages are light-only, so the theme is fixed.
   const accent = antdTheme.useToken().token.colorPrimary;
@@ -106,27 +148,26 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
 
   // Starter content + greeting. Static and account-free, so it is safe to fetch
   // before sign-in.
+  // Reuses the status already fetched for the visibility check.
   useEffect(() => {
     if (!open || meta) return;
     let cancelled = false;
-    api
-      .get("/vera/public-status")
-      .then(({ data }) => {
-        if (cancelled) return;
+    (publicStatus ? Promise.resolve(publicStatus) : loadPublicStatus()).then((data) => {
+      if (cancelled) return;
+      if (data) {
         setMeta(data);
         setMessages((m) => (m.length ? m : [{ role: "assistant", content: data.greeting }]));
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setMeta({ enabled: true, supportEmail: SUPPORT_EMAIL, starterQuestions: [] });
-        setMessages((m) =>
-          m.length
-            ? m
-            : [{ role: "assistant", content: "Hi, I'm VERA. Ask me about resetting your password or recovering your account." }],
-        );
-      });
+        return;
+      }
+      setMeta({ enabled: true, supportEmail: SUPPORT_EMAIL, starterQuestions: [] });
+      setMessages((m) =>
+        m.length
+          ? m
+          : [{ role: "assistant", content: "Hi, I'm VERA. Ask me about resetting your password or recovering your account." }],
+      );
+    });
     return () => { cancelled = true; };
-  }, [open, meta]);
+  }, [open, meta, publicStatus]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -228,6 +269,9 @@ export default function VeraAuthAssistant({ page = "portal-login" }) {
   // listening while a question is typed, burning at rest.
   const flameState = sending ? "thinking" : inputFocused && input.trim() ? "listening" : "burning";
   const starters = meta?.starterQuestions || [];
+
+  // Hidden on this side's sign-in pages (or not yet known): render nothing.
+  if (!visible) return null;
 
   return (
     <div className="vera-root vera-root--auth" data-theme="light" style={{ "--v-app-accent": accent }}>
@@ -410,6 +454,8 @@ export function openVeraAuthHelp(ask) {
 }
 
 export function VeraAuthHelpLink({ children, ask }) {
+  const { visible } = useVeraAuthVisible(pageSide());
+  if (!visible) return null;
   return (
     <Button
       type="link"

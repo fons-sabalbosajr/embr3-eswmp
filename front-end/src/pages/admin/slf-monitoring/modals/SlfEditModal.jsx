@@ -31,6 +31,51 @@ const CELL_ARRAY_FIELDS = [
   "cellFillUnits",
 ];
 
+/**
+ * Read-only breakdown of one cell's recorded Waste in Cell: baseline + portal
+ * submissions = the figure the data gives, and, when an admin declared the
+ * cell's figure, that declaration. Reads the facility's stored split
+ * (cellFillBaselineValues / cellFillSubmittedValues), written by the same server
+ * recompute that writes cellFillValues, so it always matches the View modal.
+ */
+function CellFillBreakdown({ record, index }) {
+  if (!record?._id) return null;
+  const unit = record.cellFillUnits?.[index] || record.wasteReceivedUnit || "";
+  const baseline = Number(record.cellFillBaselineValues?.[index] || 0);
+  const submitted = Number(record.cellFillSubmittedValues?.[index] || 0);
+  const effective = Number(record.cellFillValues?.[index] || 0);
+  const declared = Boolean(record.cellFillOverridden?.[index]);
+  const declaredBase = record.cellFillOverrideValues?.[index];
+  const declaredAt = record.cellFillOverrideAt?.[index];
+  if (!declared && baseline <= 0 && submitted <= 0 && effective <= 0) return null;
+  const fmt = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        lineHeight: 1.5,
+        margin: "-2px 0 8px",
+        padding: "4px 8px",
+        borderRadius: 6,
+        background: "rgba(47, 84, 235, 0.06)",
+      }}
+    >
+      <div>
+        Baseline <b>{fmt(baseline)}</b> + Portal submissions{" "}
+        <b style={{ color: "#2f54eb" }}>{fmt(submitted)}</b> ={" "}
+        <b>{fmt(baseline + submitted)}</b> {unit}
+      </div>
+      {declared && (
+        <div style={{ color: "#722ed1" }}>
+          Admin-declared{declaredBase != null ? ` base ${fmt(declaredBase)} ${unit}` : ""}
+          {declaredAt ? ` on ${new Date(declaredAt).toLocaleDateString()}` : ""} — recorded figure{" "}
+          <b>{fmt(effective)}</b> {unit}. Clear Waste in Cell to use the data figure.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SlfEditModal({
   isDark,
   canEdit,
@@ -1656,6 +1701,12 @@ export default function SlfEditModal({
                                                   </Form.Item>
                                                 </Col>
                                               </Row>
+                                              {/* What the recorded Waste in Cell is
+                                                  made of, from the split the server
+                                                  writes with every recompute — so an
+                                                  admin sees baseline vs. portal
+                                                  submissions before typing over it. */}
+                                              <CellFillBreakdown record={editing} index={i} />
                                               <Row gutter={8}>
                                                 <Col span={12}>
                                                   <Form.Item

@@ -132,7 +132,8 @@ test.beforeEach(() => {
   counts = { dataSlfFind: 0, facilityFindById: 0, bulkWrite: 0, transactionInsertMany: 0 };
 });
 
-const token = jwt.sign({ id: String(new mongoose.Types.ObjectId()), role: "portal_user" }, process.env.JWT_SECRET);
+// Real portal tokens carry the e-mail (routes/portalAuth.js); the route acts as it.
+const token = jwt.sign({ id: String(new mongoose.Types.ObjectId()), role: "portal_user", email: EMAIL }, process.env.JWT_SECRET);
 
 // Exactly what BulkOrganizeCells.jsx sends: one assignment per placement, both a
 // target cell AND the Truck Capacity the trip was missing.

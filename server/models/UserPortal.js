@@ -22,6 +22,13 @@ const userPortalSchema = new mongoose.Schema(
     password: { type: String, required: true, minlength: 6 },
     contactNumber: { type: String, trim: true, default: "" },
     companyName: { type: String, trim: true, default: "" },
+    // Profile picture (routes/profilePhoto.js) — same shape as User.profilePhoto.
+    profilePhoto: {
+      url: { type: String, default: "" },
+      storage: { type: String, enum: ["", "drive", "local"], default: "" },
+      fileRef: { type: String, default: "" },
+      updatedAt: { type: Date, default: null },
+    },
     // Marks demo/test accounts created via Developer Settings > Dummy Data
     // Configuration so they can be filtered separately from real portal users.
     isDummy: { type: Boolean, default: false, index: true },

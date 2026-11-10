@@ -629,7 +629,65 @@ async function validateDriveFile(urlOrId) {
   };
 }
 
+// ── Subfolders ───────────────────────────────────────────────────────────────
+// Find a folder by name directly under `parentId`, creating it when absent.
+// Memoised per process (a folder id never changes); a failed lookup is not
+// cached, so the next call retries. Used for images › "Profile Pictures".
+const subfolderCache = new Map();
+async function ensureDriveSubfolder(parentId, name) {
+  if (!hasValue(parentId)) throw new Error("Google Drive parent folder is not configured.");
+  const cacheKey = `${parentId}/${name}`;
+  if (subfolderCache.has(cacheKey)) return subfolderCache.get(cacheKey);
+  const pending = (async () => {
+    const clients = getDriveClients();
+    let lastError;
+    for (const client of clients) {
+      try {
+        const safeName = String(name).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const found = await client.drive.files.list({
+          q: `'${parentId}' in parents and name = '${safeName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: "files(id,name)",
+          pageSize: 1,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        });
+        const existing = found.data.files?.[0];
+        if (existing) return existing.id;
+        const created = await client.drive.files.create({
+          requestBody: { name, mimeType: "application/vnd.google-apps.folder", parents: [parentId] },
+          fields: "id",
+          supportsAllDrives: true,
+        });
+        return created.data.id;
+      } catch (error) {
+        lastError = decorateDriveError(error);
+        if (!shouldTryNextClient(error)) break;
+      }
+    }
+    throw lastError || new Error("Unable to prepare the Google Drive folder.");
+  })();
+  subfolderCache.set(cacheKey, pending);
+  pending.catch(() => subfolderCache.delete(cacheKey));
+  return pending;
+}
+
+/** Move a Drive file to the trash (recoverable for 30 days). Best-effort. */
+async function trashDriveFile(fileId) {
+  if (!fileId) return false;
+  for (const client of getDriveClients()) {
+    try {
+      await client.drive.files.update({ fileId, requestBody: { trashed: true }, supportsAllDrives: true });
+      return true;
+    } catch (error) {
+      if (!shouldTryNextClient(error)) return false;
+    }
+  }
+  return false;
+}
+
 module.exports = {
+  ensureDriveSubfolder,
+  trashDriveFile,
   uploadFileToDrive,
   uploadFilePathToDrive,
   streamDriveFile,

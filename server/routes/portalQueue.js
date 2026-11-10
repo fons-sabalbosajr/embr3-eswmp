@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const PortalSubmissionQueue = require("../models/PortalSubmissionQueue");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
@@ -11,7 +12,8 @@ const router = express.Router();
 // be possible. Both frontends always send a Bearer token.
 const { requireAnyAuth } = require("../middleware/auth");
 router.use(requireAnyAuth);
-const { submitEntries, isDatabaseTimeout, DB_TIMEOUT_MESSAGE } = dataSLFRoutes;
+const { isDatabaseTimeout, DB_TIMEOUT_MESSAGE } = dataSLFRoutes;
+const { submitQueueRecord } = require("../utils/queueSubmission");
 const {
   resolvePortalContext,
   assertPortalWriteAllowed,
@@ -32,7 +34,7 @@ const ACTIVE_STATUSES = ["draft", "scheduled"];
 // payload is fetched one record at a time from GET /:id when a row is opened.
 const SUMMARY_FIELDS =
   "portalUserEmail slfName slfGenerator type status scheduledAt submittedAt " +
-  "resultSubmissionId failureReason retryCount createdAt updatedAt";
+  "resultSubmissionId failureReason retryCount createdAt updatedAt resubmitOf resubmitOfIdNo";
 
 // Hard ceiling on one page of queue records. Generous enough that no real
 // operator paginates, low enough that a runaway account cannot ask the database
@@ -149,12 +151,39 @@ function draftIdentity({ slfGenerator, slfName, payload }) {
  * Scheduled records are deliberately excluded: scheduling the same report twice
  * is a legitimate thing to do and each run has its own time.
  */
+/**
+ * Validate the reverted entry a queue record claims to correct. It must exist,
+ * belong to `email`, and still be reverted — a correction of anything else has
+ * nothing to resubmit. Returns the fields stored on the queue record.
+ */
+async function resolveResubmitTarget(email, resubmitOf) {
+  const id = String(resubmitOf || "").trim();
+  const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
+  if (!mongoose.isValidObjectId(id)) throw fail(400, "The submission being corrected could not be identified.");
+  const DataSLF = require("../models/DataSLF");
+  const entry = await DataSLF.findOne({ _id: id, deletedAt: null })
+    .setOptions({ includeHiddenYears: true })
+    .select("idNo submittedBy status")
+    .lean();
+  if (!entry) throw fail(404, "The submission being corrected no longer exists.");
+  if (String(entry.submittedBy || "").trim().toLowerCase() !== email) {
+    throw fail(403, "You can only correct your own submissions.");
+  }
+  if (entry.status !== "reverted") {
+    throw fail(409, `${entry.idNo || "This submission"} is not reverted (it is ${entry.status}), so there is nothing to resubmit.`);
+  }
+  return { resubmitOf: entry._id, resubmitOfIdNo: entry.idNo || "" };
+}
+
 async function findEquivalentDraft(email, identity) {
   if (!identity) return null;
   const candidates = await PortalSubmissionQueue.find({
     portalUserEmail: email,
     type: "draft",
     status: { $in: ["draft", "failed"] },
+    // A correction of a reverted entry is never "the same transaction" as an
+    // ordinary draft for that date — merging them filed the fix as a new entry.
+    resubmitOf: { $exists: false },
   })
     .sort({ updatedAt: -1 })
     .limit(QUEUE_MAX_LIMIT)
@@ -283,6 +312,43 @@ router.post("/", async (req, res) => {
       }
     }
 
+    // The correction of a reverted entry, saved for later. Validated now so a
+    // bad link fails at save time, not when the draft is finally submitted.
+    const resubmitTarget = req.body?.resubmitOf
+      ? await resolveResubmitTarget(email, req.body.resubmitOf)
+      : null;
+    if (resubmitTarget) {
+      // One pending correction per reverted entry: re-saving updates it. Two
+      // copies would race — the second to submit would find the entry already
+      // resubmitted.
+      const existing = await PortalSubmissionQueue.findOne({
+        portalUserEmail: email,
+        resubmitOf: resubmitTarget.resubmitOf,
+        status: { $in: EDITABLE_STATUSES },
+      });
+      if (existing) {
+        existing.type = kind;
+        existing.status = kind;
+        existing.payload = payload && typeof payload === "object" ? payload : {};
+        existing.scheduledAt = kind === "scheduled" ? sanitizeScheduledAt(scheduledAt) : undefined;
+        existing.failureReason = "";
+        existing.resubmitOfIdNo = resubmitTarget.resubmitOfIdNo;
+        existing.updatedBy = email;
+        await existing.save();
+        writeLog("info", "portal.queue.resubmit_updated", {
+          message: `Portal ${kind} correction of ${resubmitTarget.resubmitOfIdNo || "a reverted entry"} updated`,
+          user: email,
+          ip: req.ip,
+          meta: { queueId: existing._id, resubmitOf: String(resubmitTarget.resubmitOf) },
+        });
+        return res.status(200).json({
+          message: kind === "scheduled" ? "Resubmission scheduled" : "Draft updated",
+          data: existing,
+          updatedExisting: true,
+        });
+      }
+    }
+
     // Idempotency: a double-click / axios retry must not create two drafts or
     // schedule the same submission twice. The client sends a stable
     // clientRequestId per save action; a repeat returns the record it already made.
@@ -302,7 +368,7 @@ router.post("/", async (req, res) => {
 
     // Re-saving the SAME transaction updates the draft that already holds it
     // instead of stacking another copy beside it.
-    if (kind === "draft") {
+    if (kind === "draft" && !resubmitTarget) {
       const identity = draftIdentity({ slfGenerator, slfName, payload });
       const existing = await findEquivalentDraft(email, identity);
       if (existing) {
@@ -348,6 +414,7 @@ router.post("/", async (req, res) => {
       status: kind,
       payload: payload && typeof payload === "object" ? payload : {},
       scheduledAt: kind === "scheduled" ? sanitizeScheduledAt(scheduledAt) : undefined,
+      ...(resubmitTarget || {}),
       createdBy: email,
       updatedBy: email,
     });
@@ -397,6 +464,11 @@ router.put("/:id", async (req, res) => {
       record.failureReason = "";
     }
     if (payload && typeof payload === "object") record.payload = payload;
+    // A draft opened while correcting a reverted entry becomes that entry's
+    // correction. An existing link is kept when the body does not mention it.
+    if (req.body?.resubmitOf && String(req.body.resubmitOf) !== String(record.resubmitOf || "")) {
+      Object.assign(record, await resolveResubmitTarget(record.portalUserEmail, req.body.resubmitOf));
+    }
     if (slfName !== undefined) record.slfName = slfName;
     if (slfGenerator !== undefined) record.slfGenerator = slfGenerator || undefined;
     if (record.type === "scheduled") {
@@ -496,11 +568,8 @@ router.post("/:id/submit", async (req, res) => {
     }
 
     try {
-      const { submissionId } = await submitEntries({
-        entries: [record.payload],
-        submittedBy: record.portalUserEmail,
-        req,
-      });
+      // A correction of a reverted entry resubmits it; anything else is new.
+      const { submissionId, resubmittedIdNo } = await submitQueueRecord(record, req);
       const wasDraft = record.type === "draft";
       record.status = "submitted";
       record.submittedAt = new Date();
@@ -521,9 +590,15 @@ router.post("/:id/submit", async (req, res) => {
         message: `Portal ${wasDraft ? "draft" : record.type} submitted manually (${record.slfName || "SLF"})${removedFromDrafts ? " and removed from drafts" : ""}`,
         user: record.portalUserEmail,
         ip: req.ip,
-        meta: { queueId: record._id, submissionId, removedFromDrafts },
+        meta: { queueId: record._id, submissionId, removedFromDrafts, resubmittedIdNo: resubmittedIdNo || undefined },
       });
-      res.json({ message: "Submitted successfully", data: record, submissionId, removedFromDrafts });
+      res.json({
+        message: resubmittedIdNo ? `${resubmittedIdNo} resubmitted successfully` : "Submitted successfully",
+        data: record,
+        submissionId,
+        removedFromDrafts,
+        ...(resubmittedIdNo ? { resubmittedIdNo } : {}),
+      });
     } catch (submitErr) {
       // A DATABASE timeout is not a rejected submission. Stamping the record
       // `failed` with the driver's raw text ("connection … :27017 timed out")

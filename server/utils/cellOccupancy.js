@@ -634,11 +634,48 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
  * total and is not added again — while a submission recorded afterwards can
  * actually count.
  */
+/**
+ * The baseline FIGURES a record carries, as a comparable string. Two records
+ * with the same fingerprint carry the same encoded baseline; a different one
+ * means the operator re-encoded it.
+ *
+ * Only what the operator ENCODES: Total Volume Accepted and each cell's volume,
+ * in cell order. Deliberately left out — measured against production copies of
+ * the same baseline — are fields that change without any re-encoding: cell names
+ * (renamed later), `cellIndex` (backfilled onto older copies), and the
+ * residual/inert/hazardous rollups (recomputed from the cells on each save).
+ */
+function baselineFingerprint(entry) {
+  const n = (v) => (v == null || v === "" ? "" : String(Math.round(Number(v) * 1000)));
+  const cells = (entry?.activeCellEntries || []).map((c) => n(c?.volume)).join(",");
+  return `${n(entry?.totalVolumeAccepted)}|${cells}`;
+}
+
 function baselineCutoffDate(entries, baselineEntry) {
   if (!baselineEntry) return null;
   const chosen = baselineEntry.createdAt ? new Date(baselineEntry.createdAt) : null;
-  // A genuine container dates the encoding on its own.
-  if (!(baselineEntry.trucks || []).length) return chosen;
+  // A CONTAINER dates the encoding from the first record that carried the SAME
+  // figures. Containers were introduced after many SLFs already kept their
+  // baseline on their submissions, and the portal's first baseline save COPIED
+  // those figures into a new container — so its createdAt is the copy date, not
+  // the encoding date. Taking it at face value excluded every submission in
+  // between: measured on production, Limay (figures unchanged since 2026-05-15,
+  // container 2026-08-29) lost 94 submissions from its cells, Prime Waste
+  // Solution 21, Maria Aurora 19. A container whose figures appear on no earlier
+  // record WAS a re-encoding (Porac, Floridablanca) and keeps its own date — that
+  // re-encoded total already includes the waste disposed before it.
+  if (!(baselineEntry.trucks || []).length) {
+    const key = baselineFingerprint(baselineEntry);
+    let earliest = chosen;
+    for (const entry of entries) {
+      if (!entry?.createdAt || !isBaselineEntry(entry)) continue;
+      if (baselineFingerprint(entry) !== key) continue;
+      const at = new Date(entry.createdAt);
+      if (Number.isNaN(at.getTime())) continue;
+      if (!earliest || at < earliest) earliest = at;
+    }
+    return earliest;
+  }
   let earliest = chosen;
   for (const entry of entries) {
     if (!isBaselineEntry(entry) || !entry?.createdAt) continue;
@@ -713,8 +750,12 @@ async function preBaselineExclusionEnabled() {
  *       excluded — 545 of them across 13 facilities, each stuck at 0 submitted
  *       volume. Their stored figures were written under that rule and must be
  *       recomputed.
+ *   5 — a baseline CONTAINER that merely copied figures already carried by
+ *       earlier records is dated from the first record with those figures, not
+ *       from the copy (see baselineCutoffDate). Limay, Prime Waste Solution and
+ *       Maria Aurora had submissions excluded under the old date.
  */
-const OCCUPANCY_CALC_VERSION = 4;
+const OCCUPANCY_CALC_VERSION = 5;
 
 module.exports = {
   computeCellOccupancy,
@@ -723,6 +764,7 @@ module.exports = {
   chooseBaselineEntry,
   preBaselineExclusionEnabled,
   baselineCutoffDate,
+  baselineFingerprint,
   isBaselineEntry,
   readCellOverride,
   isRecordedAfter,

@@ -543,6 +543,10 @@ export default function SubmissionSummary({ isDark }) {
   const [exportRange, setExportRange] = useState(null);
   const [portalUsers, setPortalUsers] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
+  const reportOpenRef = useRef(false);
+  useEffect(() => {
+    reportOpenRef.current = reportOpen;
+  }, [reportOpen]);
   // The PDF report must never render from this page's cached page-state: the
   // summary/reference fetches sit behind a 10-minute TTL, so opening the report
   // straight from state could publish figures that are up to a TTL old. The
@@ -728,8 +732,10 @@ export default function SubmissionSummary({ isDark }) {
           : annData?.items || annData?.data || (annData ? [annData] : []),
       );
       const txnData = txnRes.data;
+      // GET /transactions answers { transactions, total, page, limit }. Reading
+      // only `.data`/`.items` left the report's Recent Changes permanently empty.
       setRecentChanges(
-        Array.isArray(txnData) ? txnData : txnData?.data || txnData?.items || [],
+        Array.isArray(txnData) ? txnData : txnData?.transactions || txnData?.data || txnData?.items || [],
       );
       setReportOpen(true);
     } finally {
@@ -750,6 +756,18 @@ export default function SubmissionSummary({ isDark }) {
         invalidateCache(SUMMARY_CACHE_KEY);
         fetchRecords({ force: true, silent: true });
         fetchReferenceData({ force: true });
+        // An open PDF report reads "Recent Portal / Admin Changes" from a list
+        // fetched once when it opened; re-read it so the report keeps up with
+        // portal submissions while it is on screen.
+        if (reportOpenRef.current) {
+          api
+            .get("/transactions", { params: { limit: 25 } })
+            .then(({ data }) => {
+              if (!aliveRef.current) return;
+              setRecentChanges(Array.isArray(data) ? data : data?.transactions || data?.data || data?.items || []);
+            })
+            .catch(() => {});
+        }
       }
     };
     socket.on("data-refresh", handler);
@@ -2071,6 +2089,7 @@ export default function SubmissionSummary({ isDark }) {
             totals={totals}
             announcements={announcements}
             recentChanges={recentChanges}
+            cellOccupancy={cellOccupancy}
           />
         </Suspense>
       )}

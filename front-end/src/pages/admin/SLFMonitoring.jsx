@@ -217,6 +217,7 @@ import {
   fileNameFromUrl,
   getServedClientCount,
 } from "./slf-monitoring/helpers.jsx";
+import { declaredCellFills } from "./slf-monitoring/cellTally";
 
 const EMPTY_ROWS = [];
 
@@ -1227,7 +1228,15 @@ export default function SLFMonitoring({
     });
   };
 
+  // The Waste in Cell figures as LOADED into the form, and which of them were
+  // already admin-declared. See declaredFillValues() for why this is needed.
+  const loadedFillRef = useRef({ values: [], overridden: [] });
+
   const populateForm = (record) => {
+    loadedFillRef.current = {
+      values: Array.isArray(record.cellFillValues) ? [...record.cellFillValues] : [],
+      overridden: Array.isArray(record.cellFillOverridden) ? [...record.cellFillOverridden] : [],
+    };
     const receivingFacilities = record.receivingFacilities?.length
       ? record.receivingFacilities
       : (record.mrfDetails || []).map((item) => ({
@@ -1390,6 +1399,8 @@ export default function SLFMonitoring({
   };
 
   const openAdd = () => {
+    // A new facility has no loaded figures: whatever is typed is a declaration.
+    loadedFillRef.current = { values: [], overridden: [] };
     setEditing(null);
     setEditYear(new Date().getFullYear());
     setEditYearRecords([]);
@@ -1449,6 +1460,7 @@ export default function SLFMonitoring({
     } else {
       // Blank record for this year — keep location fields from current editing
       const current = editing || {};
+      loadedFillRef.current = { values: [], overridden: [] };
       setEditing({
         _id: null,
         lgu: current.lgu,
@@ -1952,6 +1964,13 @@ export default function SLFMonitoring({
       // Saying so marks the cells the admin filled in as admin-declared, so the
       // figure survives the derived recompute instead of being overwritten by
       // the next submission. A cell left blank stays derived.
+      //
+      // ONLY the cells the admin actually declared. The inputs are pre-filled
+      // with the DERIVED figure, so sending them back as-is declared every cell
+      // on every save — editing a permit froze each cell's current total as an
+      // admin base, and later corrections (a revert, a baseline change) stopped
+      // reaching it. An untouched derived cell is sent blank and stays derived.
+      payload.cellFillValues = declaredFillValues(payload.cellFillValues);
       payload.cellFillValuesDeclared = true;
       if (editing && editing._id) {
         const { data } = await api.put(
@@ -2071,6 +2090,13 @@ export default function SLFMonitoring({
       wasteReceivedUnit: targetUnit,
     });
   };
+
+  // Which Waste in Cell values are DECLARATIONS: a cell that was already
+  // admin-declared keeps whatever the field now says (blank clears it), and a
+  // derived cell counts only if the admin changed its figure. Everything else
+  // goes back blank so the server leaves it derived.
+  const declaredFillValues = (formFills = []) =>
+    declaredCellFills(formFills, loadedFillRef.current);
 
   const handleCellFillValueChange = (index, value) => {
     const nextFills = [...(form.getFieldValue("cellFillValues") || [])];

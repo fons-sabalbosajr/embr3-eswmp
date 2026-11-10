@@ -8,6 +8,7 @@ import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, g
 import { AlertOutlined, AppstoreOutlined, BankOutlined, BarChartOutlined, BellOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, LinkOutlined, PlayCircleOutlined, SafetyCertificateOutlined, TeamOutlined, UnorderedListOutlined, WarningOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Col, Collapse, Descriptions, Divider, Empty, Image, List, Modal, Progress, Row, Segmented, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs from "dayjs";
+import { cellTally, facilityTally, formatVolume } from "../cellTally";
 import { Bar, BarChart, CartesianGrid, Cell as RCell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from "recharts";
 
 const { Text } = Typography;
@@ -620,52 +621,44 @@ export default function SlfDetailModal({
                                           />
                                         ) : null;
                                       })()}
-                                      {detailViewRecord._submissionWasteReceived >
-                                        0 && (
-                                        <div
-                                          style={{
-                                            marginBottom: 8,
-                                            fontSize: 11,
-                                            color: "#8c8c8c",
-                                            borderBottom: "1px solid #f0f0f0",
-                                            paddingBottom: 6,
-                                          }}
-                                        >
-                                          <Space size={12} wrap>
-                                            <span>
-                                              Baseline:{" "}
-                                              <Text strong>
-                                                {Number(
-                                                  detailViewRecord._baselineWasteReceived ||
-                                                    0,
-                                                ).toLocaleString()}{" "}
-                                                {normalizeUnit(
-                                                  detailViewRecord.wasteReceivedUnit ||
-                                                    "tons",
-                                                )}
-                                              </Text>
-                                            </span>
-                                            <span
-                                              style={{ color: "#2f54eb" }}
-                                            >
-                                              Submissions:{" "}
-                                              <Text
-                                                strong
-                                                style={{ color: "#2f54eb" }}
-                                              >
-                                                +
-                                                {Number(
-                                                  detailViewRecord._submissionWasteReceived,
-                                                ).toLocaleString()}{" "}
-                                                {normalizeUnit(
-                                                  detailViewRecord._submissionWasteReceivedUnit ||
-                                                    "tons",
-                                                )}
-                                              </Text>
-                                            </span>
-                                          </Space>
-                                        </div>
-                                      )}
+                                      {/* Facility tally from the SAME per-cell
+                                          parts as the gauges and the table. It
+                                          used to appear only when submissions
+                                          were > 0 and read a separate client
+                                          total that ignored admin-declared cells,
+                                          so it disagreed with the cells. */}
+                                      {(() => {
+                                        const rows = detailViewRecord._cellUsageRows || [];
+                                        if (!rows.length) return null;
+                                        const tally = facilityTally(rows, detailViewRecord._unplacedVolume);
+                                        const unit = normalizeUnit(rows[0]?.unit || detailViewRecord.wasteReceivedUnit || "tons");
+                                        return (
+                                          <div
+                                            style={{
+                                              marginBottom: 8,
+                                              fontSize: 12,
+                                              borderBottom: "1px solid #f0f0f0",
+                                              paddingBottom: 6,
+                                            }}
+                                          >
+                                            <Space size={[12, 4]} wrap>
+                                              <Tooltip title={tally.declaredCells ? `Includes ${tally.declaredCells} admin-declared cell figure${tally.declaredCells === 1 ? "" : "s"} (the declared base).` : "Baseline volume placed in the cells."}>
+                                                <span>Baseline in cells: <Text strong>{formatVolume(tally.baseline, unit)}</Text></span>
+                                              </Tooltip>
+                                              <span style={{ color: "#2f54eb" }}>+ Submissions in cells: <Text strong style={{ color: "#2f54eb" }}>{formatVolume(tally.submitted, unit)}</Text></span>
+                                              <span>= Waste in cells: <Text strong>{formatVolume(tally.inCells, unit)}</Text></span>
+                                              {tally.unplaced > 0 && (
+                                                <Tooltip title="Submitted and counted as received, but not yet organized into a cell by the operator, so it is in no cell's figure.">
+                                                  <span style={{ color: "#d46b08" }}>+ awaiting placement: <Text strong style={{ color: "#d46b08" }}>{formatVolume(tally.unplaced, unit)}</Text></span>
+                                                </Tooltip>
+                                              )}
+                                              {tally.unplaced > 0 && (
+                                                <span>= Total received: <Text strong>{formatVolume(tally.received, unit)}</Text></span>
+                                              )}
+                                            </Space>
+                                          </div>
+                                        );
+                                      })()}
                                       <Row gutter={[16, 16]} justify="center">
                                         {(cellCaps.length > 0
                                           ? cellCaps
@@ -881,6 +874,24 @@ export default function SlfDetailModal({
                                                   ? `${cap.toLocaleString()} ${capUnit}`
                                                   : "—"}
                                               </div>
+                                              {usageRow && usedInCell > 0 && (() => {
+                                                const part = cellTally(usageRow);
+                                                return (
+                                                  <Tooltip title={part.declared ? "Admin-declared figure + submissions recorded since the declaration" : "Baseline + portal submissions placed in this cell"}>
+                                                    <div style={{ fontSize: 10, lineHeight: 1.35 }}>
+                                                      <span style={{ color: "#595959" }}>
+                                                        {part.declared ? "Declared " : "Baseline "}
+                                                        {formatVolume(part.baseline, "", 1)}
+                                                      </span>
+                                                      {" + "}
+                                                      <span style={{ color: "#2f54eb", fontWeight: 600 }}>
+                                                        {formatVolume(part.submitted, "", 1)}
+                                                      </span>
+                                                      <span style={{ color: "#8c8c8c" }}> {cellFillUnit}</span>
+                                                    </div>
+                                                  </Tooltip>
+                                                );
+                                              })()}
                                               {remaining != null &&
                                                 !isClosed && (
                                                   // Remaining Capacity is RED in the standard
@@ -1084,8 +1095,19 @@ export default function SlfDetailModal({
                                         title: "Baseline Volume",
                                         key: "baseline",
                                         align: "right",
-                                        render: (_, row) =>
-                                          row.baseline > 0 ? (
+                                        render: (_, row) => {
+                                          const part = cellTally(row);
+                                          if (part.declared) {
+                                            return (
+                                              <Tooltip title={`Figure declared by an admin${row.overriddenAt ? ` on ${dayjs(row.overriddenAt).format("MMM D, YYYY")}` : ""}; submissions recorded since are added to it.`}>
+                                                <Space size={4}>
+                                                  <Tag color="purple" style={{ fontSize: 9, marginInlineEnd: 0 }}>Declared</Tag>
+                                                  <Text style={{ color: "#595959" }}>{formatVolume(part.baseline, row.unit)}</Text>
+                                                </Space>
+                                              </Tooltip>
+                                            );
+                                          }
+                                          return row.baseline > 0 ? (
                                             <Text
                                               style={{ color: "#595959" }}
                                             >
@@ -1098,29 +1120,26 @@ export default function SlfDetailModal({
                                             </Text>
                                           ) : (
                                             "—"
-                                          ),
+                                          );
+                                        },
                                       },
                                       {
                                         title: "Submissions",
                                         key: "submissions",
                                         align: "right",
-                                        render: (_, row) =>
-                                          row.submissions > 0 ? (
+                                        render: (_, row) => {
+                                          const part = cellTally(row);
+                                          return part.submitted > 0 ? (
                                             <Text
                                               strong
                                               style={{ color: "#2f54eb" }}
                                             >
-                                              +
-                                              {Number(
-                                                row.submissions,
-                                              ).toLocaleString(undefined, {
-                                                maximumFractionDigits: 2,
-                                              })}{" "}
-                                              {row.unit}
+                                              +{formatVolume(part.submitted, row.unit)}
                                             </Text>
                                           ) : (
                                             <Text type="secondary">—</Text>
-                                          ),
+                                          );
+                                        },
                                       },
                                       {
                                         title: "Total Fill",
@@ -1233,18 +1252,13 @@ export default function SlfDetailModal({
                                       },
                                     });
 
-                                    const totalBaseline = cellRows.reduce(
-                                      (s, r) => s + (r.baseline || 0),
-                                      0,
-                                    );
-                                    const totalSub = cellRows.reduce(
-                                      (s, r) => s + (r.submissions || 0),
-                                      0,
-                                    );
-                                    const totalFill = cellRows.reduce(
-                                      (s, r) => s + (r.total || 0),
-                                      0,
-                                    );
+                                    // Same per-cell parts as the gauges, so
+                                    // Baseline + Submissions = Total Fill on
+                                    // every row AND on this line.
+                                    const tallyAll = facilityTally(cellRows);
+                                    const totalBaseline = tallyAll.baseline;
+                                    const totalSub = tallyAll.submitted;
+                                    const totalFill = tallyAll.inCells;
                                     const displayUnit =
                                       cellRows[0]?.unit || baselineEntryUnit;
 

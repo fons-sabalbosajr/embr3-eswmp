@@ -21,13 +21,17 @@
 // the same list to walk a user through the change on request. One source, so
 // the tour and VERA can never describe the workflow differently.
 
-export const PORTAL_FEATURE_TOUR_VERSION = "2026-08-25-uploads-baseline-completeness";
+export const PORTAL_FEATURE_TOUR_VERSION = "2026-11-10-transport-steps-corrections";
 
-export const PORTAL_FEATURE_TOUR_TITLE = "What's new: smarter uploads & baseline fixes";
+export const PORTAL_FEATURE_TOUR_TITLE = "What's new: step-by-step entries & corrections that resubmit";
 
 /**
- * Ordered steps. `key` maps to a target ref in index.jsx; everything the user
- * reads is here.
+ * Ordered steps. `key` maps to a target in index.jsx; everything the user reads
+ * is here.
+ *
+ * `tab` is the Data Entry tab the target lives on (the tabs render lazily, so the
+ * tour switches to it first). `menu` instead names a sidebar menu item to point
+ * at — for a change that lives on another screen.
  *
  * `ask` is the question VERA is sent when the user chooses "Ask VERA" on that
  * step — phrased as a question about the process, not a command, because the
@@ -36,46 +40,44 @@ export const PORTAL_FEATURE_TOUR_TITLE = "What's new: smarter uploads & baseline
  */
 export const PORTAL_FEATURE_TOUR_STEPS = [
   {
-    key: "completeness",
-    title: "Fix every incomplete record in one place",
+    key: "transport-steps",
+    tab: "disposal",
+    title: "Add Transport Entry is now step by step",
     description:
-      "The incomplete-records warning now opens an editor holding all of them at once — hauler office addresses, and each client's type, province, city/municipality and address. No more opening haulers one at a time to find the field that is missing. It fills in your form; Save Baseline Update still persists it.",
-    ask: "Which of my haulers and clients are incomplete, and how do I complete them?",
+      "Trip → Vehicles & Waste → Review. The steps work like tabs — click any of them, or use Back and Next — and every field lines up under its label. If something is missing when you save, that step turns red and the form opens on it. Editing a saved entry? Update Entry is available on every step.",
+    ask: "How do I add a transport entry for my disposal trip step by step?",
   },
   {
-    key: "special-zones",
-    title: "Special economic zones are now selectable",
+    key: "correction-draft",
+    tab: "disposal",
+    title: "Save a correction as a draft, or schedule it",
     description:
-      "Clark Freeport Zone, Subic Bay Freeport Zone, the Freeport Area of Bataan and the other freeports now appear in a client's City/Municipality list, under their host province. They are not ordinary municipalities, so they were never in the national list — pick the zone itself rather than a neighbouring town.",
-    ask: "My client is inside Clark Freeport Zone. How do I encode a special economic zone as the municipality?",
+      "While you correct a reverted entry, Save as Draft and Schedule now keep the correction linked to it. Finishing it later resubmits that same entry — same ID No., back to Pending — instead of filing a new submission and leaving the reverted one behind.",
+    ask: "Can I save the correction of a reverted entry as a draft or schedule it?",
   },
   {
-    key: "system-generated",
-    title: "Files from your own system are understood",
+    key: "drafts-corrections",
+    menu: "drafts",
+    title: "Corrections in Drafts & Scheduled resubmit the original",
     description:
-      "A disposal file exported from a weighbridge or gate system records one party per trip and writes it into both the Hauler and the Client column. The upload now resolves those against your baseline and matches the rows it can, instead of rejecting every one of them.",
-    ask: "My system-generated disposal file is rejected — every row says the hauler is not assigned. Why?",
+      "A saved correction is labelled \"Correction of SLF-…\" and submitting it says Resubmitted. If you already resubmitted that entry from Data Entry, the old copy is cancelled for you, so it can never overwrite your newer correction.",
+    ask: "What happens when I submit a correction from Drafts & Scheduled?",
   },
   {
-    key: "mismatch",
-    title: "Name mismatches are told apart from missing records",
+    key: "history-details",
+    menu: "history",
+    title: "Clearer Submission Details and a live report",
     description:
-      "When the baseline already holds a client under a different spelling, the preview says so and offers the fix: use the stored name for this file, or correct the client on the hauler. It no longer tells you to add a client you already have — which would have split that client's volumes across two records.",
-    ask: "The upload says my client is not on the hauler, but I can see it there. What is a client name mismatch?",
+      "The tables in Submission Details now fit the window — long values wrap instead of scrolling sideways. Generate Report keeps itself up to date while it is open: approvals, reverts and new submissions appear on their own, with the time of the last update.",
+    ask: "How do I read the Submission Details and generate my report?",
   },
   {
-    key: "preview-grid",
-    title: "A clearer upload preview",
+    key: "overview-breakdown",
+    menu: "overview",
+    title: "Your Submission Breakdown follows approvals immediately",
     description:
-      "Hauler and Client now share one column, as do Truck Capacity, Volume and Unit — they are checked together, so they are shown together. Waste types carry their standard colours, and the Validation column spells out what is wrong with a row and what to do about it.",
-    ask: "What do the Match and Validation columns in the upload preview mean?",
-  },
-  {
-    key: "cell-placement",
-    title: "No need to re-choose a cell that is already set",
-    description:
-      "When an entry has already been placed in a disposal cell — through Assign to Cell, an upload, or the entry itself — every vehicle on it inherits that placement. You are no longer asked to pick a cell for waste that is already in one.",
-    ask: "Why do I still have to choose a disposal cell for each vehicle?",
+      "When EMB approves a resubmission, the entry moves from Pending to Approved on your Overview within seconds — no refresh, and no older figures held for a couple of minutes.",
+    ask: "When does my Submission Breakdown update after EMB approves a resubmission?",
   },
 ];
 
@@ -84,10 +86,10 @@ export const PORTAL_FEATURE_TOUR_STEPS = [
 // the user would actually ask.
 export const PORTAL_FEATURE_TOUR_VERA_PROMPT =
   "Walk me through what changed in the SLF Portal in this release. " +
-  "Summarize the Complete Baseline Records editor, special economic zones in the " +
-  "client address picker, how system-generated disposal files are matched, what a " +
-  "client name mismatch is and how to resolve it, and when a disposal cell no " +
-  "longer has to be chosen per vehicle.";
+  "Summarize the step-by-step Add Transport Entry form, saving the correction of a " +
+  "reverted entry as a draft or scheduling it, how Drafts & Scheduled resubmits a " +
+  "correction, the Submission Details tables and live report, and when the " +
+  "Submission Breakdown updates after an approval.";
 
 export default {
   PORTAL_FEATURE_TOUR_VERSION,

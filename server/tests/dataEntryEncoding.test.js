@@ -107,10 +107,17 @@ test("the routes REFUSE to write when validation produced errors", () => {
     /if \(validationErrors\.length\) \{\s*const error = new Error\(validationErrors\.join\(" \| "\)\);\s*error\.statusCode = 400;\s*throw error;/,
     "submitEntries must throw 400 before saving",
   );
+  // The resubmit path now lives in resubmitEntry (shared with Drafts &
+  // Scheduled), which throws a 400 the route forwards — still before any write.
   assert.match(
     source,
-    /if \(updateErrors\.length\) \{\s*return res\.status\(400\)\.json\(\{ message: updateErrors\.join\(" "\) \}\);/,
-    "the resubmit path must return 400 before applying updates",
+    /if \(updateErrors\.length\) \{\s*throw httpError\(400, updateErrors\.join\(" "\)\);/,
+    "the resubmit path must refuse with 400 before applying updates",
+  );
+  const resubmit = source.slice(source.indexOf("async function resubmitEntry"), source.indexOf("async function announceResubmission"));
+  assert.ok(
+    resubmit.indexOf("throw httpError(400, updateErrors") < resubmit.indexOf("applyEntryUpdates("),
+    "the refusal comes before applyEntryUpdates",
   );
 });
 

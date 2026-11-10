@@ -138,14 +138,16 @@ test("only cell fields flow through the pipeline, never whole submissions", asyn
   const pipeline = pipelines[0];
   const project = pipeline[stageIndex(pipeline, "$project")].$project;
 
-  // The placement test reads cellName/cellIndex and nothing else, so nothing else
-  // should survive into it.
+  // The placement test reads each placement's cellIndex and volume (the portal's
+  // rule: only waste that EXISTS needs a cell, and only a cell id places it), so
+  // nothing else should survive into it.
   const serialized = JSON.stringify(project);
   ["accreditedHaulers", "activeCellEntries", "closedCellEntries", "selectedClients"].forEach((field) =>
     assert.ok(!serialized.includes(field), `${field} must not be carried through the sort/compute`),
   );
-  assert.ok(serialized.includes("cellName") && serialized.includes("cellIndex"), "cell fields are kept");
-  assert.ok(!serialized.includes("actualVolume"), "volume is irrelevant to whether a cell is assigned");
+  assert.ok(serialized.includes("cellIndex"), "the cell identifier is kept");
+  assert.ok(serialized.includes("actualVolume"), "volume decides whether a placement needs a cell at all");
+  assert.ok(!/\$\$[tv]\.cellName/.test(serialized), "a cell NAME alone never places waste (same as the portal)");
 });
 
 test("the facet returns ids only — the rows are re-read projected", async () => {
@@ -185,10 +187,11 @@ test("the assigned tab is filtered the same way, with the same stage order", asy
   await listPage("assigned");
   const pipeline = pipelines[0];
   assert.ok(stageIndex(pipeline, "$sort") < stageIndex(pipeline, "$addFields"));
-  // The business rule: assigned means every truck is placed.
-  const exprMatch = pipeline.filter((s) => s.$match?.$expr).pop();
-  assert.ok(exprMatch, "the placement predicate is still applied");
-  assert.ok(JSON.stringify(exprMatch).includes("$gte"), "assigned = placed >= total, unchanged");
+  // The business rule, aligned with the SLF Portal: assigned means no placement
+  // of existing waste is still without a valid cell.
+  const placementMatch = pipeline.filter((s) => s.$match && "_unplaced" in s.$match).pop();
+  assert.ok(placementMatch, "the placement predicate is still applied");
+  assert.deepEqual(placementMatch.$match, { _tcount: { $gt: 0 }, _unplaced: 0 });
 });
 
 // ── The browser half of the same fix ────────────────────────────────────────

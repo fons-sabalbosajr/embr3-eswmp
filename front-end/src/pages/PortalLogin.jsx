@@ -91,7 +91,11 @@ export default function PortalLogin() {
         const endsAt = data.portalAnnouncementEndAt
           ? new Date(data.portalAnnouncementEndAt).getTime()
           : null;
+        // `portalAnnouncementLive` is judged on the server clock against the
+        // active announcement's own window; the local check below stays as a
+        // second gate (and for a server that predates the flag).
         const isActive =
+          data.portalAnnouncementLive !== false &&
           data.portalAnnouncementEnabled &&
           data.portalAnnouncementShowOnLogin !== false &&
           (!startsAt || startsAt <= now) &&
@@ -697,23 +701,53 @@ export default function PortalLogin() {
                 placeholder="Choose a portal account"
                 value={devSelectedUser}
                 onChange={setDevSelectedUser}
-                optionFilterProp="label"
+                optionFilterProp="searchText"
                 options={devPortalUsers.map((u) => {
-                  const slf = Array.isArray(u.assignedSlfName)
-                    ? u.assignedSlfName.filter(Boolean).join(", ")
-                    : u.assignedSlfName;
-                  // SLF name + province only. The account holder's name and
-                  // e-mail were noise here — the developer picks the FACILITY to
-                  // debug, and two accounts on the same landfill are told apart
-                  // by province, not by whose login it is.
-                  const label = [slf, u.province].filter(Boolean).join(" — ");
+                  // "Province - SLF Name", exactly as the SLF Data Table names the
+                  // facility (resolved server-side from the facility record).
+                  const names = Array.isArray(u.assignedSlfName)
+                    ? u.assignedSlfName.filter(Boolean)
+                    : [u.assignedSlfName].filter(Boolean);
+                  const facilities = (u.slfLabels || []).filter(Boolean).length
+                    ? u.slfLabels.filter(Boolean)
+                    : names.map((n) => [u.province, n].filter(Boolean).join(" - "));
+                  // ONE facility on the selected line, never a comma-joined list.
+                  // An account assigned several SLFs (ESWM R3: Maria Aurora, Porac
+                  // and Prime Waste Solution) read as one long line the box cut off
+                  // mid-name — "…Maria Aurora Sanitary Landfill Facility, Pampanga
+                  // - Porac…" — so it looked like a garbled second Maria Aurora.
+                  const primary = facilities[0] || u.companyName || u.email;
+                  const more = facilities.length - 1;
                   return {
                     value: u._id,
-                    // Fall back to something selectable if a user has no facility
-                    // assigned yet, otherwise the row would render blank.
-                    label: label || u.companyName || u.email,
+                    label: more > 0 ? `${primary} (+${more} more)` : primary,
+                    searchText: [...facilities, u.companyName, u.email].filter(Boolean).join(" "),
+                    facilities,
+                    account: u.companyName || u.email,
                   };
                 })}
+                // In the open list, a multi-SLF account shows every facility on
+                // its own line plus the account it belongs to, so it is never
+                // mistaken for the operator's own single-SLF account.
+                optionRender={(option) => {
+                  const { facilities = [], account } = option.data;
+                  if (facilities.length <= 1) return option.data.label;
+                  return (
+                    <div style={{ whiteSpace: "normal", lineHeight: 1.35, padding: "2px 0" }}>
+                      <div style={{ fontWeight: 600 }}>
+                        {account}{" "}
+                        <Tag color="blue" style={{ fontSize: 10, marginInlineStart: 4 }}>
+                          {facilities.length} SLFs
+                        </Tag>
+                      </div>
+                      {facilities.map((name) => (
+                        <div key={name} style={{ fontSize: 12, color: "#595959" }}>
+                          • {name}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }}
                 style={{ width: "100%" }}
               />
             </Form.Item>

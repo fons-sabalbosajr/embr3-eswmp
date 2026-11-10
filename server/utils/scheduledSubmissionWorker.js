@@ -1,6 +1,6 @@
 const PortalSubmissionQueue = require("../models/PortalSubmissionQueue");
 const { writeLog } = require("./logger");
-const { submitEntries } = require("../routes/dataSLF");
+const { submitQueueRecord } = require("./queueSubmission");
 
 const POLL_INTERVAL_MS = 60 * 1000; // check every minute
 const MAX_RETRIES = 3;
@@ -26,11 +26,9 @@ async function processDueScheduledSubmissions() {
         if (!record.payload || typeof record.payload !== "object" || Object.keys(record.payload).length === 0) {
           throw new Error("Scheduled submission has no submission data.");
         }
-        const { submissionId } = await submitEntries({
-          entries: [record.payload],
-          submittedBy: record.portalUserEmail,
-          // no req — socket emit is skipped, DB notification still created
-        });
+        // No req — socket emit is skipped, DB notification still created. A
+        // scheduled CORRECTION of a reverted entry resubmits it in place.
+        const { submissionId } = await submitQueueRecord(record);
         record.status = "submitted";
         record.submittedAt = new Date();
         record.resultSubmissionId = submissionId;
@@ -45,7 +43,10 @@ async function processDueScheduledSubmissions() {
         record.retryCount = (record.retryCount || 0) + 1;
         record.failureReason = err.message || "Automatic submission failed";
         // Keep retrying transient failures up to MAX_RETRIES; then mark failed.
-        record.status = record.retryCount >= MAX_RETRIES ? "failed" : "scheduled";
+        // A correction whose entry is no longer reverted will never succeed —
+        // retrying it only delays telling the operator.
+        const permanent = err?.code === "NOT_REVERTED" || err?.statusCode === 403 || err?.statusCode === 404;
+        record.status = permanent || record.retryCount >= MAX_RETRIES ? "failed" : "scheduled";
         await record.save();
         writeLog("error", "portal.queue.scheduled_failed", {
           message: `Scheduled submission failed (attempt ${record.retryCount}): ${record.failureReason}`,

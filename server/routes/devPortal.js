@@ -226,16 +226,29 @@ router.get("/portal-users", async (req, res) => {
       .populate("assignedSlf", "province lgu")
       .lean();
 
+    // "Province - SLF Name", from the FACILITY record — the name the SLF Data
+    // Table shows. The account's own `assignedSlfName` is a copy taken when the
+    // account was assigned and drifts when a facility is renamed; most facility
+    // names already start with their province, the rest get it prefixed.
+    const facilityLabel = (f) => {
+      const name = String(f?.lgu || "").trim();
+      const province = String(f?.province || "").trim();
+      if (!name) return province;
+      if (!province || name.toLowerCase().startsWith(`${province.toLowerCase()} -`)) return name;
+      return `${province} - ${name}`;
+    };
     const withProvince = users.map((u) => {
       const facilities = Array.isArray(u.assignedSlf) ? u.assignedSlf : [];
       const provinces = [
         ...new Set(facilities.map((f) => f?.province).filter(Boolean)),
       ];
-      return { ...u, province: provinces.join(", ") };
+      const slfLabels = [...new Set(facilities.map(facilityLabel).filter(Boolean))];
+      return { ...u, province: provinces.join(", "), slfLabels };
     });
 
-    // Sort by primary landfill name, then account name — clearer than createdAt.
+    // Sort by the facility label, then account name — clearer than createdAt.
     const label = (u) =>
+      u.slfLabels?.[0] ||
       (Array.isArray(u.assignedSlfName) ? u.assignedSlfName[0] : u.assignedSlfName) ||
       u.companyName || `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || "";
     withProvince.sort((a, b) => label(a).localeCompare(label(b)));

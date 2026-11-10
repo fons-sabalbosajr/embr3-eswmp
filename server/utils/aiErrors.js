@@ -8,8 +8,9 @@
 //   sanitizeError(err, key, provider) -> { message, code }
 
 function sanitizeError(err, key, provider = "anthropic") {
-  const vendor = provider === "gemini" ? "Gemini" : "Anthropic";
-  const consoleName = provider === "gemini" ? "Google AI Studio" : "the Anthropic Console";
+  const vendor = provider === "gemini" ? "Gemini" : provider === "groq" ? "Groq" : "Anthropic";
+  const consoleName =
+    provider === "gemini" ? "Google AI Studio" : provider === "groq" ? "the Groq Console" : "the Anthropic Console";
   const status = err?.status || err?.statusCode || err?.code;
   const rawType = err?.error?.type || err?.name || "";
   const rawMsg = String(err?.message || err?.error?.message || "");

@@ -285,6 +285,21 @@ const readableFailure = (reason) =>
     ? "The connection to the server dropped while this was being submitted. Nothing was submitted and nothing was lost — use Retry submission."
     : reason;
 
+// A record that corrects a reverted entry says so: submitting it RESUBMITS that
+// entry (same ID No.) rather than filing a new one.
+const renderFacilityCell = (value, record) => (
+  <Space direction="vertical" size={2}>
+    <Text strong>{value || "—"}</Text>
+    {record?.resubmitOf && (
+      <Tooltip title="Submitting this resubmits the reverted entry in place — it is not filed as a new submission.">
+        <Tag color="purple" icon={<RedoOutlined />} style={{ marginInlineEnd: 0 }}>
+          Correction of {record.resubmitOfIdNo || "a reverted entry"}
+        </Tag>
+      </Tooltip>
+    )}
+  </Space>
+);
+
 const statusTag = (status, retryCount = 0) => {
   const meta = STATUS_META[status] || { color: "default", label: status || "—" };
   const attempts = Number(retryCount) || 0;
@@ -485,12 +500,13 @@ export default function DraftsScheduledPanel({
       );
       Swal.fire({
         icon: "success",
-        title: "Submitted",
-        text:
-          record.type === "draft"
+        title: record.resubmitOf ? "Resubmitted" : "Submitted",
+        text: record.resubmitOf
+          ? `${record.resubmitOfIdNo || "Your reverted entry"} was resubmitted with this correction and is back under review.`
+          : record.type === "draft"
             ? "Your draft was submitted and moved to Submission History."
             : "Your submission was recorded and is now visible to EMB Region III.",
-        timer: 1800,
+        timer: 2200,
         showConfirmButton: false,
       });
       fetchQueue(true);
@@ -662,7 +678,7 @@ export default function DraftsScheduledPanel({
   };
 
   const draftColumns = [
-    { title: "Facility", dataIndex: "slfName", key: "slfName", render: (v) => <Text strong>{v || "—"}</Text> },
+    { title: "Facility", dataIndex: "slfName", key: "slfName", render: renderFacilityCell },
     { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Created", dataIndex: "createdAt", key: "createdAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
     { title: "Last Updated", dataIndex: "updatedAt", key: "updatedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
@@ -670,7 +686,7 @@ export default function DraftsScheduledPanel({
   ];
 
   const scheduledColumns = [
-    { title: "Facility", dataIndex: "slfName", key: "slfName", render: (v) => <Text strong>{v || "—"}</Text> },
+    { title: "Facility", dataIndex: "slfName", key: "slfName", render: renderFacilityCell },
     { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Scheduled For", dataIndex: "scheduledAt", key: "scheduledAt", width: 180, render: (v) => <Tag color="blue">{safeDate(v)}</Tag> },
     { title: "Submitted", dataIndex: "submittedAt", key: "submittedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },

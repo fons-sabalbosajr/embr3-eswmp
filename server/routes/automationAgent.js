@@ -10,6 +10,7 @@ const { FUNCTION_CATALOG, isAllowed, runFunction } = require("../utils/agentFunc
 const { refreshAdmin } = require("../utils/socketEmit");
 const { writeLog } = require("../utils/logger");
 const { sanitizeError } = require("../utils/aiErrors");
+const veraCache = require("../utils/veraSemanticCache");
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 async function loadSettings() {
@@ -34,15 +35,74 @@ async function usageToday(userId) {
   return { globalCount, userCount };
 }
 
+// Today's activity for the status screen: every model call and VERA answer,
+// grouped by the model that answered ("cache" / "fallback" for the ones that
+// cost nothing). Counts and token sums only — never a question or an answer.
+async function liveActivity(a) {
+  const since = startOfToday();
+  const rows = await UsageLog.aggregate([
+    { $match: { createdAt: { $gte: since } } },
+    {
+      $group: {
+        _id: "$model",
+        calls: { $sum: 1 },
+        ok: { $sum: { $cond: ["$success", 1, 0] } },
+        inputTokens: { $sum: "$inputTokens" },
+        outputTokens: { $sum: "$outputTokens" },
+        avgMs: { $avg: "$durationMs" },
+        lastAt: { $max: "$createdAt" },
+        chat: { $sum: { $cond: [{ $in: ["$feature", ["vera_chat", "vera_public_chat"]] }, 1, 0] } },
+      },
+    },
+  ]).catch(() => []);
+  const byModel = Object.fromEntries(rows.map((r) => [r._id || "unknown", r]));
+  const sum = (k) => rows.filter((r) => !["cache", "fallback"].includes(r._id)).reduce((s, r) => s + (r[k] || 0), 0);
+  return {
+    asOf: new Date().toISOString(),
+    // The route with each model's state AND what it did today.
+    models: agent.routerStatus(a).route.map((m) => {
+      const u = byModel[m.model] || {};
+      return {
+        ...m,
+        status: !m.hasKey ? "no-key" : m.restingUntil ? "resting" : "ready",
+        today: {
+          calls: u.calls || 0,
+          ok: u.ok || 0,
+          failed: (u.calls || 0) - (u.ok || 0),
+          inputTokens: u.inputTokens || 0,
+          outputTokens: u.outputTokens || 0,
+          avgMs: u.avgMs != null ? Math.round(u.avgMs) : null,
+          lastAt: u.lastAt || null,
+        },
+      };
+    }),
+    totals: {
+      modelCalls: sum("calls"),
+      modelOk: sum("ok"),
+      inputTokens: sum("inputTokens"),
+      outputTokens: sum("outputTokens"),
+      chatMessages: rows.reduce((s, r) => s + (r.chat || 0), 0),
+      fromCache: byModel.cache?.calls || 0,
+      fromLibrary: byModel.fallback?.calls || 0,
+    },
+    cache: { enabled: a.semanticCache !== false, ...veraCache.stats() },
+    guardrails: a.guardrails !== false,
+  };
+}
+
 // ── Settings (developer-only) ────────────────────────────────────────────────
 // GET current config + masked status + function catalog + today's usage.
 router.get("/developer/automation-agent/settings", authMiddleware, developerOnly, async (req, res) => {
   try {
     const settings = await loadSettings();
     const a = settings.automationAgent || {};
-    const { globalCount } = await usageToday(null).catch(() => ({ globalCount: 0 }));
+    const [{ globalCount }, activity] = await Promise.all([
+      usageToday(null).catch(() => ({ globalCount: 0 })),
+      liveActivity(a),
+    ]);
     res.json({
       status: agent.safeStatus(a),
+      activity,
       config: {
         enabled: !!a.enabled,
         name: a.name || "",
@@ -58,6 +118,13 @@ router.get("/developer/automation-agent/settings", authMiddleware, developerOnly
         requestTimeoutMs: a.provider?.requestTimeoutMs ?? null,
         dailyRequestLimit: a.dailyRequestLimit ?? null,
         perUserRequestLimit: a.perUserRequestLimit ?? null,
+        modelRouting: a.modelRouting !== false,
+        crossProviderFallback: a.crossProviderFallback !== false,
+        lightModelRouting: a.lightModelRouting !== false,
+        semanticCache: a.semanticCache !== false,
+        guardrails: a.guardrails !== false,
+        veraOnAdminLogin: settings.veraOnAdminLogin !== false,
+        veraOnPortalLogin: settings.veraOnPortalLogin !== false,
       },
       functionCatalog: FUNCTION_CATALOG,
       usageToday: globalCount,
@@ -65,6 +132,24 @@ router.get("/developer/automation-agent/settings", authMiddleware, developerOnly
   } catch (e) {
     res.status(500).json({ message: "Server error", error: e.message });
   }
+});
+
+// Live status only (polled by the settings screen without resetting its form).
+router.get("/developer/automation-agent/status", authMiddleware, developerOnly, async (_req, res) => {
+  try {
+    const settings = await loadSettings();
+    const a = settings.automationAgent || {};
+    res.json({ status: agent.safeStatus(a), activity: await liveActivity(a) });
+  } catch (e) {
+    res.status(500).json({ message: "Server error", error: e.message });
+  }
+});
+
+// Empty the semantic cache (e.g. after a help-library change).
+router.post("/developer/automation-agent/cache/clear", authMiddleware, developerOnly, (req, res) => {
+  veraCache.clear();
+  writeLog("info", "automationAgent.cache.cleared", { message: "VERA semantic cache cleared", user: req.user?.email || req.user?.id || "" });
+  res.json({ ok: true, cache: veraCache.stats() });
 });
 
 // PUT config. Encrypts a UI-supplied key; a blank key preserves the stored one.
@@ -92,9 +177,21 @@ router.put("/developer/automation-agent/settings", authMiddleware, developerOnly
     if (b.perUserRequestLimit === null || b.perUserRequestLimit === "") a.perUserRequestLimit = null;
     else if (b.perUserRequestLimit != null) a.perUserRequestLimit = Math.max(0, Math.min(100000, Number(b.perUserRequestLimit) || 0));
 
-    // Provider selection (anthropic | gemini).
+    if (typeof b.modelRouting === "boolean") a.modelRouting = b.modelRouting;
+    if (typeof b.crossProviderFallback === "boolean") a.crossProviderFallback = b.crossProviderFallback;
+    if (typeof b.lightModelRouting === "boolean") a.lightModelRouting = b.lightModelRouting;
+    if (typeof b.semanticCache === "boolean") {
+      a.semanticCache = b.semanticCache;
+      if (!b.semanticCache) veraCache.clear();
+    }
+    if (typeof b.guardrails === "boolean") a.guardrails = b.guardrails;
+    // VERA on each side's sign-in pages (top-level settings, read publicly).
+    if (typeof b.veraOnAdminLogin === "boolean") settings.veraOnAdminLogin = b.veraOnAdminLogin;
+    if (typeof b.veraOnPortalLogin === "boolean") settings.veraOnPortalLogin = b.veraOnPortalLogin;
+
+    // Provider selection (anthropic | gemini | groq).
     if (!a.provider) a.provider = {};
-    if (typeof b.provider === "string" && ["anthropic", "gemini"].includes(b.provider.trim().toLowerCase())) {
+    if (typeof b.provider === "string" && agent.PROVIDER_IDS.includes(b.provider.trim().toLowerCase())) {
       a.provider.provider = b.provider.trim().toLowerCase();
     } else if (!a.provider.provider) {
       a.provider.provider = "anthropic";
@@ -144,7 +241,8 @@ router.post("/developer/automation-agent/test", authMiddleware, developerOnly, a
   const provider = agent.resolveProvider(a);
   const { key } = agent.resolveKey(a);
   if (!key) {
-    return res.status(200).json({ ok: false, code: "not_configured", message: `No API key is configured for ${provider === "gemini" ? "Gemini" : "Anthropic"}. Set ${provider === "gemini" ? "GEMINI_API_KEY" : "ANTHROPIC_API_KEY"} on the server or save a key here.` });
+    const meta = agent.PROVIDERS[provider];
+    return res.status(200).json({ ok: false, code: "not_configured", message: `No API key is configured for ${meta.label}. Set ${meta.envKey} on the server or save a key here.` });
   }
   const model = agent.resolveModel(a);
   const started = Date.now();
@@ -253,7 +351,8 @@ router.post("/automation-agent/query", authMiddleware, adminOnly, async (req, re
     const logging = a.loggingLevel || "metadata";
     await UsageLog.create({
       userId: req.user?.id, userEmail: req.user?.email, userRole: req.user?.role,
-      feature: "query", model, success: true, durationMs,
+      // The model that ACTUALLY answered — the router may have fallen back.
+      feature: "query", model: resp?.model || model, success: true, durationMs,
       inputTokens: resp?.inputTokens || 0, outputTokens: resp?.outputTokens || 0,
       stopReason: resp?.stopReason || "",
       dataCategories: ctx.categories, maskingApplied: masking,
@@ -266,8 +365,9 @@ router.post("/automation-agent/query", authMiddleware, adminOnly, async (req, re
       ok: true,
       answer,
       function: functionId,
-      provider,
-      model,
+      provider: resp?.provider || provider,
+      model: resp?.model || model,
+      fellBack: !!resp?.fellBack,
       maskingApplied: masking,
       dataCategories: ctx.categories,
       usage: { inputTokens: resp?.inputTokens || 0, outputTokens: resp?.outputTokens || 0, durationMs },

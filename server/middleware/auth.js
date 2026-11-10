@@ -72,6 +72,27 @@ function adminOnly(req, res, next) {
   next();
 }
 
+// Any ADMIN-APP account (developer, admin, or a permission-scoped `user`), never
+// a portal user. `requireAnyAuth` admits both realms because they share
+// JWT_SECRET, so on a router that serves both, an admin action left without a
+// role check was callable with a portal token: a portal user could approve their
+// own baseline unlock, change submission statuses or empty the trash. Use this
+// where `adminOnly` would also lock out `user`-role staff the admin UI serves.
+// Role-less tokens (dev-portal stage tokens) are refused too.
+const STAFF_ROLES = new Set(["developer", "admin", "user"]);
+function staffOnly(req, res, next) {
+  if (!STAFF_ROLES.has(req.user?.role)) {
+    writeLog("warn", "access.denied.staff", {
+      message: `Non-staff caller attempted ${req.method} ${req.originalUrl}`,
+      user: req.user?.email || req.user?.id || "",
+      ip: req.ip,
+      meta: { role: req.user?.role || "none", path: req.originalUrl, method: req.method },
+    });
+    return res.status(403).json({ message: "Admin access required" });
+  }
+  next();
+}
+
 function developerOnly(req, res, next) {
   if (req.user?.role !== "developer") {
     // Audit unauthorized attempts to reach developer-only tooling (e.g. dummy config).
@@ -122,6 +143,7 @@ module.exports = {
   authMiddleware,
   requireAnyAuth,
   adminOnly,
+  staffOnly,
   developerOnly,
   requirePermission,
   resolveCallerEmail,

@@ -39,7 +39,15 @@ const {
   evaluateFacilityCellAcceptance,
   toBaseM3,
 } = require("../utils/cellAvailability");
-const { authMiddleware, requireAnyAuth, adminOnly, developerOnly, requirePermission } = require("../middleware/auth");
+const {
+  authMiddleware,
+  requireAnyAuth,
+  adminOnly,
+  staffOnly,
+  developerOnly,
+  requirePermission,
+  resolveCallerEmail,
+} = require("../middleware/auth");
 const { requirePortalRule } = require("../utils/portalPolicy");
 const { resolveTotalVolumeForUpdate } = require("../utils/baselineVolume");
 const {
@@ -94,6 +102,7 @@ const {
   VERA_REMARK_SYSTEM,
 } = require("../utils/submissionRemarks");
 const jwt = require("jsonwebtoken");
+const { cellAssignmentStages } = require("../utils/cellPlacementFilter");
 
 // Optional auth: decode the JWT when present so role-aware behaviour (e.g.
 // exposing dummy/sample submissions only to developers) is possible on routes
@@ -641,6 +650,89 @@ const router = express.Router();
 // optionalAuth calls remain harmless: req.user is already populated here.
 router.use(requireAnyAuth);
 
+/**
+ * The portal identity a request acts as. For a PORTAL caller it is always the
+ * e-mail behind the token, whatever the body claims; admin/developer callers may
+ * still name the user they act for. The portal cell-assignment routes used to
+ * trust `req.body.submittedBy` alone, so any portal user could name another
+ * account's e-mail and move that account's waste between cells.
+ */
+async function actingPortalEmail(req, claimed) {
+  if (req.user?.role === "portal_user") return resolveCallerEmail(req);
+  return String(claimed || "").trim().toLowerCase();
+}
+
+const normScopeName = (s) => String(s || "").trim().toLowerCase();
+
+/**
+ * A portal user may read only the SLF(s) assigned to them. GET /baseline/:slfName
+ * and /waste-received-summary/:slfName took any facility name or id, so a portal
+ * token could read another SLF's baseline, haulers and waste totals. The portal
+ * always sends `assignedSlfName[i]` + `assignedSlf[i]` from the user's own record,
+ * so both must be in that assignment. Mounted BEFORE cacheJson: a cached response
+ * must not skip the check. Admin/developer callers pass through.
+ */
+async function requirePortalSlfScope(req, res, next) {
+  if (req.user?.role !== "portal_user") return next();
+  try {
+    const UserPortal = require("../models/UserPortal");
+    const pu = await UserPortal.findById(req.user.id).select("email assignedSlf assignedSlfName").lean();
+    if (!pu) return res.status(401).json({ message: "Portal user not found" });
+    const ids = [].concat(pu.assignedSlf || []).filter(Boolean).map(String);
+    const names = [].concat(pu.assignedSlfName || []).filter(Boolean).map(normScopeName);
+    const slfId = String(req.query.slfId || "").trim();
+    let slfName = req.params.slfName;
+    try { slfName = decodeURIComponent(slfName); } catch { /* already decoded */ }
+    const idOk = !slfId || ids.includes(slfId);
+    const nameOk = !names.length || names.includes(normScopeName(slfName));
+    if ((ids.length || names.length) && idOk && nameOk) return next();
+    writeLog("warn", "portal.scope.denied", {
+      message: `Portal user requested an SLF outside their assignment: ${req.method} ${req.originalUrl}`,
+      user: pu.email || String(req.user.id),
+      ip: req.ip,
+      meta: { slfName, slfId: slfId || undefined },
+    });
+    return res.status(403).json({ message: "You can only view data for your assigned SLF." });
+  } catch {
+    return res.status(500).json({ message: "Permission check failed" });
+  }
+}
+
+// ── Route guards, registered BEFORE the handlers ─────────────────────────────
+// Each entry is a guard-only route on the exact method + path of a handler below:
+// it calls next() to fall through to that handler, or answers 403 first. Being
+// registered first, it also runs before any cacheJson on the handler, so a
+// cached response can never skip it. One table, so the list is auditable.
+//
+// ADMIN-APP ONLY (staffOnly): none of these is called by the SLF Portal. They
+// sat behind `requireAnyAuth` alone, which admits portal tokens, so a portal user
+// could approve their own baseline unlock, change submission statuses, revert or
+// delete any record, empty the trash or read every SLF's baselines.
+const STAFF_ONLY_ROUTES = [
+  ["get", "/baselines"], ["put", "/baselines/:id"], ["delete", "/baselines/:id"],
+  ["patch", "/baseline-update-approve/:slfName"], ["patch", "/baseline-update-lock/:slfName"],
+  ["patch", "/baseline-update-reject/:slfName"],
+  ["patch", "/:id/approve-edit"], ["patch", "/:id/reject-edit"],
+  ["get", "/stats"], ["get", "/generator-summary"], ["get", "/summary-tiles"], ["get", "/summary-by-slf"],
+  ["get", "/cell-usage"], ["get", "/summary-dashboard"], ["get", "/analytics-summary"],
+  ["get", "/disposal-calendar"], ["get", "/disposal-calendar/day"],
+  ["get", "/"], ["get", "/detail/:id"], ["get", "/cell-occupancy"], ["get", "/slf-names"],
+  ["post", "/cell-capacity-alert"], ["patch", "/:id/cell-assignments"],
+  ["patch", "/:id/admin-edit"], ["patch", "/:id/status"], ["patch", "/bulk-status"],
+  ["post", "/bulk-delete"], ["patch", "/bulk-revert"], ["delete", "/:id"],
+  ["get", "/trash/list"], ["patch", "/:id/restore"], ["delete", "/:id/permanent"],
+  ["patch", "/:id/request-revert"], ["patch", "/:id/admin-revert"], ["patch", "/:id/approve-revert"],
+  ["post", "/:id/send-email"],
+];
+for (const [method, routePath] of STAFF_ONLY_ROUTES) router[method](routePath, staffOnly);
+
+// PORTAL READS scoped to the caller's assigned SLF (see requirePortalSlfScope).
+const PORTAL_SLF_SCOPED_ROUTES = [
+  ["get", "/baseline/:slfName"],
+  ["get", "/waste-received-summary/:slfName"],
+];
+for (const [method, routePath] of PORTAL_SLF_SCOPED_ROUTES) router[method](routePath, requirePortalSlfScope);
+
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
 function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
@@ -648,6 +740,8 @@ function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
   // server.js) so the audit actor can't be spoofed. The X-User-* headers are
   // client-supplied and only used as a display fallback for older/tokenless
   // callers; never let them override a verified email.
+  // No request at all (the scheduled-submission worker runs on a timer).
+  if (!req) return fallback;
   const verified = String(req.logUser || "").trim();
   if (verified) return verified;
   const headerName = String(req.get("x-user-name") || "").trim();
@@ -2365,7 +2459,7 @@ async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyNa
 async function ensurePortalAccountCanSubmit(email) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status isDummy assignedSlf");
+  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status isDummy assignedSlf assignedSlfName");
   if (!portalUser) return null;
   if (portalUser.status !== "approved") {
     const error = new Error("Your portal account is not approved for submissions.");
@@ -3041,29 +3135,91 @@ router.post("/", optionalAuth, requirePortalRule("can_submit_slf_data"), async (
 // Update & resubmit a reverted entry (portal user)
 router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), async (req, res) => {
   try {
-    const entry = await DataSLF.findById(req.params.id);
-    if (!entry) return res.status(404).json({ message: "Entry not found" });
     // A portal user may only resubmit their OWN entry. Without this, any signed-in
     // operator could overwrite another account's reverted/pending submission by
     // changing the id in the URL. Developer/admin callers are not the constrained
     // subject here (Developer Portal Mode is audited elsewhere).
+    let ownerEmail = "";
     if (req.user?.role === "portal_user") {
       const caller = await UserPortal.findById(req.user.id).select("email").lean();
-      const callerEmail = String(caller?.email || "").trim().toLowerCase();
-      if (!callerEmail || callerEmail !== String(entry.submittedBy || "").trim().toLowerCase()) {
-        writeLog("warn", "submission.resubmit.denied", {
-          message: `Portal user tried to update another account's entry ${entry.idNo || entry._id}`,
-          user: callerEmail || String(req.user.id),
-          ip: req.ip,
-          meta: { id: entry._id },
-        });
-        return res.status(403).json({ message: "You can only update your own submissions." });
-      }
+      ownerEmail = String(caller?.email || "").trim().toLowerCase();
+      if (!ownerEmail) return res.status(403).json({ message: "You can only update your own submissions." });
     }
-    await ensurePortalAccountCanSubmit(entry.submittedBy);
-    if (entry.status !== "reverted" && entry.status !== "pending") {
-      return res.status(400).json({ message: "Only reverted or pending entries can be updated" });
+    const populated = await resubmitEntry({ id: req.params.id, body: req.body || {}, ownerEmail, req });
+    res.json(populated);
+    // Resubmitted straight from Data Entry: any correction of this entry still
+    // saved in Drafts & Scheduled is now obsolete (submitting it would only be
+    // refused as "no longer reverted"), so it is cancelled with the reason.
+    require("../models/PortalSubmissionQueue")
+      .updateMany(
+        { resubmitOf: populated._id, status: { $in: ["draft", "scheduled", "failed"] } },
+        { $set: { status: "cancelled", failureReason: `${populated.idNo || "This entry"} was already resubmitted from Data Entry.` } },
+      )
+      .catch(() => {});
+    return undefined;
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        ...(error.validationIssues ? { validationIssues: error.validationIssues } : {}),
+        ...(error.code && typeof error.code === "string" ? { code: error.code } : {}),
+      });
     }
+    logSlfCrudError(req, "submission.resubmit.error", error, { id: req.params.id });
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+function httpError(statusCode, message, extra = {}) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  Object.assign(error, extra);
+  return error;
+}
+
+/**
+ * Resubmit (correct) ONE existing entry in place. Shared by PUT /:id (Edit &
+ * Resubmit in Data Entry) and by Drafts & Scheduled, whose queue records may
+ * hold the correction of a reverted entry (`resubmitOf`). The queue used to send
+ * every record through submitEntries, so a correction saved as a draft or
+ * scheduled came back as a NEW submission: the reverted record stayed reverted,
+ * the volume was filed twice, and after 24 h the stale revert blocked every
+ * later submission (409 UNRESOLVED_REVERT — seen in production on 2026-10-22/23).
+ *
+ * @param {object}  opts
+ * @param {string}  opts.id            DataSLF _id to correct
+ * @param {object}  opts.body          the corrected entry (same shape as POST /)
+ * @param {string}  [opts.ownerEmail]  required owner; refused (403) otherwise
+ * @param {boolean} [opts.requireReverted] only a REVERTED entry may be corrected
+ *   (the queue: a draft must not overwrite a resubmission that already went in)
+ * @param {object}  [opts.req]         request, when there is one (sockets, audit)
+ * @returns {Promise<object>} the saved entry, populated
+ * Throws errors carrying `statusCode` for every refusal.
+ */
+async function resubmitEntry({ id, body = {}, ownerEmail = "", requireReverted = false, req = null }) {
+  const entry = mongoose.isValidObjectId(String(id || "")) ? await DataSLF.findById(id) : null;
+  if (!entry) throw httpError(404, "Entry not found");
+  const owner = String(ownerEmail || "").trim().toLowerCase();
+  if (owner && owner !== String(entry.submittedBy || "").trim().toLowerCase()) {
+    writeLog("warn", "submission.resubmit.denied", {
+      message: `Portal user tried to update another account's entry ${entry.idNo || entry._id}`,
+      user: owner,
+      ip: req?.ip,
+      meta: { id: entry._id },
+    });
+    throw httpError(403, "You can only update your own submissions.");
+  }
+  await ensurePortalAccountCanSubmit(entry.submittedBy);
+  if (requireReverted && entry.status !== "reverted") {
+    throw httpError(
+      409,
+      `${entry.idNo || "This entry"} is no longer reverted (it is ${entry.status}), so this saved correction cannot be resubmitted. It was most likely already resubmitted — you can delete this copy.`,
+      { code: "NOT_REVERTED" },
+    );
+  }
+  if (entry.status !== "reverted" && entry.status !== "pending") {
+    throw httpError(400, "Only reverted or pending entries can be updated");
+  }
     // Only correcting a REVERTED entry is a resubmission; editing one that is
     // still pending is not, and must not be labelled as one.
     const wasReverted = entry.status === "reverted";
@@ -3087,9 +3243,9 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     // Normalize + validate the incoming payload (units, wasteType enum, volumes)
     // so a resubmission can't fail with a Mongoose 500 or store invalid data.
     const updateErrors = [];
-    const sanitizedBody = sanitizeSubmissionEntry(req.body || {}, updateErrors);
+    const sanitizedBody = sanitizeSubmissionEntry(body || {}, updateErrors);
     if (updateErrors.length) {
-      return res.status(400).json({ message: updateErrors.join(" ") });
+      throw httpError(400, updateErrors.join(" "));
     }
     // A resubmission is how a wrong-unit capacity gets corrected, so it must not
     // be able to send one back unchanged.
@@ -3098,16 +3254,17 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
       sanitizedBody.baselineUnit || entry.baselineUnit,
     );
     if (capacityIssues.length) {
-      return res.status(400).json({
-        message: capacityIssues
+      throw httpError(
+        400,
+        capacityIssues
           .slice(0, 5)
           .map((i) => `Truck ${i.truckIndex + 1}: ${i.message}`)
           .join(" | "),
-        validationIssues: capacityIssues,
-      });
+        { validationIssues: capacityIssues },
+      );
     }
     applyEntryUpdates(entry, sanitizedBody, allowedFields, req, "submission.resubmit");
-    const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
+    const resubmitComment = typeof body?.resubmitComment === "string" ? body.resubmitComment.trim() : "";
     if (wasReverted) {
       // Stored on the record so the Remarks columns (admin Submissions and the
       // portal history) can say "Resubmission" with the operator's note — it used
@@ -3188,8 +3345,14 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     const populated = await DataSLF.findById(entry._id)
       .setOptions({ includeHiddenYears: true })
       .populate("slfGenerator");
-    res.json(populated);
 
+    // Everything below is notification work on a committed record; it runs
+    // after the caller has its answer and never fails the resubmission.
+    setImmediate(() => announceResubmission({ entry, populated, req }).catch(() => {}));
+    return populated;
+}
+
+async function announceResubmission({ entry, populated, req }) {
     // Notify admins of resubmission
     try {
       await Notification.create({
@@ -3210,15 +3373,12 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     writeLog("info", "submission.resubmit", {
       message: `Entry ${entry.idNo} resubmitted after revert`,
       user: entry.submittedBy || "portal",
-      ip: req.ip,
+      ip: req?.ip,
       meta: { id: entry._id },
     });
-  } catch (error) {
-    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
-    logSlfCrudError(req, "submission.resubmit.error", error, { id: req.params.id });
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-});
+    // The portal history (and its Submission Breakdown) re-reads on this.
+    if (entry.submittedBy) refreshPortal(req, entry.submittedBy, "submissions");
+}
 
 // Get latest baseline info for an SLF (by assigned name or facility id) — portal
 router.get("/baseline/:slfName", async (req, res) => {
@@ -4370,7 +4530,16 @@ router.patch("/:id/request-edit", async (req, res) => {
       return res.status(400).json({ message: "Only approved entries can request edits" });
     }
 
-    const { reason, requestedBy } = req.body || {};
+    const { reason } = req.body || {};
+    // A portal user may only ask to edit their OWN submission; the id alone used
+    // to be enough to flag anyone's record and file the request in their name.
+    let requestedBy = req.body?.requestedBy;
+    if (req.user?.role === "portal_user") {
+      requestedBy = await resolveCallerEmail(req);
+      if (!requestedBy || requestedBy !== String(entry.submittedBy || "").trim().toLowerCase()) {
+        return res.status(403).json({ message: "You can only request edits to your own submissions." });
+      }
+    }
     await ensurePortalAccountCanSubmit(requestedBy || entry.submittedBy);
     entry.revertRequested = true;
     entry.revertReason = reason;
@@ -4920,7 +5089,10 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
     const rows = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
 
-      { $sort: { dateOfDisposal: -1, _id: -1 } },
+      // $project BEFORE $sort: the sort must only carry these slim rows. Sorting
+      // first dragged every submission's full `trucks` array through it, which
+      // passed the 32 MB in-memory sort limit once the collection grew, and the
+      // Atlas tier ignores allowDiskUse, so the endpoint returned 500.
       {
         $project: {
           slfGenerator: 1,
@@ -4946,6 +5118,7 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
           hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
         },
       },
+      { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         // Zero out the volumes of submissions that no longer stand, so the sums
         // below need no further conditionals and the "all statuses" counts stay
@@ -5192,6 +5365,28 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
   try {
     const [facet = {}] = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
+      // Slim every submission to what the two facets read BEFORE sorting (see
+      // /summary-by-slf): sorting the full documents, `trucks` arrays included,
+      // passed MongoDB's 32 MB in-memory sort limit and the page got a 500.
+      {
+        $project: {
+          status: 1,
+          companyType: 1,
+          slfGenerator: 1,
+          slfName: 1,
+          lguCompanyName: 1,
+          submittedBy: 1,
+          dateOfDisposal: 1,
+          baselineUnit: 1,
+          truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+          totalVolumeM3: 1,
+          totalVolumeTons: 1,
+          residualVolumeM3: 1,
+          residualVolumeTons: 1,
+          hazardousVolumeM3: 1,
+          hazardousVolumeTons: 1,
+        },
+      },
       { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         $facet: {
@@ -5200,7 +5395,7 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
               $project: {
                 status: 1,
                 companyType: 1,
-                truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                truckCount: 1,
                 // See the identical gate in /summary-by-slf. THIS is the endpoint
                 // the Submission Summary page actually calls, so this facet is
                 // what the Summary Overview's Waste Breakdown tiles read.
@@ -5260,7 +5455,7 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
                 status: 1,
                 dateOfDisposal: 1,
                 baselineUnit: 1,
-                truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                truckCount: 1,
                 // Same gate again: these per-SLF rows are what the page sums into
                 // the Waste Breakdown once the table has loaded (the tiles facet
                 // above only covers the pre-load fallback), so BOTH have to apply
@@ -5865,66 +6060,10 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       const pipeline = [
         { $match: filter },
         { $sort: { createdAt: -1, _id: -1 } },
-        {
-          $project: {
-            _trucksArr: {
-              $map: {
-                input: { $ifNull: ["$trucks", []] },
-                as: "t",
-                in: {
-                  cellName: "$$t.cellName",
-                  cellIndex: "$$t.cellIndex",
-                  vehicles: {
-                    $map: {
-                      input: { $ifNull: ["$$t.vehicles", []] },
-                      as: "v",
-                      in: { cellName: "$$v.cellName", cellIndex: "$$v.cellIndex" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-        {
-          $addFields: {
-            _tcount: { $size: "$_trucksArr" },
-            _placed: {
-              $size: {
-                $filter: {
-                  input: "$_trucksArr",
-                  as: "t",
-                  cond: {
-                    $or: [
-                      { $ne: [{ $ifNull: ["$$t.cellName", ""] }, ""] },
-                      { $ne: [{ $ifNull: ["$$t.cellIndex", null] }, null] },
-                      {
-                        $anyElementTrue: {
-                          $map: {
-                            input: { $ifNull: ["$$t.vehicles", []] },
-                            as: "v",
-                            in: {
-                              $or: [
-                                { $ne: [{ $ifNull: ["$$v.cellName", ""] }, ""] },
-                                { $ne: [{ $ifNull: ["$$v.cellIndex", null] }, null] },
-                              ],
-                            },
-                          },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
-        {
-          $match:
-            assignment === "assigned"
-              ? { $expr: { $and: [{ $gt: ["$_tcount", 0] }, { $gte: ["$_placed", "$_tcount"] }] } }
-              : { $expr: { $lt: ["$_placed", "$_tcount"] } },
-        },
+        // The SAME placement rule the SLF Portal applies (see
+        // utils/cellPlacementFilter.js), so a submission the operator still sees
+        // as needing a cell is never listed here as done, and vice versa.
+        ...cellAssignmentStages(assignment, SlfFacility.collection.collectionName),
         {
           $facet: {
             page: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 1 } }],
@@ -6179,7 +6318,16 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
           .map((e) => ({ raw: e, row: enrich(e) }));
         if (reviewOnRead && groupRows.length) {
           const signature = veraRemarkSignature(mergeRemarkLists(groupRows.map(({ row }) => row.remarks)));
-          const stale = groupRows.some(({ raw }) => raw.veraRemark?.signature !== signature);
+          // Also stale: a fallback remark written because the model call FAILED
+          // (degraded), or a legacy fallback that predates the flag. With a
+          // matching signature those were never retried, so a passing rate limit
+          // left the canned text in place permanently. The queue's 30-minute
+          // cooldown bounds the retries while the provider is still failing.
+          const stale = groupRows.some(({ raw }) => {
+            const vr = raw.veraRemark;
+            if (vr?.signature !== signature) return true;
+            return vr.source === "fallback" && vr.degraded !== false;
+          });
           if (stale) {
             staleGroups.push(groupRows.map(({ raw }) => String(raw._id)));
             groupRows.forEach((item) => { item.row.veraReviewPending = true; });
@@ -7138,7 +7286,9 @@ router.patch("/:id/cell-assignments", async (req, res) => {
 // truck-level) cell placements.
 router.patch("/:id/portal-cell-assignments", async (req, res) => {
   try {
-    const { submittedBy, assignments } = req.body || {};
+    const { assignments } = req.body || {};
+    // Token identity for a portal caller — see actingPortalEmail.
+    const submittedBy = await actingPortalEmail(req, req.body?.submittedBy);
     const entry = await DataSLF.findOne({ _id: req.params.id, deletedAt: null });
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     if (
@@ -7444,7 +7594,9 @@ const BULK_ORGANIZE_FIELDS =
 
 router.post("/portal-cell-assignments/bulk", async (req, res) => {
   try {
-    const { submittedBy, assignments, batchId } = req.body || {};
+    const { assignments, batchId } = req.body || {};
+    // Token identity for a portal caller — see actingPortalEmail.
+    const submittedBy = await actingPortalEmail(req, req.body?.submittedBy);
     const dryRun = req.body?.dryRun === true;
     const allowPartial = req.body?.allowPartial === true;
 
@@ -8380,6 +8532,9 @@ async function generateVeraRemark(ids, { req, actor, auto = false } = {}) {
       generatedAt: new Date(),
       signature: veraRemarkSignature(remarks),
       auto,
+      // A provider failure (Gemini 429/503, timeout) is transient: flag it so
+      // the list read retries it instead of keeping the canned text for good.
+      degraded: Boolean(providerError),
     };
     // `timestamps: false` — a reviewer note is not an edit of the submission and
     // must not move it in any updatedAt-ordered view.
@@ -10071,6 +10226,18 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       locked: Boolean(latest) && persistedApproval === 0,
       baselineUpdateApproved: persistedApproval > 0,
     });
+
+    // The baseline is one of the two halves of every cell's Waste in Cell, and
+    // this route never recomputed it: the SLF Data Table, Cell Infrastructure and
+    // the portal gauges kept the OLD baseline until some unrelated write happened
+    // to touch the facility. Recomputed after the answer (it reads every
+    // submission of the facility); it broadcasts "facility" itself when done.
+    refreshOccupancyForFacilities(req, [genId || latest?.slfGenerator]).catch((err) =>
+      writeLog("warn", "baseline.portal-save.occupancy_failed", {
+        message: `Cell occupancy refresh after baseline save failed: ${err.message}`,
+        meta: { slfName, facilityId: String(genId || latest?.slfGenerator || "") },
+      }),
+    );
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -10080,11 +10247,21 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
 // Portal user requests baseline field update — notifies admin
 router.post("/baseline-update-request", optionalAuth, requirePortalRule("can_change_baseline_data"), async (req, res) => {
   try {
-    const { slfName, requestedBy, fields, reason } = req.body || {};
+    const { slfName, fields, reason } = req.body || {};
+    // Portal caller: the requester is the token's account, and the SLF must be
+    // one assigned to it. Both came from the body, so a portal user could flag
+    // another facility's baseline as "update requested" in someone else's name.
+    const requestedBy = await actingPortalEmail(req, req.body?.requestedBy);
     if (!slfName || !requestedBy) {
       return res.status(400).json({ message: "slfName and requestedBy are required" });
     }
-    await ensurePortalAccountCanSubmit(requestedBy);
+    const requester = await ensurePortalAccountCanSubmit(requestedBy);
+    if (req.user?.role === "portal_user") {
+      const assigned = [].concat(requester?.assignedSlfName || []).filter(Boolean).map(normScopeName);
+      if (assigned.length && !assigned.includes(normScopeName(slfName))) {
+        return res.status(403).json({ message: "You can only request baseline updates for your assigned SLF." });
+      }
+    }
 
     // Upsert notification — update existing unread one instead of creating duplicates
     await Notification.findOneAndUpdate(
@@ -10747,6 +10924,7 @@ router.post("/merge-slf", authMiddleware, developerOnly, async (req, res) => {
 
 module.exports = router;
 module.exports.submitEntries = submitEntries;
+module.exports.resubmitEntry = resubmitEntry;
 module.exports.sanitizeSubmissionEntry = sanitizeSubmissionEntry;
 // Pure helpers exposed for tests/ so the duplicate-row and client-persistence
 // rules can be exercised without a database connection.

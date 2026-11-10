@@ -138,7 +138,8 @@ test.before(async () => {
 test.after(async () => { if (server) await new Promise((r) => server.close(r)); });
 test.beforeEach(() => { doc = makeDoc(); occupancyRefreshes = 0; transactions = []; writes = []; });
 
-const token = jwt.sign({ id: String(new mongoose.Types.ObjectId()), role: "portal_user" }, process.env.JWT_SECRET);
+// Real portal tokens carry the e-mail (routes/portalAuth.js); the route acts as it.
+const token = jwt.sign({ id: String(new mongoose.Types.ObjectId()), role: "portal_user", email: EMAIL }, process.env.JWT_SECRET);
 
 async function bulk(body) {
   const res = await fetch(`${baseUrl}/api/data-slf/portal-cell-assignments/bulk`, {

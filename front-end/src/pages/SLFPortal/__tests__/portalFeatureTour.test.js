@@ -67,12 +67,11 @@ test("the version is a marker that can be compared, not a boolean", () => {
 // step whose question lands on the previous release's material walks the user
 // through a workflow that no longer exists.
 const NEW_ENTRY_IDS = new Set([
-  "baseline-completeness",
-  "special-economic-zones",
-  "system-generated-upload",
-  "client-name-mismatch",
-  "upload-preview-columns",
-  "cell-placement-inheritance",
+  "transport-entry-steps",
+  "correction-draft",
+  "drafts-resubmit",
+  "submission-details-report",
+  "submission-breakdown",
 ]);
 
 test("VERA's knowledge base actually carries the new workflow", () => {
@@ -111,11 +110,11 @@ test("asking about the change in plain words finds it", () => {
   // The phrasing a portal user would actually type, rather than the tour's own
   // wording — which is the only phrasing the tour itself guarantees.
   for (const question of [
-    "which of my haulers have no address?",
-    "my client is in clark freeport zone, what municipality do I pick?",
-    "why is my whole disposal upload being rejected?",
-    "the client is already on the hauler but the upload says it is not",
-    "do I have to pick a disposal cell if the entry is already placed?",
+    "how do the steps in add transport entry work?",
+    "can I save my correction and finish it later?",
+    "what does correction of mean in drafts and scheduled?",
+    "does the generate report update by itself?",
+    "my breakdown still shows pending after the approval",
   ]) {
     const ids = idsFor(question);
     assert.ok(
@@ -267,7 +266,8 @@ test("steps that live on another tab switch to it before anchoring", () => {
   // The Data Entry tabs render lazily. Advancing straight to a step whose target
   // is not mounted anchors it to nothing, and antd centres a targetless step —
   // which reads as a broken tour.
-  assert.match(portal, /tab: targets\[step\.key\]\?\.tab \|\| "baseline"/);
+  // Steps declare their tab (or a sidebar menu item) in portalFeatureTour.js.
+  assert.match(portal, /tab: step\.menu \? undefined : step\.tab \|\| "baseline",/);
   assert.match(portal, /if \(tab && tab !== activeTab\) \{/);
   assert.match(portal, /setTimeout\(\(\) => setFeatureTourCurrent\(next\), 160\);/);
 });

@@ -1874,3 +1874,35 @@ body.slf-portal-active .ant-table-wrapper .ant-table-body {
     padding: 12px;
   }
 }
+
+/* ── Submission Details modal tables (Submission History) ──
+   Fit the modal width: the tables use tableLayout="fixed", so the columns share
+   the available width, and long values (ticket numbers, hauler names, client
+   lists, addresses) wrap instead of pushing the table wider than the modal.
+   One step smaller type keeps a wrapped row compact. */
+.slf-detail-fit.ant-table-wrapper .ant-table,
+.slf-detail-fit .ant-table {
+  font-size: 12px;
+}
+.slf-detail-fit .ant-table-thead > tr > th,
+.slf-detail-fit .ant-table-tbody > tr > td {
+  padding: 6px 8px !important;
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  line-height: 1.35;
+}
+.slf-detail-fit .ant-table-thead > tr > th {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.slf-detail-fit .ant-tag {
+  font-size: 11px;
+  line-height: 18px;
+  white-space: normal;
+  margin-inline-end: 0;
+}
+.slf-detail-fit .ant-typography {
+  font-size: inherit !important;
+}

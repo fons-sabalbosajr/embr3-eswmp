@@ -75,7 +75,7 @@ const automationAgentSchema = new mongoose.Schema(
     // non-reversible hint for the UI. A stored key is only ever used for its own
     // provider, so switching providers never leaks a key to the wrong vendor.
     provider: {
-      provider: { type: String, enum: ["anthropic", "gemini"], default: "anthropic" },
+      provider: { type: String, enum: ["anthropic", "gemini", "groq"], default: "anthropic" },
       model: { type: String, default: "" }, // falls back to the provider's env model
       apiKey: { type: String, default: "" }, // legacy; migrated to apiKeyEnc then cleared
       apiKeyEnc: { type: String, default: "" }, // "v1:iv:tag:cipher" (see utils/secretBox)
@@ -98,6 +98,20 @@ const automationAgentSchema = new mongoose.Schema(
         "data not present in the context, and you clearly flag uncertainty.",
     },
     allowedFunctions: { type: [String], default: [] },
+    // Model router (utils/automationAgent.js). Routing: fall back to another
+    // model of the same provider when the selected one cannot answer.
+    // Cross-provider: then try the other providers whose keys are set.
+    modelRouting: { type: Boolean, default: true },
+    crossProviderFallback: { type: Boolean, default: true },
+    // Token efficiency + safety (approach from VERA in embr3-ucds):
+    //   lightModelRouting — short help questions lead with the light model
+    //   semanticCache     — a question close to one already answered is
+    //                       answered from server memory (utils/veraSemanticCache)
+    //   guardrails        — prompt-injection refusal, output secret screening,
+    //                       DATA_FENCE on tool calls (utils/veraGuardrails)
+    lightModelRouting: { type: Boolean, default: true },
+    semanticCache: { type: Boolean, default: true },
+    guardrails: { type: Boolean, default: true },
     loggingLevel: {
       type: String,
       enum: ["none", "metadata", "full"],
@@ -275,6 +289,11 @@ const appSettingsSchema = new mongoose.Schema(
     // against the developer role regardless of any client-supplied flag. Secrets,
     // credentials, env values and connection strings stay blocked for everyone.
     veraDeveloperMode: { type: Boolean, default: true },
+
+    // VERA on the sign-in pages (login, sign-up, forgot password), per side.
+    // Read by GET /vera/public-status; /vera/public-chat refuses a side that is off.
+    veraOnAdminLogin: { type: Boolean, default: true },
+    veraOnPortalLogin: { type: Boolean, default: true },
 
     // Organizational Chart
     orgChart: {

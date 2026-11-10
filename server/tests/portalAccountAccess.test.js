@@ -497,7 +497,9 @@ test("a draft with no disposal date is never merged into another", () => {
 test("re-saving a draft updates it in place and clears a stale failure", () => {
   const queue = readSource("routes", "portalQueue.js");
   const create = queue.slice(queue.indexOf('router.post("/", async'), queue.indexOf('router.put("/:id"'));
-  assert.match(create, /if \(kind === "draft"\) \{[\s\S]*?findEquivalentDraft\(email, identity\)/);
+  // A correction of a reverted entry is matched by its own link instead (see
+  // resubmitOf), never folded into an ordinary draft for the same date.
+  assert.match(create, /if \(kind === "draft" && !resubmitTarget\) \{[\s\S]*?findEquivalentDraft\(email, identity\)/);
   assert.match(create, /updatedExisting: true/);
   assert.match(create, /existing\.failureReason = "";/);
   // Scheduling the same report twice is legitimate — each run has its own time.

@@ -444,6 +444,8 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/support-tickets", supportTicketRoutes);
 app.use("/api/hauler-delete-requests", haulerDeleteRequestRoutes);
 app.use("/api/upload", uploadRoutes);
+// Profile pictures — admin and portal users change their own (Drive images › Profile Pictures).
+app.use("/api/profile-photo", require("./routes/profilePhoto"));
 app.use("/api/messages", messageRoutes);
 app.use("/api/dummy-data", require("./routes/dummyData"));
 app.use("/api/slf-data-files", require("./routes/slfDataFiles"));

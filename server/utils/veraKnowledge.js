@@ -288,6 +288,71 @@ const KNOWLEDGE_BASE = [
     related: ["organize-cells", "approved-unassigned", "required-to-submit"],
   },
   {
+    id: "transport-entry-steps",
+    category: "submission",
+    question: "How do I add a transport entry step by step?",
+    keywords: [
+      "add transport entry", "transport entry", "step by step", "steps", "next step",
+      "trip step", "vehicles & waste", "vehicles and waste", "review step", "add entry",
+      "entry form", "edit transport entry", "update entry",
+    ],
+    answer:
+      "Add Transport Entry is now a short sequence of steps at the top of the form:\n\n1. **Trip** — the Disposal/Trip Ticket No. and the accredited hauler.\n2. **Vehicles & Waste** — each vehicle's plate number, capacity, waste volume, waste type and disposal cell.\n3. **Additional Details** — only shown when EMB has added extra fields for your facility.\n4. **Review** — the total waste volume and where each vehicle's waste goes; **Add Entry** saves it.\n\nThe steps work like tabs: click any step to jump to it, or use **Back** and **Next**. If something is missing when you save, the step with the problem turns red with a count and the form opens on it. When you are editing an entry that is already saved, **Update Entry** is available on every step, so a one-field correction does not need you to walk to the end.",
+    related: ["required-to-submit", "cell-placement-inheritance"],
+  },
+  {
+    id: "correction-draft",
+    category: "submission",
+    question: "Can I save the correction of a reverted entry as a draft or schedule it?",
+    keywords: [
+      "save my correction", "correction as a draft", "draft correction", "schedule correction",
+      "schedule the resubmission", "resubmit later", "save correction", "finish later",
+      "reverted entry draft", "edit and resubmit draft",
+    ],
+    answer:
+      "Yes. While you are correcting a reverted entry (Edit & Resubmit), **Save as Draft** and **Schedule** keep your correction linked to that reverted entry. When the draft is submitted — by you from Drafts & Scheduled, or automatically at the scheduled time — it **resubmits the reverted entry in place**: same record, same ID No., back to Pending for EMB's review.\n\nIt is never filed as a new submission. Before this change a correction saved as a draft came back as a separate new entry, the reverted one stayed reverted, and after 24 hours it blocked your next submission. Saving the correction again updates the same draft rather than creating a second copy, and your resubmit note travels with it.",
+    related: ["drafts-resubmit", "edit-submitted"],
+  },
+  {
+    id: "drafts-resubmit",
+    category: "submission",
+    question: "What happens when I submit a correction from Drafts & Scheduled?",
+    keywords: [
+      "drafts & scheduled", "drafts and scheduled", "correction of", "submit a correction",
+      "scheduled resubmission", "no longer reverted", "already resubmitted", "correction tag",
+      "draft resubmits", "submit draft correction",
+    ],
+    answer:
+      "A draft or schedule that corrects a reverted entry is labelled **Correction of SLF-…** in Drafts & Scheduled. Submitting it resubmits that entry — the confirmation says **Resubmitted** — and the entry goes back to Pending.\n\nIf the entry was already resubmitted another way (for example straight from Data Entry), the saved copy is no longer needed: the portal cancels it with the reason, and if it is submitted anyway it is refused with a message saying the entry is no longer reverted, so an older copy can never overwrite a newer correction. A scheduled correction that cannot go through is marked failed at once rather than retried.",
+    related: ["correction-draft", "edit-submitted"],
+  },
+  {
+    id: "submission-details-report",
+    category: "submission",
+    question: "How do I read the Submission Details and generate my report?",
+    keywords: [
+      "submission details", "details window", "waste entries table", "generate report",
+      "my report", "disposal report", "print my report", "live report", "report updates",
+      "submission history report",
+    ],
+    answer:
+      "In **Submission History**, open any row to see its Submission Details. The waste-entries and hauler tables now fit the window: long ticket numbers, hauler names, client lists and addresses wrap onto a second line instead of making the table scroll sideways.\n\n**Generate Report** (top of Submission History) builds your disposal report for the period you choose. While it is open it updates on its own when EMB approves, reverts or acknowledges something, or a new submission is recorded — the tag beside \"Generated\" shows **Live** and the time of the last update. Print / Save as PDF and the Word download use the figures on screen at that moment.",
+    related: ["statuses", "submission-breakdown"],
+  },
+  {
+    id: "submission-breakdown",
+    category: "submission",
+    question: "When does my Submission Breakdown update after EMB approves a resubmission?",
+    keywords: [
+      "submission breakdown", "breakdown chart", "approved count", "pending count",
+      "reverted count", "resubmission approved", "after approval", "status chart",
+      "overview breakdown", "still shows reverted", "still pending",
+    ],
+    answer:
+      "Right away. The **Submission Breakdown** on Overview counts your submissions by status (Pending, Approved, Reverted). A resubmission is the same record as the reverted entry, so when EMB approves it, that entry moves from Pending to Approved in the chart within seconds — no page refresh needed.\n\nIf an approval arrived while the list was still loading, the portal now re-reads it as soon as that load finishes, instead of keeping the older figures for a couple of minutes. A reverted entry only stays under Reverted if its correction was filed as a separate new submission — corrections saved as drafts now always resubmit the original, so this no longer happens.",
+    related: ["statuses", "correction-draft"],
+  },
+  {
     id: "baseline-completeness",
     category: "haulers",
     question:

@@ -419,7 +419,11 @@ async function runVeraInvestigation(ticket, req) {
     repliedByName: "VERA (Virtual Environmental Response Assistant)",
     isAdmin: true,
   });
-  if (ticket.status === "open") ticket.status = "in_progress";
+  // The ticket stays OPEN. VERA's reply is automatic and lands a moment after the
+  // ticket is filed; moving it to In Progress here took every new ticket out of
+  // the admin's "open" count before anyone had seen it. TKT-00049 (a request for
+  // baseline edit access) sat unanswered for 10 days that way. Only a human
+  // admin reply (/:id/reply) or an explicit status change moves it forward.
 
   ticket.veraStatus = result.processingStatus;
   ticket.veraInvestigation = {

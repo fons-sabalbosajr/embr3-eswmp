@@ -58,6 +58,16 @@ const CATEGORY_META = {
     status: "answered_by_vera",
     lead: "This action is restricted for your account by an administrator setting:",
   },
+  // The user is ASKING for something only an admin can do (edit access, adding
+  // accredited trucks to a locked baseline, changing a declared unit). No amount
+  // of portal guidance resolves that, so it goes straight to an administrator.
+  admin_action: {
+    label: "Admin action requested",
+    confidence: "high",
+    escalate: true,
+    status: "escalated",
+    lead: "This is a request an administrator needs to act on, so I've passed it to the EMB team.",
+  },
   api_db_failure: {
     label: "API / database failure",
     confidence: "medium",
@@ -200,11 +210,36 @@ function buildInsufficientEvidenceResult(ticket, facts, affectedModule) {
   };
 }
 
+// A request for the admin to DO something on the account, as opposed to a report
+// of something going wrong. Seen in production: "May I kindly request edit access
+// to our Baseline Data System to add newly accredited trucks" (TKT-00049) fell to
+// "unknown" and was asked for the page/message/time of an error that never
+// happened; "assistance in updating the unit of measurement" (TKT-00048) was
+// answered as a validation rule.
+const ADMIN_ACTION_RE = new RegExp(
+  [
+    // "Request for removal / correction / additional entries", "Request to unlock"
+    String.raw`\brequest(ing)? (for|to)\b`,
+    String.raw`request(ing)? (an? )?(edit|update|change|access|unlock|permission)`,
+    String.raw`(edit|editing|update|write) access`,
+    String.raw`\bunlock\b`,
+    String.raw`(grant|give|allow|enable|open)\b.{0,30}\b(access|edit|editing|baseline|update)`,
+    String.raw`(add|include|register)\b.{0,40}\b(newly|new|additional) (accredited )?(truck|hauler|vehicle)`,
+    String.raw`newly accredited`,
+    String.raw`(add|additional)\b.{0,30}\bclient entries`,
+    String.raw`(updat|chang|correct)\w* (of |in )?(the |our )?(declared )?unit( of measurement)?\b`,
+    // Account details only an admin can edit: username, e-mail, profile name.
+    String.raw`(chang|correct|updat)\w*\b.{0,25}\b(username|user name|e-?mail|profile name)`,
+    String.raw`\b(approval|removal) of\b`,
+  ].join("|"),
+);
+
 // Deterministic classification from the gathered facts + ticket text.
 function classify(ticket, facts) {
   const t = `${ticket.subject || ""} ${ticket.message || ""}`.toLowerCase();
   // A real system error affecting the user's recent activity outweighs everything.
   if (facts.errorCount >= 1 && /fail|error|save|submit|crash|500|not work/.test(t)) return "api_db_failure";
+  if (ADMIN_ACTION_RE.test(t)) return "admin_action";
   if (facts.permissionDenied >= 1 || /permission|not allowed|restricted|can'?t (submit|edit|access)|blocked/.test(t)) return "permission";
   if (facts.validationWarn >= 1 || /validation|invalid|unit must|capacity|required field|disposal cell required/.test(t)) return "validation";
   if (/unit|tons|m³|m3|convert|conversion/.test(t)) return "validation";
@@ -281,4 +316,4 @@ async function investigateTicket(ticket) {
   };
 }
 
-module.exports = { investigateTicket, detectModule, classify, CATEGORY_META };
+module.exports = { investigateTicket, detectModule, classify, CATEGORY_META, ADMIN_ACTION_RE };

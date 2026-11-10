@@ -96,6 +96,7 @@ import AdminTipCard from "../admin/AdminTipCard";
 import VeraChat from "../SLFPortal/Vera/VeraChat";
 import VeraOnboarding from "../../components/VeraOnboarding";
 import VeraNotificationBell from "./VeraNotificationBell";
+import ProfilePhotoEditor, { ProfileAvatar } from "../../components/ProfilePhotoEditor";
 const FieldSettings = lazy(() => import("../admin/FieldSettings"));
 const SubmissionSettings = lazy(() => import("../admin/SubmissionSettings"));
 const DeveloperSettings = lazy(() => import("../admin/DeveloperSettings"));
@@ -260,6 +261,7 @@ export default function AdminHome() {
         position: data.position,
         designation: data.designation,
         permissions: data.permissions,
+        profilePhoto: data.profilePhoto?.url ? { url: data.profilePhoto.url, updatedAt: data.profilePhoto.updatedAt } : null,
       };
       secureStorage.setJSON("user", nextUser);
       setUser(nextUser);
@@ -1325,9 +1327,9 @@ export default function AdminHome() {
                 trigger={["click"]}
               >
                 <div className="admin-header-user" style={s.userInfo}>
-                  <Avatar
+                  <ProfileAvatar
+                    photoUrl={user?.profilePhoto?.url}
                     style={{ backgroundColor: isDark ? "#2a4060" : "#1a3353" }}
-                    icon={<UserOutlined />}
                   />
                   {/* The avatar alone identifies the account on a phone; the name
                       is restored from sm up (see .admin-header-user-name). */}
@@ -1593,12 +1595,17 @@ export default function AdminHome() {
         {user && (
           <>
             <div style={{ textAlign: "center", marginBottom: 16 }}>
-              <Avatar
-                size={72}
-                style={{ backgroundColor: primaryColor }}
-                icon={<UserOutlined />}
+              <ProfilePhotoEditor
+                photoUrl={user.profilePhoto?.url}
+                size={88}
+                color={primaryColor}
+                onChange={(photo) => {
+                  const next = { ...user, profilePhoto: photo?.url ? photo : null };
+                  secureStorage.setJSON("user", next);
+                  setUser(next);
+                }}
               />
-              <div style={{ marginTop: 12 }}>
+              <div style={{ marginTop: 8 }}>
                 <Title level={4} style={{ margin: 0 }}>
                   {getAdminDisplayName(user) || "Admin"}
                 </Title>

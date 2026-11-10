@@ -34,6 +34,13 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
     // Full submission entry payload (same shape POST /data-slf expects as one entry).
     payload: { type: mongoose.Schema.Types.Mixed, default: {} },
 
+    // Set when this record is the CORRECTION of a reverted submission (saved as a
+    // draft or scheduled from Edit & Resubmit). Submitting it resubmits that
+    // DataSLF record in place instead of filing a new submission.
+    resubmitOf: { type: mongoose.Schema.Types.ObjectId, ref: "DataSLF", index: true },
+    // The reverted entry's ID No., kept for display in Drafts & Scheduled.
+    resubmitOfIdNo: { type: String, trim: true },
+
     scheduledAt: { type: Date },
     submittedAt: { type: Date },
     // submissionId of the DataSLF batch created on successful submission.

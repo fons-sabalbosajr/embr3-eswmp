@@ -47,8 +47,81 @@ const inRange = (date, range) => {
   return d.isValid() && !d.isBefore(range[0], "day") && !d.isAfter(range[1], "day");
 };
 
+// ── PSGC code → place name ──────────────────────────────────────────────────
+// Submissions store companyRegion / companyProvince / companyMunicipality as
+// PSGC CODES ("035400000"), which is what the Province column used to print.
+// The names come from the server's cached PSGC proxy: one call for every
+// province, one for every region, and one per DISTINCT province for its
+// municipalities. Promises are memoised for the session and dropped on failure
+// so a transient error is retried on the next Generate rather than sticking.
+const memo = new Map();
+const cachedGet = (url) => {
+  if (!memo.has(url)) {
+    memo.set(
+      url,
+      api.get(url)
+        .then(({ data }) => (Array.isArray(data) ? data : []))
+        .catch(() => { memo.delete(url); return []; }),
+    );
+  }
+  return memo.get(url);
+};
+const isCodeLike = (v) => /^[0-9A-Z_-]{6,}$/i.test(String(v || "").trim()) && /\d{4,}/.test(String(v));
+async function buildPlaceResolver(rows) {
+  const passThrough = (value) => String(value || "").trim();
+  const anyCode = rows.some((r) => [r.companyRegion, r.companyProvince, r.companyMunicipality].some(isCodeLike));
+  if (!anyCode) return passThrough; // names already — nothing to look up
+  const provinceCodes = [...new Set(rows.map((r) => r.companyProvince).filter(isCodeLike))];
+  const [provinces, regions, ...munLists] = await Promise.all([
+    cachedGet("/settings/address/provinces"),
+    cachedGet("/settings/address/regions"),
+    ...provinceCodes.map((c) => cachedGet(`/settings/address/municipalities/${encodeURIComponent(c)}`)),
+  ]);
+  const names = new Map();
+  [...provinces, ...regions, ...munLists.flat()].forEach((p) => {
+    if (p?.code && p?.name) names.set(String(p.code), p.name);
+  });
+  // A name already stored as text passes through; an unresolved code renders
+  // as blank rather than leaking a nine-digit number into the report.
+  return (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    return names.get(raw) || (isCodeLike(raw) ? "" : raw);
+  };
+}
+
+// ── Table layout helpers ────────────────────────────────────────────────────
+// Every preview table is fixed-layout with percentage widths so it fits the
+// page instead of scrolling sideways, and every cell word-wraps (antd's
+// `ellipsis` cut values off mid-name). Related fields share one column as a
+// main line plus a muted sub-line.
+const WRAP = { whiteSpace: "normal", wordBreak: "break-word", overflowWrap: "anywhere", verticalAlign: "top" };
+const fitColumns = (columns) =>
+  columns.map((col) => ({
+    ...col,
+    ellipsis: false,
+    onCell: () => ({ style: WRAP }),
+    onHeaderCell: () => ({ style: { ...WRAP, verticalAlign: "bottom" } }),
+  }));
+const dash = (v) => (v === undefined || v === null || v === "" || v === "—" ? null : v);
+function Stack({ main, subs = [] }) {
+  const lines = subs.filter((s) => dash(s) !== null);
+  return (
+    <div style={{ lineHeight: 1.35 }}>
+      <div>{dash(main) ?? "—"}</div>
+      {lines.map((s, i) => (
+        <div key={i} style={{ fontSize: 11.5, color: "#8c8c8c" }}>{s}</div>
+      ))}
+    </div>
+  );
+}
+const joinDot = (...parts) => parts.filter((p) => dash(p) !== null).join(" · ");
+const statusColor = (v) =>
+  /acknowledged|approved/i.test(v) ? "green" : /pending/i.test(v) ? "orange" : /reject|suspend/i.test(v) ? "red" : /revert/i.test(v) ? "gold" : "default";
+
 // Each report declares only the filters it needs and a `run(filters)` that fetches
 // from an EXISTING endpoint on demand (never on page load) and returns preview rows.
+// Preview columns merge related fields; the EXPORT still carries every field flat.
 const REPORTS = [
   {
     key: "submissions",
@@ -58,25 +131,39 @@ const REPORTS = [
     description: "Portal disposal submissions with status, generator, trucks and volume.",
     filters: ["dateRange", "status", "search"],
     columns: [
-      { title: "ID No.", dataIndex: "idNo" },
-      { title: "Date", dataIndex: "date" },
-      { title: "SLF", dataIndex: "slf", ellipsis: true },
-      { title: "Generator", dataIndex: "generator", ellipsis: true },
-      { title: "Type", dataIndex: "companyType", width: 90 },
-      { title: "Province", dataIndex: "province", ellipsis: true },
-      { title: "Trucks", dataIndex: "trucks", align: "right" },
-      // TONS throughout — one unit per report. Volume used to be shown in both
-      // units side by side while Residual and Hazardous were m³ only, so the
-      // three columns could not be read against each other, and the "Unit"
-      // column beside them (the facility's DECLARED unit) read as though it
-      // qualified them.
-      { title: "Volume (tons)", dataIndex: "volumeTons", align: "right" },
-      { title: "Residual (tons)", dataIndex: "residualTons", align: "right" },
-      { title: "Hazardous (tons)", dataIndex: "hazardousTons", align: "right" },
-      { title: "Declared Unit", dataIndex: "unit", width: 100 },
-      { title: "Cell(s)", dataIndex: "cells", ellipsis: true },
-      { title: "Submitted By", dataIndex: "submittedBy", ellipsis: true },
-      { title: "Status", dataIndex: "status", render: (v) => <Tag>{v}</Tag> },
+      { title: "Submission", key: "submission", width: "12%", render: (_, r) => <Stack main={r.idNo} subs={[r.date]} /> },
+      { title: "SLF", dataIndex: "slf", width: "16%" },
+      {
+        title: "Generator / Location",
+        key: "generator",
+        width: "21%",
+        render: (_, r) => (
+          <Stack main={r.generator} subs={[joinDot(r.companyType, [r.municipality, r.province].filter((x) => dash(x)).join(", "))]} />
+        ),
+      },
+      { title: "Trucks", dataIndex: "trucks", align: "right", width: "7%" },
+      // TONS throughout — one unit per report. The declared unit is the
+      // facility's own baseline unit, shown as context under the figures.
+      {
+        title: "Waste (tons)",
+        key: "waste",
+        width: "16%",
+        render: (_, r) => (
+          <Stack
+            main={<strong>{r.volumeTons}</strong>}
+            subs={[`Residual ${r.residualTons} · Hazardous ${r.hazardousTons}`, `Declared unit: ${r.unit}`]}
+          />
+        ),
+      },
+      { title: "Cell(s)", dataIndex: "cells", width: "13%" },
+      {
+        title: "Status",
+        key: "status",
+        width: "15%",
+        render: (_, r) => (
+          <Stack main={<Tag color={statusColor(r.status)} style={{ marginInlineEnd: 0 }}>{r.status}</Tag>} subs={[dash(r.submittedBy) && `by ${r.submittedBy}`]} />
+        ),
+      },
     ],
     run: async ({ dateRange, status, search }) => {
       // ── Scope on the SERVER, not after the fact ────────────────────────────
@@ -102,7 +189,7 @@ const REPORTS = [
         ...(search ? { search } : {}),
       });
       const num = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-      return rows
+      const scoped = rows
         // Date is the one filter the endpoint does not expose, so it stays here.
         .filter((r) => inRange(r.dateOfDisposal, dateRange))
         .filter((r) => {
@@ -112,7 +199,9 @@ const REPORTS = [
           const q = search.toLowerCase();
           return [r.idNo, r.slfName, r.lguCompanyName, r.submittedBy]
             .some((v) => String(v || "").toLowerCase().includes(q));
-        })
+        });
+      const place = await buildPlaceResolver(scoped);
+      return scoped
         .map((r) => {
           const cells = Array.isArray(r.cellNames) ? r.cellNames.filter(Boolean) : [];
           return {
@@ -122,9 +211,9 @@ const REPORTS = [
             slf: r.slfName || r.lguCompanyName || "—",
             generator: r.lguCompanyName || "—",
             companyType: r.companyType || "—",
-            region: r.companyRegion || "—",
-            province: r.companyProvince || "—",
-            municipality: r.companyMunicipality || "—",
+            region: place(r.companyRegion) || "—",
+            province: place(r.companyProvince) || "—",
+            municipality: place(r.companyMunicipality) || "—",
             address: r.address || "—",
             trucks: r.truckCount ?? (r.trucks?.length || 0),
             // tonsFromMetricPair, not the raw tons field: the pair is kept in
@@ -150,23 +239,41 @@ const REPORTS = [
     description: "Sanitary landfill facilities with status, ownership, category and cell counts.",
     filters: ["operationalStatus", "search"],
     columns: [
-      { title: "LGU / SLF", dataIndex: "lgu", ellipsis: true },
-      { title: "Province", dataIndex: "province", ellipsis: true },
-      { title: "Status", dataIndex: "status", render: (v) => <Tag color={/non/i.test(v) ? "red" : /oper/i.test(v) ? "green" : "default"}>{v || "—"}</Tag> },
-      { title: "Ownership", dataIndex: "ownership" },
-      { title: "Category", dataIndex: "category" },
-      { title: "Cells", dataIndex: "cells", align: "right" },
-      { title: "Capacity", dataIndex: "capacity", align: "right", ellipsis: true },
-      { title: "Receiving Capacity", dataIndex: "receivingCapacity", align: "right", ellipsis: true },
-      { title: "Waste Received", dataIndex: "wasteReceived", align: "right", ellipsis: true },
-      { title: "LGUs Served", dataIndex: "lgusServed", align: "right" },
-      { title: "Leachate Ponds", dataIndex: "leachate", align: "right" },
-      { title: "Gas Vents", dataIndex: "gasVents", align: "right" },
-      { title: "Year", dataIndex: "year", align: "right" },
+      { title: "Facility / Province", key: "facility", width: "24%", render: (_, r) => <Stack main={r.lgu} subs={[r.province]} /> },
+      {
+        title: "Status / Profile",
+        key: "status",
+        width: "18%",
+        render: (_, r) => (
+          <Stack
+            main={<Tag color={/non/i.test(r.status) ? "red" : /oper/i.test(r.status) ? "green" : "default"} style={{ marginInlineEnd: 0 }}>{r.status || "—"}</Tag>}
+            subs={[joinDot(r.ownership, r.category)]}
+          />
+        ),
+      },
+      {
+        title: "Capacity",
+        key: "capacity",
+        width: "26%",
+        render: (_, r) => (
+          <Stack main={<>Total: {r.capacity}</>} subs={[`Receiving: ${r.receivingCapacity}`, `Waste received: ${r.wasteReceived}`]} />
+        ),
+      },
+      {
+        title: "Infrastructure",
+        key: "infra",
+        width: "18%",
+        render: (_, r) => (
+          <Stack main={`${r.cells} cell(s)`} subs={[`${r.leachate} leachate pond(s)`, `${r.gasVents} gas vent(s)`]} />
+        ),
+      },
+      { title: "LGUs Served", dataIndex: "lgusServed", align: "right", width: "8%" },
+      { title: "Year", dataIndex: "year", align: "right", width: "6%" },
     ],
     run: async ({ operationalStatus, search }) => {
       const { data } = await api.get("/slf-facilities/stats");
       const rows = Array.isArray(data?.managementData) ? data.managementData : [];
+      const place = await buildPlaceResolver(rows.map((r) => ({ companyProvince: r.province })));
       const isOp = (s) => /operational/i.test(String(s || "")) && !/non/i.test(String(s || ""));
       const isNon = (s) => /non/i.test(String(s || ""));
       const withUnit = (val, unit) =>
@@ -181,7 +288,7 @@ const REPORTS = [
         .map((r) => ({
           key: r._id || r.lgu,
           lgu: r.lgu || "—",
-          province: r.province || "—",
+          province: place(r.province) || "—",
           status: r.statusOfSLF || "—",
           ownership: r.ownership || "—",
           category: r.category || "—",
@@ -204,11 +311,20 @@ const REPORTS = [
     description: "Distinct clients declared in SLF baselines, classified LGU / Private / Unclassified.",
     filters: ["clientType", "search"],
     columns: [
-      { title: "Client", dataIndex: "name", ellipsis: true },
-      { title: "Type", dataIndex: "type", render: (v) => <Tag color={v === "LGU" ? "blue" : v === "Private" ? "purple" : "default"}>{v}</Tag> },
-      { title: "Portal User(s)", dataIndex: "portalUsers", ellipsis: true },
-      { title: "SLF Facility(ies)", dataIndex: "slfs", ellipsis: true },
-      { title: "Relationship Count", dataIndex: "relationships", align: "right" },
+      {
+        title: "Client / Type",
+        key: "client",
+        width: "30%",
+        render: (_, r) => (
+          <Stack
+            main={r.name}
+            subs={[<Tag key="t" color={r.type === "LGU" ? "blue" : r.type === "Private" ? "purple" : "default"} style={{ marginTop: 2 }}>{r.type}</Tag>]}
+          />
+        ),
+      },
+      { title: "Portal User(s)", dataIndex: "portalUsers", width: "28%" },
+      { title: "SLF Facility(ies)", dataIndex: "slfs", width: "30%" },
+      { title: "Relationships", dataIndex: "relationships", align: "right", width: "12%" },
     ],
     summary: (rows) => {
       const c = countClientsByType(rows.map((r) => ({ type: r.type })));
@@ -243,17 +359,33 @@ const REPORTS = [
     description: "Per-SLF disposal totals — submissions, trucks and residual vs hazardous volume.",
     filters: ["search"],
     columns: [
-      { title: "SLF", dataIndex: "slf", ellipsis: true },
-      { title: "Submissions", dataIndex: "submissions", align: "right" },
-      { title: "Trucks", dataIndex: "trucks", align: "right" },
+      { title: "SLF", dataIndex: "slf", width: "26%" },
+      {
+        title: "Activity",
+        key: "activity",
+        width: "20%",
+        render: (_, r) => (
+          <Stack main={`${r.submissions} submission(s)`} subs={[`${r.trucks} truck(s) · ${r.generatorCount} generator(s)`]} />
+        ),
+      },
       // One unit, tons — see the Submission Reports columns above.
-      { title: "Residual (tons)", dataIndex: "residualTons", align: "right" },
-      { title: "Hazardous (tons)", dataIndex: "hazardousTons", align: "right" },
-      { title: "Total (tons)", dataIndex: "totalTons", align: "right" },
-      { title: "Pending", dataIndex: "pending", align: "right" },
-      { title: "Acknowledged", dataIndex: "acknowledged", align: "right" },
-      { title: "Generators", dataIndex: "generatorCount", align: "right" },
-      { title: "Last Disposal", dataIndex: "lastDisposal" },
+      {
+        title: "Waste (tons)",
+        key: "waste",
+        width: "22%",
+        render: (_, r) => (
+          <Stack main={<strong>{r.totalTons}</strong>} subs={[`Residual ${r.residualTons}`, `Hazardous ${r.hazardousTons}`]} />
+        ),
+      },
+      {
+        title: "Review Status",
+        key: "review",
+        width: "18%",
+        render: (_, r) => (
+          <Stack main={`${r.acknowledged} acknowledged`} subs={[`${r.pending} pending`, r.rejected ? `${r.rejected} rejected` : null, r.reverted ? `${r.reverted} reverted` : null]} />
+        ),
+      },
+      { title: "Last Disposal", dataIndex: "lastDisposal", width: "14%" },
     ],
     run: async ({ search }) => {
       const { data } = await api.get("/data-slf/summary-by-slf");
@@ -286,15 +418,18 @@ const REPORTS = [
     description: "SLF portal accounts with company and assigned facility.",
     filters: ["search"],
     columns: [
-      { title: "Name", dataIndex: "name", ellipsis: true },
-      { title: "Email", dataIndex: "email", ellipsis: true },
-      { title: "Company", dataIndex: "company", ellipsis: true },
-      { title: "Assigned SLF", dataIndex: "slf", ellipsis: true },
-      { title: "Status", dataIndex: "status", render: (v) => <Tag color={/approved/i.test(v) ? "green" : /pending/i.test(v) ? "orange" : /reject|suspend/i.test(v) ? "red" : "default"}>{v || "—"}</Tag> },
-      { title: "Verification", dataIndex: "verification", width: 120 },
-      { title: "Contact", dataIndex: "contact", ellipsis: true },
-      { title: "Access", dataIndex: "access", ellipsis: true },
-      { title: "Registered", dataIndex: "registered" },
+      { title: "User / Contact", key: "user", width: "26%", render: (_, r) => <Stack main={r.name} subs={[r.email, r.contact]} /> },
+      { title: "Company / Assigned SLF", key: "company", width: "28%", render: (_, r) => <Stack main={r.company} subs={[r.slf]} /> },
+      {
+        title: "Status",
+        key: "status",
+        width: "16%",
+        render: (_, r) => (
+          <Stack main={<Tag color={statusColor(r.status)} style={{ marginInlineEnd: 0 }}>{r.status || "—"}</Tag>} subs={[`Verification: ${r.verification}`]} />
+        ),
+      },
+      { title: "Access", dataIndex: "access", width: "18%" },
+      { title: "Registered", dataIndex: "registered", width: "12%" },
     ],
     run: async ({ search }) => {
       const { data } = await api.get("/portal-users");
@@ -411,6 +546,7 @@ function ReportTab({ report }) {
   };
 
   const summary = report.summary && state.status === "success" ? report.summary(state.rows) : null;
+  const columns = useMemo(() => fitColumns(report.columns), [report.columns]);
 
   return (
     <div>
@@ -460,9 +596,13 @@ function ReportTab({ report }) {
             size="small"
             style={{ marginTop: 8 }}
             dataSource={state.rows}
-            columns={report.columns}
+            columns={columns}
             rowKey="key"
-            scroll={{ x: "max-content" }}
+            // Fixed layout + percentage widths: the table takes the page width
+            // and wraps text. The pixel floor only engages on phone widths,
+            // where squeezing seven columns would be unreadable.
+            tableLayout="fixed"
+            scroll={{ x: 720 }}
             pagination={{ pageSize: 15, showSizeChanger: true, showTotal: (t) => `${t} rows` }}
           />
         </Card>
@@ -481,7 +621,7 @@ function ExistingPdfReportTab() {
   const launch = async () => {
     setLoading(true);
     try {
-      const [tilesRes, rowsRes, facRes, baseRes, usersRes, annRes, txnRes] = await Promise.all([
+      const [tilesRes, rowsRes, facRes, baseRes, usersRes, annRes, txnRes, occRes] = await Promise.all([
         api.get("/data-slf/summary-tiles").catch(() => ({ data: null })),
         api.get("/data-slf/summary-by-slf").catch(() => ({ data: [] })),
         api.get("/slf-facilities/stats").catch(() => ({ data: {} })),
@@ -491,6 +631,9 @@ function ExistingPdfReportTab() {
         // reflects the latest state, not just static submission data.
         api.get("/settings/app/portal-announcements").catch(() => ({ data: [] })),
         api.get("/transactions", { params: { limit: 25 } }).catch(() => ({ data: [] })),
+        // The per-cell rollup the report's cell sections read (same source as
+        // Submission Summary). It used to be omitted here.
+        api.get("/data-slf/cell-occupancy").catch(() => ({ data: {} })),
       ]);
       const slfRows = Array.isArray(rowsRes.data) ? rowsRes.data : rowsRes.data?.data || [];
       const baselines = Array.isArray(baseRes.data) ? baseRes.data : baseRes.data?.data || [];
@@ -503,6 +646,7 @@ function ExistingPdfReportTab() {
       setPayload({
         tiles: tilesRes.data, slfRows, facilities, baselines, portalUsers,
         totals: tilesRes.data, announcements, recentChanges,
+        cellOccupancy: occRes.data?.byFacility || {},
       });
       setOpen(true);
     } finally {
@@ -532,6 +676,7 @@ function ExistingPdfReportTab() {
             totals={payload.totals}
             announcements={payload.announcements}
             recentChanges={payload.recentChanges}
+            cellOccupancy={payload.cellOccupancy}
           />
         </Suspense>
       )}

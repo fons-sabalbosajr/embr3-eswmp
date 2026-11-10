@@ -4,7 +4,7 @@ import {
   Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
   Empty, Form, Grid, Input, InputNumber, List,
   Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Upload,
-  Typography, Card, Alert, Skeleton
+  Typography, Card, Alert, Skeleton, Steps
 } from "antd";
 
 // `Option` is used as <Option> below. Without this destructure it resolves to the
@@ -21,6 +21,8 @@ import {
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
   ClockCircleOutlined,
   SearchOutlined,
+  ArrowLeftOutlined,
+  ArrowRightOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
 import { mergeSelectOptions } from "./helpers";
@@ -28,6 +30,7 @@ import { UPLOAD_COLUMNS } from "./uploadHelpers";
 import HaulerUploadGuide from "./HaulerUploadGuide";
 import HaulerClientListPanel from "./HaulerClientListPanel";
 import VeraFlameIcon from "../../components/VeraFlameIcon";
+import ProfilePhotoEditor from "../../components/ProfilePhotoEditor";
 import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
@@ -266,7 +269,7 @@ export default function SLFPortalModals({
   revertRecord, setRevertRecord,
   revertReason, setRevertReason,
   revertLoading,
-  profileModalOpen, setProfileModalOpen,
+  profileModalOpen, setProfileModalOpen, isDeveloperContext = false, onProfilePhotoChange,
   supportDrawerOpen, setSupportDrawerOpen,
   messageDrawerOpen, setMessageDrawerOpen,
   supportTab, setSupportTab,
@@ -400,6 +403,49 @@ export default function SLFPortalModals({
 }) {
   // Global SLF sensitive-value masking (read displays only — never input fields).
   const { masked: maskSensitiveValues } = useSensitiveMask();
+
+  // ── Transport Entry steps ──
+  // The entry is filled in as steps (Trip → Vehicles & Waste → [Additional
+  // Details] → Review). The step bar doubles as tabs: every step is clickable at
+  // any time, so nothing is ever locked behind "Next". Inputs are controlled by
+  // truckDraft (not a form store), so a step that is not shown loses nothing.
+  const [truckStep, setTruckStep] = useState(0);
+  const hasExtraTransportFields = (extraTransportFields || []).length > 0;
+  const TRUCK_STEP = {
+    trip: 0,
+    vehicles: 1,
+    extra: hasExtraTransportFields ? 2 : -1,
+    review: hasExtraTransportFields ? 3 : 2,
+  };
+  const truckStepErrorCount = (step) => {
+    const errs = truckErrors || {};
+    const keys = Object.keys(errs).filter((k) => errs[k]);
+    if (step === TRUCK_STEP.trip) return keys.filter((k) => k === "disposalTicketNo" || k === "hauler").length;
+    if (step === TRUCK_STEP.vehicles) return keys.filter((k) => k === "plateNumber" || k === "vehicles").length;
+    if (step === TRUCK_STEP.extra) {
+      const extraKeys = new Set((extraTransportFields || []).map((x) => x.fieldKey));
+      return keys.filter((k) => extraKeys.has(k)).length;
+    }
+    return 0;
+  };
+  // Adjusted DURING render when the inputs change (React's pattern for state
+  // derived from props), not in an effect: opening the modal starts at Trip, and a
+  // failed "Add Entry" lands the operator on the first step that needs fixing
+  // instead of leaving the error on a step they cannot see.
+  const [seenTruckModalOpen, setSeenTruckModalOpen] = useState(truckModalOpen);
+  if (seenTruckModalOpen !== truckModalOpen) {
+    setSeenTruckModalOpen(truckModalOpen);
+    if (truckModalOpen) setTruckStep(0);
+  }
+  const [seenTruckErrors, setSeenTruckErrors] = useState(truckErrors);
+  if (seenTruckErrors !== truckErrors) {
+    setSeenTruckErrors(truckErrors);
+    if (truckModalOpen) {
+      const order = [TRUCK_STEP.trip, TRUCK_STEP.vehicles, TRUCK_STEP.extra].filter((x) => x >= 0);
+      const first = order.find((step) => truckStepErrorCount(step) > 0);
+      if (first !== undefined) setTruckStep(first);
+    }
+  }
   const screens = Grid.useBreakpoint();
   const isNarrowScreen = !screens.lg;
   const [credentialForm] = Form.useForm();
@@ -1201,7 +1247,7 @@ export default function SLFPortalModals({
           >
             <div
               style={{
-                background: "linear-gradient(135deg, #1a3353 0%, #1e4a7a 100%)",
+                background: "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)",
                 borderRadius: 10,
                 width: 42,
                 height: 42,
@@ -1247,25 +1293,99 @@ export default function SLFPortalModals({
           setTruckErrors({});
         }}
         onOk={handleSaveTruck}
-        okText={editingTruckKey ? "Update Entry" : "Add Entry"}
-        okButtonProps={{
-          className: "slf-primary-btn",
-          icon: editingTruckKey ? <EditOutlined /> : <PlusOutlined />,
-        }}
-        cancelButtonProps={{ icon: <CloseCircleOutlined /> }}
+        footer={
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <Button
+              icon={<CloseCircleOutlined />}
+              onClick={() => {
+                setTruckModalOpen(false);
+                setTruckErrors({});
+              }}
+            >
+              Cancel
+            </Button>
+            <Space size={8} wrap>
+              <Button icon={<ArrowLeftOutlined />} disabled={truckStep === 0} onClick={() => setTruckStep((n) => Math.max(0, n - 1))}>
+                Back
+              </Button>
+              {truckStep < TRUCK_STEP.review && (
+                <Button
+                  type={editingTruckKey ? "default" : "primary"}
+                  className={editingTruckKey ? undefined : "slf-primary-btn"}
+                  onClick={() => setTruckStep((n) => Math.min(TRUCK_STEP.review, n + 1))}
+                >
+                  Next <ArrowRightOutlined />
+                </Button>
+              )}
+              {/* Saving an EDIT is offered on every step — a one-field
+                  correction should not require walking to the end. */}
+              {(editingTruckKey || truckStep === TRUCK_STEP.review) && (
+                <Button
+                  type="primary"
+                  className="slf-primary-btn"
+                  icon={editingTruckKey ? <EditOutlined /> : <PlusOutlined />}
+                  onClick={handleSaveTruck}
+                >
+                  {editingTruckKey ? "Update Entry" : "Add Entry"}
+                </Button>
+              )}
+            </Space>
+          </div>
+        }
         destroyOnHidden
         width={1040}
+        style={{ maxWidth: "96vw", top: 24 }}
         styles={{
-          body: { paddingTop: 16, maxHeight: "72vh", overflowY: "auto" },
+          body: { paddingTop: 8, maxHeight: "72vh", overflowY: "auto" },
         }}
       >
-        {/* ── Section 2: Trip Information ── */}
+        <Steps
+          size="small"
+          current={truckStep}
+          onChange={setTruckStep}
+          responsive
+          style={{
+            margin: "4px 0 16px",
+            padding: "12px 16px",
+            background: "#f7f9fc",
+            border: "1px solid #e3e9f2",
+            borderRadius: 10,
+          }}
+          items={[
+            { title: "Trip", description: "Ticket & hauler", icon: <AuditOutlined /> },
+            { title: "Vehicles & Waste", description: "Plates, volume, cell", icon: <CarOutlined /> },
+            ...(hasExtraTransportFields
+              ? [{ title: "Additional Details", description: "Extra fields", icon: <ProfileOutlined /> }]
+              : []),
+            { title: "Review", description: "Check & save", icon: <CheckCircleOutlined /> },
+          ].map((item, index) => {
+            const errors = truckStepErrorCount(index);
+            return errors
+              ? {
+                  ...item,
+                  status: "error",
+                  title: (
+                    <Badge count={errors} size="small" offset={[8, -2]}>
+                      <span>{item.title}</span>
+                    </Badge>
+                  ),
+                }
+              : item;
+          })}
+        />
+        {/* Vertical layout lines every label up above its input. The fields were
+            Form.Items with no form layout around them, so labels sat inline at
+            uneven widths. component={false}: no extra <form> element. */}
+        <Form layout="vertical" component={false} requiredMark>
+        {/* ── Step: Trip Information ── */}
+        {truckStep === TRUCK_STEP.trip && (
+        <>
         <div
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            background: "linear-gradient(90deg, #135200 0%, #237804 100%)",
+            background: "linear-gradient(90deg, #1a3353 0%, #2d5f8a 100%)",
             borderRadius: "8px 8px 0 0",
             padding: "9px 16px",
           }}
@@ -1280,8 +1400,8 @@ export default function SLFPortalModals({
         </div>
         <div
           style={{
-            background: "#f6ffed",
-            border: "1px solid #b7eb8f",
+            background: "#f7f9fc",
+            border: "1px solid #e3e9f2",
             borderTop: "none",
             borderRadius: "0 0 8px 8px",
             padding: "16px 16px 4px",
@@ -1350,13 +1470,18 @@ export default function SLFPortalModals({
           </Row>
         </div>
 
-        {/* ── Section 3: Vehicle & Capacity ── */}
+        </>
+        )}
+
+        {/* ── Step: Vehicles & Waste ── */}
+        {truckStep === TRUCK_STEP.vehicles && (
+        <>
         <div
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            background: "linear-gradient(90deg, #612500 0%, #873800 100%)",
+            background: "linear-gradient(90deg, #1a3353 0%, #2d5f8a 100%)",
             borderRadius: "8px 8px 0 0",
             padding: "9px 16px",
           }}
@@ -1371,8 +1496,8 @@ export default function SLFPortalModals({
         </div>
         <div
           style={{
-            background: "#fff7e6",
-            border: "1px solid #ffd591",
+            background: "#f7f9fc",
+            border: "1px solid #e3e9f2",
             borderTop: "none",
             borderRadius: "0 0 8px 8px",
             padding: "16px 16px 4px",
@@ -1442,7 +1567,7 @@ export default function SLFPortalModals({
                   borderRadius: 8,
                   padding: "12px 14px",
                   marginBottom: 10,
-                  border: "1px solid #ffd591",
+                  border: "1px solid #e3e9f2",
                   boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
                 }}
               >
@@ -1607,7 +1732,7 @@ export default function SLFPortalModals({
                     <Form.Item
                       label={
                         <Text style={{ fontSize: 12 }}>
-                          <DatabaseOutlined style={{ marginRight: 4, color: "#722ed1" }} />
+                          <DatabaseOutlined style={{ marginRight: 4, color: "#2d5f8a" }} />
                           {fl("actualVolume", "Waste Volume")}
                         </Text>
                       }
@@ -1647,7 +1772,7 @@ export default function SLFPortalModals({
                     <Form.Item
                       label={
                         <Space size={4}>
-                          <ContainerOutlined style={{ color: "#722ed1" }} />
+                          <ContainerOutlined style={{ color: "#2d5f8a" }} />
                           {fl("disposalCell", "Disposal Cell")}
                         </Space>
                       }
@@ -1876,13 +2001,18 @@ export default function SLFPortalModals({
           </Button>
         </div>
 
-        {/* ── Section 4: Waste Details ── */}
+        </>
+        )}
+
+        {/* ── Step: Review ── */}
+        {truckStep === TRUCK_STEP.review && (
+        <>
         <div
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            background: "linear-gradient(90deg, #391085 0%, #531dab 100%)",
+            background: "linear-gradient(90deg, #1a3353 0%, #2d5f8a 100%)",
             borderRadius: "8px 8px 0 0",
             padding: "9px 16px",
           }}
@@ -1897,12 +2027,12 @@ export default function SLFPortalModals({
         </div>
         <div
           style={{
-            background: "#f9f0ff",
-            border: "1px solid #d3adf7",
+            background: "#f7f9fc",
+            border: "1px solid #e3e9f2",
             borderTop: "none",
             borderRadius: "0 0 8px 8px",
             padding: "14px 16px",
-            marginBottom: extraTransportFields.length > 0 ? 14 : 0,
+            marginBottom: 0,
           }}
         >
           {(() => {
@@ -1936,7 +2066,7 @@ export default function SLFPortalModals({
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Total Waste Volume
                   </Text>
-                  <Tag color="purple" style={{ fontSize: 13, padding: "2px 10px" }}>
+                  <Tag color="blue" style={{ fontSize: 13, padding: "2px 10px" }}>
                     {totalLabel}
                   </Tag>
                 </Space>
@@ -1952,7 +2082,7 @@ export default function SLFPortalModals({
                         background: "#fff",
                         borderRadius: 6,
                         padding: "6px 10px",
-                        border: "1px solid #efdbff",
+                        border: "1px solid #e3e9f2",
                       }}
                     >
                       <Tag color="orange" style={{ margin: 0 }}>
@@ -1975,7 +2105,7 @@ export default function SLFPortalModals({
                           {v.wasteType}
                         </Tag>
                       )}
-                      <ContainerOutlined style={{ color: "#722ed1" }} />
+                      <ContainerOutlined style={{ color: "#2d5f8a" }} />
                       <Text style={{ fontSize: 12 }}>
                         {v.cellName ? (
                           v.cellName
@@ -1993,15 +2123,18 @@ export default function SLFPortalModals({
           })()}
         </div>
 
-        {/* ── Section 5: Additional Fields (if any) ── */}
-        {extraTransportFields.length > 0 && (
+        </>
+        )}
+
+        {/* ── Step: Additional Details (only when extra fields are configured) ── */}
+        {hasExtraTransportFields && truckStep === TRUCK_STEP.extra && (
           <>
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
-                background: "linear-gradient(90deg, #003a8c 0%, #0050b3 100%)",
+                background: "linear-gradient(90deg, #1a3353 0%, #2d5f8a 100%)",
                 borderRadius: "8px 8px 0 0",
                 padding: "9px 16px",
               }}
@@ -2016,8 +2149,8 @@ export default function SLFPortalModals({
             </div>
             <div
               style={{
-                background: "#f0f5ff",
-                border: "1px solid #adc6ff",
+                background: "#f7f9fc",
+                border: "1px solid #e3e9f2",
                 borderTop: "none",
                 borderRadius: "0 0 8px 8px",
                 padding: "16px 16px 4px",
@@ -2084,6 +2217,7 @@ export default function SLFPortalModals({
             </div>
           </>
         )}
+        </Form>
       </Modal>
 
       {/* ── Submission Detail Modal ──
@@ -2758,7 +2892,10 @@ export default function SLFPortalModals({
                                     rowKey="_idx"
                                     pagination={false}
                                     dataSource={haulerRows}
-                                    scroll={{ x: 640 }}
+                                    // Fits the modal: fixed layout + wrapping cells
+                                    // (slf-detail-fit) instead of a 640px scroll.
+                                    className="slf-detail-fit"
+                                    tableLayout="fixed"
                                     expandable={{
                                       expandedRowRender: (row) =>
                                         row.vehicles.length > 0 ? (
@@ -2767,6 +2904,8 @@ export default function SLFPortalModals({
                                             rowKey={(_, vi) => vi}
                                             pagination={false}
                                             dataSource={row.vehicles}
+                                            className="slf-detail-fit"
+                                            tableLayout="fixed"
                                             style={{ margin: "4px 0" }}
                                             columns={[
                                               { title: "#", width: 40, render: (_, __, vi) => vi + 1 },
@@ -2807,7 +2946,7 @@ export default function SLFPortalModals({
                                       {
                                         title: "No. of Trucks",
                                         dataIndex: "numberOfTrucks",
-                                        width: 100,
+                                        width: 84,
                                         align: "center",
                                         render: (v) => v ?? "—",
                                       },
@@ -2842,12 +2981,12 @@ export default function SLFPortalModals({
                               dataSource={wasteEntries}
                               rowKey="key"
                               size="small"
-                              className="slf-slim-scroll"
-                              // Natural width rather than a fixed 900px: several
-                              // columns here declare no width, so a fixed x pinched
-                              // them (HW Code worst of all) instead of letting the
-                              // table scroll inside the modal.
-                              scroll={{ x: "max-content" }}
+                              // Fits the modal width: a FIXED layout shares the
+                              // width between the columns and long values wrap
+                              // (slf-detail-fit, smaller font) — "max-content" made
+                              // the table wider than the modal and scroll sideways.
+                              className="slf-slim-scroll slf-detail-fit"
+                              tableLayout="fixed"
                               pagination={
                                 wasteEntries.length > 10
                                   ? {
@@ -2864,7 +3003,7 @@ export default function SLFPortalModals({
                                 {
                                   title: "#",
                                   key: "idx",
-                                  width: 40,
+                                  width: 34,
                                   render: (_, __, i) => (
                                     <Text type="secondary">{i + 1}</Text>
                                   ),
@@ -2872,7 +3011,7 @@ export default function SLFPortalModals({
                                 {
                                   title: "Date",
                                   key: "date",
-                                  width: 110,
+                                  width: 92,
                                   render: (_, e) =>
                                     e.date
                                       ? dayjs(e.date).format("MMM D, YYYY")
@@ -2894,12 +3033,14 @@ export default function SLFPortalModals({
                                   title: "Plate No.",
                                   dataIndex: "plateNumber",
                                   key: "plate",
+                                  width: 90,
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Waste Type",
                                   dataIndex: "wasteType",
                                   key: "waste",
+                                  width: 104,
                                   render: (v) =>
                                     v ? (
                                       <Tag
@@ -2918,7 +3059,7 @@ export default function SLFPortalModals({
                                   title: "Volume",
                                   key: "vol",
                                   align: "right",
-                                  width: 90,
+                                  width: 78,
                                   render: (_, e) =>
                                     e.volume != null ? (
                                       <Text strong style={{ color: "#52c41a" }}>
@@ -2936,14 +3077,14 @@ export default function SLFPortalModals({
                                   title: "Unit",
                                   dataIndex: "unit",
                                   key: "unit",
-                                  width: 70,
+                                  width: 52,
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Cell",
                                   dataIndex: "cell",
                                   key: "cell",
-                                  width: 110,
+                                  width: 96,
                                   render: (v) =>
                                     v || (
                                       <Text type="secondary">Unplaced</Text>
@@ -2955,13 +3096,13 @@ export default function SLFPortalModals({
                                   // Bounded + tooltipped, like the admin-side copy:
                                   // an unbounded joined list of codes overflowed
                                   // the column and the modal.
-                                  width: 150,
+                                  width: 112,
                                   render: (_, e) => {
                                     const codes = (e.hazWasteCodes || []).filter(Boolean);
                                     if (!codes.length) return <Text type="secondary">—</Text>;
                                     return (
                                       <Tooltip title={codes.join(", ")}>
-                                        <Space size={[2, 2]} wrap style={{ maxWidth: 140 }}>
+                                        <Space size={[2, 2]} wrap>
                                           {codes.slice(0, 2).map((code) => (
                                             <Tag
                                               key={code}
@@ -3185,8 +3326,11 @@ export default function SLFPortalModals({
           icon: <SendOutlined />,
         }}
         cancelText="Go Back"
+        // Save as Draft / Schedule are offered while RESUBMITTING too: the queue
+        // record carries `resubmitOf`, so submitting it later resubmits the
+        // reverted entry in place instead of filing a new submission.
         footer={
-          editingRevertedId ? undefined : (
+          (
             <div
               style={{
                 display: "flex",
@@ -3225,9 +3369,9 @@ export default function SLFPortalModals({
                   className="slf-primary-btn"
                   loading={loading}
                   icon={<SendOutlined />}
-                  onClick={handleConfirmSubmit}
+                  onClick={editingRevertedId ? handleResubmitReverted : handleConfirmSubmit}
                 >
-                  Confirm & Submit
+                  {editingRevertedId ? "Confirm & Resubmit" : "Confirm & Submit"}
                 </Button>
               </Space>
             </div>
@@ -3688,17 +3832,18 @@ export default function SLFPortalModals({
         destroyOnHidden
       >
         <div style={{ textAlign: "center", marginBottom: 20 }}>
-          <Avatar
-            size={72}
-            style={{
-              background: "linear-gradient(135deg, #1a3353, #2d5f8a)",
-              fontSize: 28,
-              marginBottom: 10,
-            }}
-          >
-            {portalUser?.firstName?.[0]?.toUpperCase()}
-          </Avatar>
-          <div>
+          <ProfilePhotoEditor
+            photoUrl={portalUser?.profilePhoto?.url}
+            size={88}
+            color="linear-gradient(135deg, #1a3353, #2d5f8a)"
+            fallback={portalUser?.firstName?.[0]?.toUpperCase()}
+            onChange={onProfilePhotoChange}
+            // A developer viewing this account cannot change its picture
+            // (the server refuses it too).
+            disabled={isDeveloperContext}
+            disabledReason={isDeveloperContext ? "Only the account holder can change this picture." : ""}
+          />
+          <div style={{ marginTop: 6 }}>
             <Text strong style={{ fontSize: 18 }}>
               {portalUser?.firstName} {portalUser?.lastName}
             </Text>

@@ -119,6 +119,7 @@ import PreviousNotificationsModal from "./PreviousNotificationsModal";
 import WasteGeneratorPane from "./WasteGeneratorPane";
 import VeraChat from "./Vera/VeraChat";
 import VeraOnboarding from "../../components/VeraOnboarding";
+import { ProfileAvatar } from "../../components/ProfilePhotoEditor";
 import DraftsScheduledPanel from "./DraftsScheduledPanel";
 import RequestsPanel from "./RequestsPanel";
 import HistoryPanel from "./HistoryPanel";
@@ -829,8 +830,10 @@ export default function SLFPortal() {
       // Haulers, and that panel's content is not mounted while it is collapsed —
       // so it is opened first, or every step would anchor to nothing and antd
       // would render them centred, which reads as a broken tour.
+      // The tour starts on Data Entry, on the tab its FIRST step lives on (steps
+      // declare it in portalFeatureTour.js); later steps switch tabs as they go.
       setActiveMenu("data-entry");
-      setActiveTab("baseline");
+      setActiveTab(PORTAL_FEATURE_TOUR_STEPS[0]?.tab || "baseline");
       setBaselineSections((prev) => (prev.includes("haulers") ? prev : [...prev, "haulers"]));
       setFeatureTourCurrent(0);
       // One frame for the panel to mount its content before antd measures the
@@ -1029,13 +1032,28 @@ export default function SLFPortal() {
     // Entry tabs render their children lazily, so a step pointing into a tab that
     // is not open would anchor to nothing and antd would centre it — which reads
     // as a broken tour. The order below crosses tabs exactly once.
-    const targets = {
-      completeness: { ref: baselineGapsRef, tab: "baseline" },
-      "special-zones": { ref: haulerTableRef, tab: "baseline" },
-      "system-generated": { ref: truckUploadRef, tab: "disposal" },
-      mismatch: { ref: truckUploadRef, tab: "disposal" },
-      "preview-grid": { ref: truckUploadRef, tab: "disposal" },
-      "cell-placement": { ref: truckTableRef, tab: "disposal" },
+    // A step points at a ref on Data Entry, at the facility card's Save as Draft
+    // / Review & Submit actions, or — for a change on another screen — at that
+    // screen's sidebar menu item (step.menu). Anything not mounted (a collapsed
+    // sidebar, a phone layout) falls back to the Data Entry form rather than
+    // anchoring to nothing.
+    const refTargets = {
+      "transport-steps": truckTableRef,
+      completeness: baselineGapsRef,
+      "special-zones": haulerTableRef,
+      "system-generated": truckUploadRef,
+      mismatch: truckUploadRef,
+      "preview-grid": truckUploadRef,
+      "cell-placement": truckTableRef,
+    };
+    const resolveTarget = (step) => {
+      if (step.menu) {
+        return document.querySelector(`.ant-menu-item[data-menu-id$="-${step.menu}"]`);
+      }
+      if (step.key === "correction-draft") {
+        return document.querySelector(".slf-facility-card .ant-card-extra");
+      }
+      return refTargets[step.key]?.current || null;
     };
     return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({
       key: step.key,
@@ -1070,9 +1088,10 @@ export default function SLFPortal() {
           </Space>
         </div>
       ),
-      tab: targets[step.key]?.tab || "baseline",
-      target: () => targets[step.key]?.ref?.current || haulerTableRef.current,
-      placement: "top",
+      tab: step.menu ? undefined : step.tab || "baseline",
+      target: () =>
+        resolveTarget(step) || truckTableRef.current || dataEntryTabsRef.current || haulerTableRef.current,
+      placement: step.menu ? "right" : "top",
     }));
   }, [askVeraAboutFeature, optOutOfFeatureTour]);
 
@@ -1431,6 +1450,7 @@ export default function SLFPortal() {
       ? new Date(settings.portalAnnouncementEndAt).getTime()
       : null;
     return (
+      settings?.portalAnnouncementLive !== false &&
       settings?.portalAnnouncementEnabled &&
       settings?.portalAnnouncementShowInPortal !== false &&
       (!startsAt || startsAt <= now) &&
@@ -1562,6 +1582,7 @@ export default function SLFPortal() {
           ...(data.assignedSlf !== undefined ? { assignedSlf: data.assignedSlf } : {}),
           ...(data.assignedSlfName !== undefined ? { assignedSlfName: data.assignedSlfName } : {}),
           ...(data.portalAccess !== undefined ? { portalAccess: data.portalAccess } : {}),
+          profilePhoto: data.profilePhoto?.url ? { url: data.profilePhoto.url, updatedAt: data.profilePhoto.updatedAt } : null,
         };
         secureStorage.setJSON("portal_user", refreshed);
         if (data.verificationRequired) {
@@ -2727,9 +2748,18 @@ export default function SLFPortal() {
   // Fetch submission history
   const pollingRef = useRef(null);
   const fetchingRef = useRef(false);
+  // A refresh asked for while a fetch is already in flight. That fetch may have
+  // left BEFORE the change it would miss (an admin approving a resubmission),
+  // and dropping the second call cached its stale answer as fresh for the whole
+  // TTL — the Submission Breakdown kept the entry under Pending/Reverted after it
+  // was approved. Instead, one forced re-read runs as soon as the first returns.
+  const refetchQueuedRef = useRef(false);
 
   const fetchSubmissions = useCallback(async (silent = false, force = false) => {
-    if (fetchingRef.current) return; // deduplicate concurrent requests
+    if (fetchingRef.current) {
+      refetchQueuedRef.current = true;
+      return;
+    }
     fetchingRef.current = true;
     if (!silent) setLoadingSubmissions(true);
     try {
@@ -2759,8 +2789,16 @@ export default function SLFPortal() {
     } finally {
       fetchingRef.current = false;
       if (!silent) setLoadingSubmissions(false);
+      if (refetchQueuedRef.current) {
+        refetchQueuedRef.current = false;
+        invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+        // Deferred so the recursion never runs inside this call's own finally.
+        setTimeout(() => fetchSubmissionsRef.current?.(true, true), 0);
+      }
     }
   }, [portalUser?.email]);
+  const fetchSubmissionsRef = useRef(null);
+  fetchSubmissionsRef.current = fetchSubmissions;
 
   // The other half of the History badge is `revertedCount`, derived from
   // `submissions` — and that list was only refreshed while the History or
@@ -6237,8 +6275,11 @@ export default function SLFPortal() {
   // facility's and stay as loaded, same rule as Edit & Resubmit above.
   const handleEditDraft = (record) => {
     const payload = record?.payload || {};
-    setEditingRevertedId(null);
-    setResubmitComment("");
+    // A saved CORRECTION of a reverted entry reopens in Edit & Resubmit mode, so
+    // Review & Submit resubmits that entry instead of filing a new one.
+    const correctionOf = record?.resubmitOf ? String(record.resubmitOf) : null;
+    setEditingRevertedId(correctionOf);
+    setResubmitComment(correctionOf ? String(payload.resubmitComment || "") : "");
     entryForm.setFieldsValue({
       dateOfDisposal: payload.dateOfDisposal ? dayjs(payload.dateOfDisposal) : null,
     });
@@ -6273,6 +6314,19 @@ export default function SLFPortal() {
     if (companyFields.companyRegion) fetchProvinces(companyFields.companyRegion, keepSelection);
     if (companyFields.companyProvince) fetchMunicipalities(companyFields.companyProvince, keepSelection);
     if (companyFields.companyMunicipality) fetchBarangays(companyFields.companyMunicipality, keepSelection);
+    const plain = (value) => String(value || "").replace(/[<>&]/g, "");
+    if (correctionOf) {
+      Swal.fire({
+        icon: "info",
+        title: "Editing Saved Correction",
+        html:
+          `This draft corrects reverted entry <b>${plain(record.resubmitOfIdNo) || "—"}</b>.` +
+          (record?.failureReason ? `<br/><br/><b>Why it was not submitted:</b> ${plain(record.failureReason)}` : "") +
+          "<br/><br/>Use <b>Review &amp; Submit</b> to resubmit it, or <b>Save as Draft</b> to keep working later.",
+        confirmButtonColor: "#1a3353",
+      });
+      return;
+    }
     Swal.fire({
       icon: "info",
       title: "Editing Draft",
@@ -6418,6 +6472,12 @@ export default function SLFPortal() {
       setReviewModalOpen(false);
       setEditingRevertedId(null);
       setResubmitComment("");
+      // Resubmitted from a saved correction: that draft is now in Submission
+      // History, so it leaves Drafts & Scheduled (same as a submitted draft).
+      if (editingDraft?.id) {
+        api.delete(`/portal-queue/${editingDraft.id}`).catch(() => {});
+        setEditingDraft(null);
+      }
       Swal.fire({
         icon: "success",
         title: "Resubmitted Successfully!",
@@ -7286,6 +7346,16 @@ export default function SLFPortal() {
 
   // ── Drafts & Scheduled submission handlers ──
   //
+  // While a reverted entry is being corrected, a draft or schedule must carry a
+  // link to it. Without one the queue filed the correction as a NEW submission:
+  // the reverted entry stayed reverted (blocking new submissions after 24 h) and
+  // the volume was counted twice once the copy was approved.
+  const correctionLink = () => (editingRevertedId ? { resubmitOf: editingRevertedId } : {});
+  // The resubmit note travels in the payload, which is the body the server
+  // resubmits with — so a correction submitted later keeps the operator's note.
+  const withCorrectionFields = (entry) =>
+    editingRevertedId ? { ...entry, resubmitComment: resubmitComment || "" } : entry;
+
   // Save as Draft deliberately does NOT run the final-submission validation:
   // a draft exists precisely to hold incomplete work (the Waste Generation
   // required-field rules, incl. Truck Capacity, apply only at final submit).
@@ -7312,7 +7382,7 @@ export default function SLFPortal() {
     queueActionRef.current = true;
     setSavingDraft(true);
     try {
-      const entry = buildSubmissionEntry();
+      const entry = withCorrectionFields(buildSubmissionEntry());
       // Editing a draft opened from Drafts & Scheduled: update THAT record, even
       // if its disposal date was changed (the facility+date match below would
       // otherwise file a second draft and leave the original behind).
@@ -7322,6 +7392,7 @@ export default function SLFPortal() {
             payload: entry,
             slfName: activeSlfName,
             slfGenerator: activeSlfId || null,
+            ...correctionLink(),
           })
         : await api.post("/portal-queue", {
             type: "draft",
@@ -7329,8 +7400,20 @@ export default function SLFPortal() {
             clientRequestId: newClientRequestId(),
             slfName: activeSlfName,
             slfGenerator: activeSlfId || null,
+            ...correctionLink(),
           });
       setReviewModalOpen(false);
+      if (editingRevertedId) {
+        Swal.fire({
+          icon: "success",
+          title: "Correction Saved as Draft",
+          html:
+            `Your correction of <b>${String(resubmittingIdNo || "the reverted entry").replace(/[<>&]/g, "")}</b> was saved. ` +
+            "Submitting it from Drafts &amp; Scheduled will <b>resubmit that entry</b> — it will not be filed as a new submission.",
+          confirmButtonColor: "#1a3353",
+        });
+        return;
+      }
       // Saving the same facility + disposal date again REPLACES the draft that
       // already holds it rather than stacking another copy beside it, so the
       // message has to say which of the two just happened — "Saved as Draft"
@@ -7373,7 +7456,7 @@ export default function SLFPortal() {
     queueActionRef.current = true;
     setSchedulingSubmit(true);
     try {
-      const entry = buildSubmissionEntry();
+      const entry = withCorrectionFields(buildSubmissionEntry());
       // `scheduledAt` is sent as an absolute ISO instant (UTC), so the server's
       // "must be in the future" check and the worker's `scheduledAt <= now` sweep
       // compare the same instant regardless of the browser's timezone.
@@ -7384,14 +7467,17 @@ export default function SLFPortal() {
         clientRequestId: newClientRequestId(),
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
+        ...correctionLink(),
       });
       setScheduleModalOpen(false);
       setScheduleAt(null);
       setReviewModalOpen(false);
       Swal.fire({
         icon: "success",
-        title: "Submission Scheduled",
-        text: "Your submission will be sent automatically at the scheduled time.",
+        title: editingRevertedId ? "Resubmission Scheduled" : "Submission Scheduled",
+        text: editingRevertedId
+          ? `Your correction of ${resubmittingIdNo || "the reverted entry"} will be resubmitted automatically at the scheduled time.`
+          : "Your submission will be sent automatically at the scheduled time.",
         confirmButtonColor: "#1a3353",
       });
     } catch (err) {
@@ -9347,14 +9433,14 @@ export default function SLFPortal() {
               trigger={["click"]}
             >
               <Space style={{ cursor: "pointer" }}>
-                <Avatar
+                <ProfileAvatar
                   size="small"
+                  photoUrl={portalUser?.profilePhoto?.url}
+                  fallback={portalUser?.firstName?.[0]?.toUpperCase()}
                   style={{
                     background: "linear-gradient(135deg, #1a3353, #2d5f8a)",
                   }}
-                >
-                  {portalUser?.firstName?.[0]?.toUpperCase()}
-                </Avatar>
+                />
                 {!isMobile && (
                   <Text style={{ color: "#1a3353", fontWeight: 500 }}>
                     {userDisplay}
@@ -10747,6 +10833,14 @@ export default function SLFPortal() {
           loading={loading}
           profileModalOpen={profileModalOpen}
           setProfileModalOpen={setProfileModalOpen}
+          isDeveloperContext={isDeveloperContext}
+          onProfilePhotoChange={(photo) => {
+            setPortalUser((prev) => {
+              const next = { ...prev, profilePhoto: photo?.url ? photo : null };
+              secureStorage.setJSON("portal_user", next);
+              return next;
+            });
+          }}
           supportDrawerOpen={supportDrawerOpen}
           setSupportDrawerOpen={setSupportDrawerOpen}
           messageDrawerOpen={messageDrawerOpen}

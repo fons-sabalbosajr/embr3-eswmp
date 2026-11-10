@@ -82,6 +82,7 @@ import {
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
 import api from "../../api";
+import ThemeColorTemplates from "./ThemeColorTemplates";
 import { withSizeChanger } from "../../utils/tablePagination";
 import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
@@ -1139,13 +1140,14 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const handleSave = async (values) => {
     setSaving(true);
     try {
-      const payload = {
-        ...values,
-        portalAnnouncementStartAt:
-          values.portalAnnouncementStartAt?.toISOString?.() || null,
-        portalAnnouncementEndAt:
-          values.portalAnnouncementEndAt?.toISOString?.() || null,
-      };
+      // The announcement fields are derived server-side from the active
+      // announcement (Portal Announcements manager). Sending them from here —
+      // as null, since no field on this form holds them — is what wiped the
+      // active announcement's end date and kept an expired one on the login page.
+      const payload = { ...values };
+      Object.keys(payload).forEach((k) => {
+        if (k.startsWith("portalAnnouncement")) delete payload[k];
+      });
       const { data } = await api.put("/settings/app", payload);
       setSettings(data.data);
       form.setFieldsValue({
@@ -1406,6 +1408,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     </Space>
                   }
                 >
+                  <ThemeColorTemplates form={form} />
                   <Row gutter={[16, 0]}>
                     <Col xs={24} md={8}>
                       <Form.Item name="theme" label="Admin Theme">
@@ -2938,10 +2941,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
           {
             // Automation Agent — config-only section under System & Logs (#5).
             key: "automation-agent",
-            label: <span><RobotOutlined /> Automation Agent</span>,
-            children: (
-              <AutomationAgentSettings initial={settings?.automationAgent} isDark={isDark} />
-            ),
+            label: <span><RobotOutlined /> VERA &amp; AI Agent</span>,
+            children: <AutomationAgentSettings isDark={isDark} />,
           },
           {
             key: "vera-workarounds",
