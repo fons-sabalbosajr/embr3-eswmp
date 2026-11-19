@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-11-19
+
 ### Added — Planning Unit access (view-only, until Dec 31, 2026)
 - The Planning Unit signs in on the SLF Portal login page with its own
   **username + password + PIN**, then picks the portal account to view, like the
