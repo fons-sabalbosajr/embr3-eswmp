@@ -17,7 +17,20 @@
 const SlfClient = require("../models/SlfClient");
 const SlfDataIssue = require("../models/SlfDataIssue");
 const UserPortal = require("../models/UserPortal");
-const { getRegion3ProvinceSet, classifyRegion, REGION_CLASS, normalizeName } = require("../utils/region3");
+const { getRegion3ProvinceSet, REGION_CLASS, normalizeName } = require("../utils/region3");
+const { buildLocationIndex, inferClientLocation, inferClientType } = require("../utils/clientLocation");
+
+// Region 3 municipalities / cities / special zones, for the location index.
+async function loadRegion3Masters() {
+  try {
+    const Region3Lgu = require("../models/Region3Lgu");
+    return await Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
+      .select("name normalizedName province normalizedProvince aliases lguType")
+      .lean();
+  } catch {
+    return [];
+  }
+}
 
 const normalize = SlfClient.normalize;
 
@@ -41,7 +54,7 @@ function readClient(entry) {
   if (!entry) return null;
   if (typeof entry === "string") {
     const name = entry.trim();
-    return name ? { name, rawType: "", province: "", municipalityCity: "", region: "" } : null;
+    return name ? { name, rawType: "", province: "", municipalityCity: "", region: "", address: "" } : null;
   }
   if (typeof entry === "object") {
     const name = String(entry.clientName || entry.name || "").trim();
@@ -49,13 +62,21 @@ function readClient(entry) {
     return {
       name,
       rawType: String(entry.clientType || entry.type || "").trim(),
+      // The portal stores the readable name in *Name and the PSGC code in the bare
+      // field; older rows have only one of the two. Names first, codes as fallback
+      // (utils/clientLocation reads a PSGC code's region prefix).
       province: String(entry.provinceName || entry.province || "").trim(),
-      municipalityCity: String(entry.municipalityName || entry.municipality || "").trim(),
+      municipalityCity: String(entry.municipalityName || entry.cityMunicipality || entry.city || entry.municipality || "").trim(),
       region: String(entry.regionName || entry.region || "").trim(),
+      address: String(entry.clientAddress || entry.address || "").trim(),
     };
   }
   return null;
 }
+
+// A PSGC code is evidence for classification, not a place name to display.
+const isCode = (v) => /^\d{9,10}$/.test(String(v || "").trim());
+const displayable = (v) => (isCode(v) ? "" : String(v || "").trim());
 
 function classifyType(rawType, companyTypeFallback) {
   const low = String(rawType || "").toLowerCase().replace(/[_\-\s]+/g, " ").trim();
@@ -120,6 +141,7 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
   // ── Stage 1: read ──
   report(0, 0);
   const provinceSet = await getRegion3ProvinceSet();
+  const locationIndex = buildLocationIndex(provinceSet, await loadRegion3Masters());
   const portalUsers = await UserPortal.find({}).select("email firstName lastName companyName username").lean();
   const userByEmail = new Map();
   portalUsers.forEach((u) => {
@@ -136,7 +158,7 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
     _id: doc._id, isNew: false, name: doc.name, type: doc.type,
     source: doc.source || "admin-managed", status: doc.status || "Active",
     province: doc.province || "", municipalityCity: doc.municipalityCity || "", region: doc.region || "",
-    location: doc.location || "", isDummy: !!doc.isDummy,
+    location: doc.location || "", address: doc.address || "", isDummy: !!doc.isDummy,
     rels: new Map((doc.portalUserRelationships || []).map((r) => [relKeyOf(r), {
       portalUser: r.portalUser || null, portalUserEmail: r.portalUserEmail || "", portalUserName: r.portalUserName || "",
       hauler: r.hauler || "", normalizedHauler: r.normalizedHauler || normalize(r.hauler),
@@ -171,6 +193,8 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
   // Tracks "<canonicalKey>::<relKey>" pairs whose baselineRef this run has already
   // pinned to the newest baseline, so later (older) baselines don't walk it back.
   const relBaselineClaimed = new Set();
+  // Stored profiles folded into a re-typed profile; retired after the save.
+  const retyped = [];
   const typesByName = new Map(); // normalizedName → Set(type)
   counts.total = baselines.reduce((n, b) => n + (b.accreditedHaulers || []).reduce((m, h) =>
     m + (Array.isArray(h?.privateSectorClients) ? h.privateSectorClients.length : 0) + (Array.isArray(h?.clients) ? h.clients.length : 0), 0), 0);
@@ -188,7 +212,16 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
         counts.processed += 1; summary.clientsProcessed += 1;
         if (counts.total && counts.processed % 25 === 0) report(2, counts.processed / counts.total);
         if (!c) continue;
-        const type = classifyType(c.rawType, b.companyType);
+        // Type: the declared type, unless the client's own name says LGU ("LGU
+        // Umingan", "City of San Fernando", "Angeles"); a missing type falls back to
+        // the facility's company type, then to a business suffix ("Inc.", "Trading").
+        const declaredType = classifyType(c.rawType, b.companyType);
+        const inferred = inferClientType(
+          { name: c.name, rawType: c.rawType, municipalityCity: c.municipalityCity },
+          locationIndex,
+          (raw) => classifyType(raw, b.companyType),
+        );
+        const type = inferred.type;
         if (!type) { addFlag({ flagType: "missing_type", baselineRef: b._id, clientName: c.name, hauler: haulerName, portalUserEmail: email, description: `Client "${c.name}" has no resolvable LGU/Private type.` }); continue; }
         if (!haulerName) addFlag({ flagType: "missing_hauler", baselineRef: b._id, clientName: c.name, clientType: type, portalUserEmail: email, description: `Client "${c.name}" has no named hauler.` });
 
@@ -198,18 +231,43 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
 
         const key = SlfClient.buildCanonicalKey({ name: c.name, type });
         let w = canonicalMap.get(key);
+        // Re-typed by name ("LGU UMINGAN" declared Private Sector): the record
+        // stored under the declared type must not stay behind as a second, stale
+        // profile. Move it to the corrected type, or fold it into the profile that
+        // already exists there. Only baseline-sourced rows move; an admin-managed
+        // row keeps the type a person gave it.
+        if (declaredType && declaredType !== type) {
+          const oldKey = SlfClient.buildCanonicalKey({ name: c.name, type: declaredType });
+          const old = canonicalMap.get(oldKey);
+          if (old && old !== w && old.source === "baseline") {
+            canonicalMap.delete(oldKey);
+            if (!w) {
+              old.type = type;
+              canonicalMap.set(key, old);
+              w = old;
+            } else {
+              old.rels.forEach((r, rk) => { if (!w.rels.has(rk)) w.rels.set(rk, r); });
+              old.haulers.forEach((h, hk) => { if (!w.haulers.has(hk)) w.haulers.set(hk, h); });
+              old.baselines.forEach((id) => w.baselines.add(id));
+              if (old._id) retyped.push({ id: old._id, intoKey: key });
+            }
+          }
+        }
         if (!w) {
           w = { _id: null, isNew: true, name: c.name, type, source: "baseline", status: "Active",
-            province: "", municipalityCity: "", region: "", location: "", isDummy: !!b.isDummy,
+            province: "", municipalityCity: "", region: "", location: "", address: "", isDummy: !!b.isDummy,
             rels: new Map(), haulers: new Map(), baselines: new Set(), provincesSeen: new Set() };
           canonicalMap.set(key, w);
         }
         // Fill location only when the canonical has none (preserve manual/admin values).
-        if (!w.province && c.province) { w.province = c.province; }
-        if (!w.municipalityCity && c.municipalityCity) w.municipalityCity = c.municipalityCity;
-        if (!w.region && c.region) w.region = c.region;
-        if (!w.location && (c.municipalityCity || c.province)) w.location = [c.municipalityCity, c.province].filter(Boolean).join(", ");
-        if (c.province) w.provincesSeen.add(normalizeName(c.province));
+        const prov = displayable(c.province);
+        const muni = displayable(c.municipalityCity);
+        if (!w.province && prov) { w.province = prov; }
+        if (!w.municipalityCity && muni) w.municipalityCity = muni;
+        if (!w.region && c.region) w.region = displayable(c.region) || c.region;
+        if (!w.address && c.address) w.address = c.address;
+        if (!w.location && (muni || prov)) w.location = [muni, prov].filter(Boolean).join(", ");
+        if (prov) w.provincesSeen.add(normalizeName(prov));
 
         // Relationship (deduped) — preserve firstSyncedAt, bump lastSyncedAt.
         const rel = { portalUser: owner?.id || null, portalUserEmail: email, portalUserName: owner?.name || "",
@@ -250,14 +308,25 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
     const rels = [...w.rels.values()];
     const distinct = new Set(rels.map((r) => String(r.portalUser || r.portalUserEmail || "")).filter(Boolean));
     const multiPortalStatus = distinct.size > 1 ? "Multiple Portal Users" : distinct.size === 1 ? "Single Portal User" : "Unassigned";
-    const regionClass = classifyRegion({ province: w.province, region: w.region }, provinceSet);
-    if (regionClass === REGION_CLASS.UNCLASSIFIED && !w.province) {
-      addFlag({ flagType: "region_unclassified", clientName: w.name, clientType: w.type, description: `Client "${w.name}" has no province — cannot classify Region 3.` });
+    // Within / Outside Region 3 from every piece of location evidence the record
+    // has: province, region, city/municipality, address, then the name itself
+    // ("PRIVATE - TRECE CAVITE"). A province or city the evidence establishes is
+    // written back only where the record has none, so the table shows it too.
+    const loc = inferClientLocation(
+      { province: w.province, municipalityCity: w.municipalityCity, region: w.region, address: w.address, name: w.name, isLgu: w.type === "LGU" },
+      locationIndex,
+    );
+    const regionClass = loc.regionClass;
+    if (!w.province && loc.province) w.province = loc.province;
+    if (!w.municipalityCity && loc.municipalityCity) w.municipalityCity = loc.municipalityCity;
+    if (!w.location && (w.municipalityCity || w.province)) w.location = [w.municipalityCity, w.province].filter(Boolean).join(", ");
+    if (regionClass === REGION_CLASS.UNCLASSIFIED) {
+      addFlag({ flagType: "region_unclassified", clientName: w.name, clientType: w.type, description: `Client "${w.name}" has no province, city/municipality or address that places it within or outside Region 3.` });
     }
     const setDoc = {
       name: w.name, normalizedName: normalize(w.name), type: w.type,
       canonicalKey: SlfClient.buildCanonicalKey({ name: w.name, type: w.type }), isCanonical: true, mergedInto: null,
-      province: w.province, municipalityCity: w.municipalityCity, region: w.region, location: w.location, regionClass,
+      province: w.province, municipalityCity: w.municipalityCity, region: w.region, location: w.location, address: w.address || "", regionClass,
       portalUserRelationships: rels,
       haulerRelationships: [...w.haulers.values()].map((h) => ({ ...h, lastSyncedAt: now })),
       baselineReferences: [...w.baselines].map((id) => id),
@@ -283,6 +352,15 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
       await SlfClient.bulkWrite(ops.slice(i, i + 500), { ordered: false });
       report(3, Math.min(1, (i + 500) / ops.length));
     }
+  }
+  // Retire the profiles folded into a re-typed one: point them at the survivor
+  // (the same `mergedInto` the duplicate cleanup uses), which takes them out of
+  // every count and list.
+  for (const r of retyped) {
+    const target = await SlfClient.findOne({ canonicalKey: r.intoKey, isCanonical: true, mergedInto: null, deletedAt: null }).select("_id").lean();
+    if (!target || String(target._id) === String(r.id)) continue;
+    await SlfClient.updateOne({ _id: r.id }, { $set: { mergedInto: target._id, isCanonical: false, syncAction: "merged-retype", updatedBy: actor } });
+    summary.duplicatesMerged += 1;
   }
   report(3, 1);
 

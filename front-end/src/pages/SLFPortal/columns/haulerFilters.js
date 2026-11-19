@@ -67,7 +67,8 @@ export const clientsOf = (hauler = {}) => {
 };
 
 export const clientTypesOf = (hauler) => [
-  ...new Set(clientsOf(hauler).map((client) => text(client.clientType) || "Private")),
+  // A missing type is shown as such, not as "Private" (Client Type is required).
+  ...new Set(clientsOf(hauler).map((client) => text(client.clientType) || "Not set")),
 ];
 
 /** The address a client row displays, or "" when it has none. */

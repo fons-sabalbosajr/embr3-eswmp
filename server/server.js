@@ -340,6 +340,11 @@ app.use("/api", (req, res, next) => {
 // there is no window in which a new endpoint returns raw figures to a demo user.
 app.use("/api", require("./utils/demoMode").demoMaskingMiddleware);
 
+// Planning Unit sessions (role "planning_unit") are view-only and end the moment
+// their access is switched off, expires or is revoked. Mounted before the route
+// table so every endpoint, including any added later, is covered.
+app.use("/api", require("./middleware/planningUnitGuard").planningUnitGuard);
+
 // Routes
 app.get("/api/health", (req, res) => {
   // Reports the database separately from the process so a monitor can tell
@@ -452,6 +457,13 @@ app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
 app.use("/api/portal-messages", require("./routes/portalMessages"));
 app.use("/api/dev-portal", require("./routes/devPortal"));
+// Planning Unit Access (view-only portal entry). The password and PIN steps share
+// the strict login limiter; the rest of the router is developer-only or token-gated.
+app.use(
+  "/api/planning-unit",
+  (req, res, next) => (["/login", "/verify-pin"].includes(req.path) ? authLimiter(req, res, next) : next()),
+  require("./routes/planningUnit"),
+);
 // Developer-only Portal User Rules configuration (router enforces authMiddleware +
 // developerOnly on every route).
 app.use("/api/portal-user-rules", require("./routes/portalUserRules"));

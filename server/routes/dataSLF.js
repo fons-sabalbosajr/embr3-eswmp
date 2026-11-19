@@ -14,7 +14,8 @@ const Region3Lgu = require("../models/Region3Lgu");
 // Region III classifier the LGU dashboard uses, so a client's municipality is
 // classified identically in both modules.
 const { matchClient } = require("../utils/lguMatch");
-const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
+const { getRegion3ProvinceSet } = require("../utils/region3");
+const { buildLocationIndex, inferClientLocation } = require("../utils/clientLocation");
 // `slfName` on a baseline record is a SNAPSHOT of the facility's display name, so
 // a rename leaves older spellings behind and a name-grouped list shows one site
 // twice. This collapses those on the canonical facility id.
@@ -1796,11 +1797,36 @@ const hasPositiveRequiredNumber = (value) => {
   return Number.isFinite(n) && n > 0;
 };
 
+// Client Type: "LGU" or "Private", read case-insensitively. Anything else is
+// MISSING: no silent default (a blank type used to be stored as "Private").
+const CLIENT_TYPES = { lgu: "LGU", private: "Private" };
+const normalizeClientType = (value) => CLIENT_TYPES[String(value || "").trim().toLowerCase()];
+
+// Every named client on a roster with no valid type: [{ hauler, client }].
+function findClientsWithoutType(haulers) {
+  if (!Array.isArray(haulers)) return [];
+  const out = [];
+  haulers.forEach((hauler) => {
+    const list = [
+      ...(Array.isArray(hauler?.privateSectorClients) ? hauler.privateSectorClients : []),
+      ...(Array.isArray(hauler?.clients) ? hauler.clients : []),
+    ];
+    list.forEach((raw) => {
+      const client = typeof raw === "string" ? { clientName: raw } : raw || {};
+      const name = String(client.clientName || "").trim();
+      if (name && !normalizeClientType(client.clientType)) {
+        out.push({ hauler: String(hauler?.haulerName || hauler?.name || "").trim(), client: name });
+      }
+    });
+  });
+  return out;
+}
+
 function sanitizeClient(client) {
   if (typeof client === "string") {
     return {
       clientName: client.trim(),
-      clientType: "Private",
+      clientType: undefined,
       clientAddress: "",
       region: "",
       regionName: "",
@@ -1813,7 +1839,10 @@ function sanitizeClient(client) {
   if (!client || typeof client !== "object") return null;
   return {
     clientName: String(client.clientName || "").trim(),
-    clientType: String(client.clientType || "Private").trim() || "Private",
+    // Undefined when missing (never a guessed "Private"); the baseline save
+    // refuses a typeless client, and a trip's selected client keeps whatever the
+    // baseline holds.
+    clientType: normalizeClientType(client.clientType),
     // Carried through so a bulk-uploaded / admin-corrected Client Address survives
     // the save instead of being stripped by this whitelist.
     clientAddress: String(client.clientAddress || client.address || "").trim(),
@@ -3934,6 +3963,7 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
         .lean(),
     ]);
 
+    const locationIndex = buildLocationIndex(region3ProvinceSet, masterMunis);
     let rows = [...byKey.values()].map((row) => {
       const match = matchClient(
         {
@@ -3951,10 +3981,19 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
         municipalityName:
           confident && suggestion?.name ? suggestion.name : row.municipalityName,
         municipalityMatch: classification,
-        regionClass: classifyRegion(
-          { province: row.provinceName, region: row.regionName },
-          region3ProvinceSet,
-        ),
+        // Province, region, city/municipality, address, then name — so a row with
+        // only "Tanza" or "Angeles City" is still classified (utils/clientLocation).
+        regionClass: inferClientLocation(
+          {
+            province: row.provinceName,
+            region: row.regionName,
+            municipalityCity: row.municipalityName,
+            address: row.clientAddress,
+            name: row.clientName,
+            isLgu: /lgu/i.test(String(row.clientType || "")),
+          },
+          locationIndex,
+        ).regionClass,
       };
     });
 
@@ -9803,6 +9842,22 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     } = req.body || {};
 
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
+
+    // CLIENT TYPE IS REQUIRED. It decides whether a client's waste is counted as
+    // municipal waste (LGU) or private sector waste, and a blank type used to be
+    // saved as "Private" without the operator choosing it. Refused here (not only
+    // in the form) so no path, upload or direct call, stores a typeless client.
+    const typeless = findClientsWithoutType(accreditedHaulers);
+    if (typeless.length) {
+      return res.status(400).json({
+        code: "CLIENT_TYPE_REQUIRED",
+        message:
+          `Client Type is required for every client (LGU for municipal waste, Private for private sector waste). ` +
+          `Missing for ${typeless.length} client(s): ${typeless.slice(0, 10).map((t) => `${t.client} (${t.hauler})`).join("; ")}` +
+          `${typeless.length > 10 ? `; and ${typeless.length - 10} more` : ""}.`,
+        clients: typeless,
+      });
+    }
     // WHO is saving comes from the TOKEN, never from the body. A portal caller
     // cannot write baseline data as somebody else by naming them in `submittedBy`
     // — the body value is only trusted for admin/developer callers, who legitimately

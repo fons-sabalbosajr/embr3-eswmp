@@ -797,8 +797,9 @@ router.get("/me", async (req, res) => {
     const payload = user.toObject ? user.toObject() : { ...user };
     if (ctx.impersonating) {
       payload.developerContext = true;
-      payload.readOnly = false;
+      payload.readOnly = !!ctx.readOnly;
       payload.developerEmail = ctx.actor;
+      if (ctx.isPlanningUnit) payload.planningUnit = true;
     }
     res.json(payload);
   } catch (error) {

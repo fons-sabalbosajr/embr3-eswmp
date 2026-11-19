@@ -104,7 +104,7 @@ function isRetryable(error) {
 // exactly once (guarded so there is no redirect/refresh loop).
 let sessionExpiring = false;
 function isAuthEndpoint(url = "") {
-  return /\/portal-auth\/(login|forgot|reset)|\/dev-portal\/(override|verify-pin)|\/auth\/(login|forgot|reset)/.test(url);
+  return /\/portal-auth\/(login|forgot|reset)|\/dev-portal\/(override|verify-pin)|\/planning-unit\/(login|verify-pin)|\/auth\/(login|forgot|reset)/.test(url);
 }
 function handleSessionExpiry() {
   if (sessionExpiring) return;

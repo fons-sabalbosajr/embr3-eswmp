@@ -227,6 +227,23 @@ router.delete("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
 
 // ── App Settings ──
 
+// Developer-only fields. GET /app is PUBLIC (the portal and the login page read
+// it), and it serialised the whole document, so the Dev Portal PIN's bcrypt hash
+// went out to anyone who asked. A 6-digit PIN hash falls to an offline brute force
+// in hours. These are never read through /app, and never written through it
+// either: each has its own developer-only endpoint (/dev-portal/*, /slf-masking),
+// and an admin PUT must not be able to replace the PIN or flip the masking switch.
+const DEVELOPER_ONLY_SETTING_KEYS = [
+  "devPortalPinHash",
+  "devPortalPinUpdatedAt",
+  "devPortalPinFailedAttempts",
+  "devPortalPinLockedUntil",
+  "maskSensitiveSlfValues",
+  "maskSensitiveSlfValuesUpdatedAt",
+  "maskSensitiveSlfAudit",
+];
+const HIDDEN_ON_READ = ["devPortalPinHash", "devPortalPinFailedAttempts", "devPortalPinLockedUntil", "devPortalPinUpdatedAt"];
+
 // Get app settings
 router.get("/app", async (req, res) => {
   try {
@@ -253,6 +270,7 @@ router.get("/app", async (req, res) => {
     // the public settings read. The boolean flag itself IS public (the portal
     // needs it); the audit is available only via the developer-only endpoint.
     if (out.maskSensitiveSlfAudit) delete out.maskSensitiveSlfAudit;
+    HIDDEN_ON_READ.forEach((k) => { delete out[k]; });
     res.json(out);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -284,6 +302,7 @@ router.put("/app", authMiddleware, adminOnly, async (req, res) => {
       }
       const body = { ...req.body };
       DERIVED_ANNOUNCEMENT_KEYS.forEach((k) => { delete body[k]; });
+      DEVELOPER_ONLY_SETTING_KEYS.forEach((k) => { delete body[k]; });
       Object.assign(settings, body);
       reconcileActiveAnnouncement(settings);
     }
@@ -298,6 +317,7 @@ router.put("/app", authMiddleware, adminOnly, async (req, res) => {
       outData.automationAgent.provider.apiKeyEnc = "";
     }
     if (outData.maskSensitiveSlfAudit) delete outData.maskSensitiveSlfAudit;
+    HIDDEN_ON_READ.forEach((k) => { delete outData[k]; });
     refreshAdmin(req, "settings");
     res.json({ message: "Settings updated", data: outData });
   } catch (error) {

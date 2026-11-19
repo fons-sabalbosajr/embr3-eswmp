@@ -3,7 +3,7 @@ import {
   Table, Tag, Button, Space, Modal, Select, Typography,
   Empty, Tooltip, Badge, Card, Descriptions, Avatar,
   Divider, Row, Col, Timeline, Alert, Dropdown, Form,
-  Input, List, Spin, Tabs, Collapse,
+  Input, List, Spin, Tabs, Collapse, Checkbox,
 } from "antd";
 import {
   CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
@@ -23,6 +23,8 @@ import ResponsiveTable from "./shared/ResponsiveTable";
 import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import excludeDummy from "../../utils/excludeDummy";
 import { withSizeChanger } from "../../utils/tablePagination";
+import secureStorage from "../../utils/secureStorage";
+import { isDeveloper } from "../../utils/adminIdentity";
 
 dayjs.extend(relativeTime);
 
@@ -108,6 +110,12 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     user: null,
   });
   const [selectedSlf, setSelectedSlf] = useState([]);
+  // Developer-only: approve a newly registered account as a TRAINING / TEST
+  // account onto a test (dummy) SLF, for live demonstrations. The server enforces
+  // the role and the test-facility-only rule, and marks the account as a test one.
+  const canApproveAsTest = isDeveloper(secureStorage.getJSON("user") || {});
+  const [approveAsTest, setApproveAsTest] = useState(false);
+  const [testFacilities, setTestFacilities] = useState([]);
   const [detailModal, setDetailModal] = useState({ open: false, user: null });
   const [approving, setApproving] = useState(false);
   const [editSlfModal, setEditSlfModal] = useState({ open: false, user: null });
@@ -207,16 +215,26 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     try {
       const { data } = await api.patch(`/portal-users/${approveModal.user._id}/approve`, {
         assignedSlf: selectedSlf,
+        ...(approveAsTest ? { asTestAccount: true } : {}),
       });
-      mergePortalUser(data.data);
+      if (approveAsTest) {
+        // It is a test account now: it leaves this production list and is managed
+        // under Developer Settings → Dummy Data Configuration.
+        fetchData({ silent: true });
+      } else {
+        mergePortalUser(data.data);
+      }
       Swal.fire({
         icon: "success",
         title: "Approved",
-        text: `${approveModal.user.firstName} ${approveModal.user.lastName} has been approved.`,
+        text: approveAsTest
+          ? `${approveModal.user.firstName} ${approveModal.user.lastName} was approved as a training / test account. Its data stays out of all reports; find it under Developer Settings → Dummy Data Configuration.`
+          : `${approveModal.user.firstName} ${approveModal.user.lastName} has been approved.`,
         confirmButtonColor: "#1a3353",
       });
       setApproveModal({ open: false, user: null });
       setSelectedSlf([]);
+      setApproveAsTest(false);
     } catch (err) {
       Swal.fire(
         "Error",
@@ -1103,10 +1121,11 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         onCancel={() => {
           setApproveModal({ open: false, user: null });
           setSelectedSlf([]);
+          setApproveAsTest(false);
         }}
         onOk={handleApprove}
         confirmLoading={approving}
-        okText="Approve & Assign SLF"
+        okText={approveAsTest ? "Approve as Training Account" : "Approve & Assign SLF"}
         okButtonProps={{ style: { background: "#52c41a", borderColor: "#52c41a" } }}
       >
         {approveModal.user && (
@@ -1123,19 +1142,57 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               </Descriptions.Item>
             </Descriptions>
 
+            {canApproveAsTest && (
+              <div style={{ marginBottom: 12 }}>
+                <Checkbox
+                  checked={approveAsTest}
+                  onChange={async (e) => {
+                    const on = e.target.checked;
+                    setApproveAsTest(on);
+                    setSelectedSlf([]);
+                    if (on && !testFacilities.length) {
+                      try {
+                        const { data } = await api.get("/dummy-data/slf-facilities");
+                        setTestFacilities(Array.isArray(data) ? data : []);
+                      } catch {
+                        setTestFacilities([]);
+                      }
+                    }
+                  }}
+                >
+                  Training / test account (for a demonstration)
+                </Checkbox>
+                {approveAsTest && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 8 }}
+                    message="This account will be a test account"
+                    description="It can only be assigned a test SLF. Everything it encodes and submits is marked as test data and never appears in reports, dashboards or counts."
+                  />
+                )}
+              </div>
+            )}
             <Text strong style={{ display: "block", marginBottom: 8 }}>
-              Assign Sanitary Landfill Facility (SLF):
+              {approveAsTest ? "Assign a TEST Sanitary Landfill Facility:" : "Assign Sanitary Landfill Facility (SLF):"}
             </Text>
             <Select
               mode="multiple"
-              placeholder="Select SLF(s) to assign"
+              placeholder={approveAsTest ? "Select the test SLF" : "Select SLF(s) to assign"}
               style={{ width: "100%" }}
               value={selectedSlf}
               onChange={setSelectedSlf}
               showSearch
               optionFilterProp="label"
-              options={slfOptions}
-              notFoundContent={<Empty description="No SLF available" />}
+              options={
+                approveAsTest
+                  ? testFacilities.map((f) => ({
+                      value: f._id,
+                      label: `[TEST] ${f.lgu || f.province || "Test SLF"}${f.province ? ` · ${f.province}` : ""}`,
+                    }))
+                  : slfOptions
+              }
+              notFoundContent={<Empty description={approveAsTest ? "No test SLF found" : "No SLF available"} />}
             />
           </div>
         )}

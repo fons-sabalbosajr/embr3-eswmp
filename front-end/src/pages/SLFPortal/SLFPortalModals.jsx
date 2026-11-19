@@ -1097,7 +1097,7 @@ export default function SLFPortalModals({
                         setEditingClientKey(null);
                         setClientDraft({
                           clientName: "",
-                          clientType: "Private",
+                          clientType: "",
                           clientAddress: "",
                           region: "",
                           province: "",
@@ -1935,7 +1935,8 @@ export default function SLFPortalModals({
                                   return { ...found, key: found.key || name };
                                 return {
                                   clientName: name,
-                                  clientType: "Private",
+                                  // Not on the baseline: its type is unknown, not "Private".
+                                  clientType: "",
                                   region: "",
                                   province: "",
                                   municipality: "",
@@ -5493,9 +5494,17 @@ export default function SLFPortalModals({
               }
             />
           </Form.Item>
-          <Form.Item label="Client Type" required>
+          <Form.Item
+            label="Client Type"
+            required
+            validateStatus={clientDraft.clientType ? undefined : "warning"}
+            help={clientDraft.clientType
+              ? (clientDraft.clientType === "LGU" ? "Municipal waste: the client is a local government (province, city, municipality or barangay)." : "Private sector waste: the client is a company or private institution.")
+              : "Required. LGU = municipal waste, Private = private sector waste."}
+          >
             <Select
-              value={clientDraft.clientType}
+              placeholder="Select LGU or Private"
+              value={clientDraft.clientType || undefined}
               onChange={(v) =>
                 setClientDraft((d) => ({
                   ...d,

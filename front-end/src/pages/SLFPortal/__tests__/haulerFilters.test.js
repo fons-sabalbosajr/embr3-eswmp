@@ -159,8 +159,10 @@ test("client type shows a mixed hauler under both, and finds the client-less one
   assert.deepEqual(apply(filterByClientType, NONE), [3]);
 });
 
-test("a client with no type at all counts as Private, matching what the cell renders", () => {
-  assert.deepEqual(clientTypesOf({ privateSectorClients: [{ clientName: "A" }] }), ["Private"]);
+// Client Type is required: a client with no type is shown (and filtered) as
+// "Not set", never silently counted as Private.
+test("a client with no type at all is 'Not set', matching what the cell renders", () => {
+  assert.deepEqual(clientTypesOf({ privateSectorClients: [{ clientName: "A" }] }), ["Not set"]);
 });
 
 test("client address completeness separates the three states", () => {

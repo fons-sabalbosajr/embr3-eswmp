@@ -8,6 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Planning Unit access (view-only, until Dec 31, 2026)
+- The Planning Unit signs in on the SLF Portal login page with its own
+  **username + password + PIN**, then picks the portal account to view, like the
+  Developer Portal access. The session is **view-only**: every write is refused on
+  the server (`middleware/planningUnitGuard.js`), and it ends at once when the
+  access is switched off, passes its **Valid until** date (default end of
+  Dec 31, 2026, Manila time) or its sessions are signed out. Managed in Developer
+  Settings › Dev Portal Credential › **Planning Unit Access**. Credentials live in
+  their own collection, never on App Settings. (`routes/planningUnit.js`)
+- **Training / test account approval** (developer only): Portal Users › Approve
+  can assign a test (dummy) SLF to a newly registered account and makes the
+  account a test account, so a live demo of register → approve → submit never
+  touches production figures. `seeds/seedTrainingFacility.js` creates the empty
+  "Demonstration Training SLF".
+
+### Changed
+- **Client Type is required** for every hauler client (LGU = municipal waste,
+  Private = private sector waste). Nothing defaults to "Private" any more: the
+  Add Client form starts blank and explains each choice, a new client in a
+  hauler upload must carry a type, a client added from an upload fix starts
+  without one, and `PATCH /portal-save-baseline` refuses a typeless client
+  (`CLIENT_TYPE_REQUIRED`, naming the clients). The schema default was removed
+  and the value is normalised, so a trip copying a typeless client still saves.
+  The hauler table shows a red "Not set" tag and filter.
+- **Fixed**: a blank Client Type in a hauler upload became "Private" and then
+  overwrote an existing client's stored type (e.g. LGU) on merge.
+- **Client Data Issues / Region tiles**: a client is classified Within / Outside
+  Region 3 from its province, region, city/municipality, address, then its name,
+  not the province alone. Clients in Cavite, Batangas, Laguna, Metro Manila,
+  Pangasinan … now count as served **Outside Region 3**; a client with only a city
+  ("Angeles City", "Tanza") is placed and its province filled. Dry run on live
+  data: unclassified 260 → 33, outside 0 → 103. (`utils/clientLocation.js`)
+- **Client type from the name**: "LGU Umingan", "City of Balanga", "Brgy. Basa",
+  or a name that is itself a city/municipality ("Angeles", "San Fernando City")
+  is an LGU; a missing type with a business suffix ("Inc.", "Trading") is Private
+  Sector. A re-typed client is folded into its corrected profile, not duplicated.
+- **My Disposal Report**: tables are paginated on screen (10 per page); Print,
+  Save as PDF and Word export still carry every row.
+
+### Security
+- `GET /settings/app` (public) no longer returns the Dev Portal PIN hash, and an
+  admin `PUT /settings/app` can no longer overwrite the PIN or the masking switch.
+
 ## [1.7.0] — 2026-11-10
 
 ### Added — Profile pictures

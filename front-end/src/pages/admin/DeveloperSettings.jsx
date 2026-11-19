@@ -93,6 +93,7 @@ import SubmissionRawData from "./SubmissionRawData";
 import AutomationAgentSettings from "./AutomationAgentSettings";
 import PortalUserRules from "./PortalUserRules";
 import AnnouncementManager from "./AnnouncementManager";
+import PlanningUnitAccessCard from "./PlanningUnitAccessCard";
 import Region3LguData from "./Region3LguData";
 import VeraWorkarounds from "./VeraWorkarounds";
 
@@ -2280,6 +2281,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   </Space>
                 </Form>
               </Card>
+              <PlanningUnitAccessCard />
               </>
             ),
           },

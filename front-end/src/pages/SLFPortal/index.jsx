@@ -447,7 +447,9 @@ export default function SLFPortal() {
   const [editingClientKey, setEditingClientKey] = useState(null);
   const [clientDraft, setClientDraft] = useState({
     clientName: "",
-    clientType: "Private",
+    // No default: the operator must choose LGU (municipal waste) or Private
+    // (private sector waste). A pre-filled "Private" was saved unchosen.
+    clientType: "",
     region: "",
     province: "",
     municipality: "",
@@ -706,6 +708,9 @@ export default function SLFPortal() {
     });
 
   const isDeveloperContext = !!(portalUser?.developerContext || portalUser?.devImpersonation);
+  // Planning Unit access: the same privileged context, but VIEW-ONLY (the server
+  // refuses every write from it) and time-limited.
+  const isPlanningUnitView = !!portalUser?.planningUnit;
   const haulerVehiclesMissingCapacity = useMemo(() => {
     const issues = [];
     (haulers || []).forEach((h) => {
@@ -3764,8 +3769,16 @@ export default function SLFPortal() {
 
   // ── Hauler Client helpers ──
   const handleSaveClient = () => {
-    if (!clientDraft.clientName || !clientDraft.clientType) {
-      Swal.fire("Missing details", "Client name and type are required.", "warning");
+    if (!String(clientDraft.clientName || "").trim()) {
+      Swal.fire("Client name required", "Enter the name of the LGU or company.", "warning");
+      return;
+    }
+    if (!["LGU", "Private"].includes(clientDraft.clientType)) {
+      Swal.fire(
+        "Client Type required",
+        "Choose LGU if the client is a local government (its waste is municipal waste), or Private if it is a company (private sector waste).",
+        "warning",
+      );
       return;
     }
     // Province is required so the client can be classified within/outside Region 3.
@@ -5703,6 +5716,34 @@ export default function SLFPortal() {
       }
       setTrucks((prev) => [...prev, ...newTrucks]);
     } else {
+      // Client Type is required. A blank cell still means "keep what is stored"
+      // for a client already on the hauler, but a NEW client must say LGU or
+      // Private: there is nothing stored to keep.
+      const storedClients = new Map(
+        (haulers || []).map((h) => [
+          cleanUploadText(h.haulerName).toLowerCase(),
+          new Set((h.privateSectorClients || []).map((c) => cleanUploadText(typeof c === "string" ? c : c?.clientName).toLowerCase())),
+        ]),
+      );
+      const typelessNew = [];
+      uploadPreviewRows.forEach((d) => {
+        const known = storedClients.get(cleanUploadText(d.haulerName).toLowerCase()) || new Set();
+        (d.privateSectorClients || []).forEach((client) => {
+          const name = cleanUploadText(typeof client === "string" ? client : client?.clientName);
+          const type = typeof client === "string" ? d.clientType : client?.clientType || d.clientType;
+          if (name && !cleanUploadText(type) && !known.has(name.toLowerCase())) {
+            typelessNew.push(`${name} (${d.haulerName}, row ${d._rowNumber ?? "?"})`);
+          }
+        });
+      });
+      if (typelessNew.length) {
+        Swal.fire({
+          icon: "warning",
+          title: "Client Type required",
+          html: `Fill the <b>Client Type</b> column (LGU or Private) for these new client(s), then upload the file again:<br/><br/>${typelessNew.slice(0, 12).map((t) => `• ${t}`).join("<br/>")}${typelessNew.length > 12 ? `<br/>… and ${typelessNew.length - 12} more` : ""}`,
+        });
+        return;
+      }
       const newHaulers = uploadPreviewRows.map((d) => ({
         key: d.key,
         haulerName: d.haulerName || "",
@@ -5728,7 +5769,9 @@ export default function SLFPortal() {
             ? {
                 key: `${d.key}-client-${index}`,
                 clientName: client,
-                clientType: d.clientType || "Private",
+                // Blank stays blank: the merge then keeps the stored type of an
+                // existing client instead of overwriting it with "Private".
+                clientType: d.clientType || "",
                 clientAddress: d.clientAddress || "",
                 regionName: d.clientRegion || "",
                 provinceName: d.clientProvince || "",
@@ -5736,7 +5779,7 @@ export default function SLFPortal() {
               }
             : {
                 ...client,
-                clientType: client.clientType || d.clientType || "Private",
+                clientType: client.clientType || d.clientType || "",
                 clientAddress: client.clientAddress || d.clientAddress || "",
                 regionName: client.regionName || d.clientRegion || "",
                 provinceName: client.provinceName || d.clientProvince || "",
@@ -5906,15 +5949,14 @@ export default function SLFPortal() {
             return { ...hauler, privateSectorClients: clients };
           }
         }
-        // Added with the type carried over from the closest existing client where
-        // there is one, since a new client with no type is itself an incomplete
-        // record. Province and municipality are deliberately left blank — they
-        // are not guessable, and the completeness panel will ask for them.
-        const donor = clients.find((client) => cleanUploadText(client.clientType));
+        // Added WITHOUT a type, province or municipality: none of them is
+        // guessable (copying another client's type misfiled municipal waste as
+        // private, or the reverse). The completeness panel asks for them, and the
+        // baseline save refuses the client until its Client Type is chosen.
         clients.push({
           key: `client-fix-${Date.now()}`,
           clientName: target,
-          clientType: donor?.clientType || "Private",
+          clientType: "",
         });
         return { ...hauler, privateSectorClients: clients };
       });
@@ -9472,7 +9514,9 @@ export default function SLFPortal() {
             <div
               className="slf-dev-banner"
               style={{
-                background: "linear-gradient(90deg, #531dab 0%, #722ed1 100%)",
+                background: isPlanningUnitView
+                  ? "linear-gradient(90deg, #0e1e35 0%, #1a3353 100%)"
+                  : "linear-gradient(90deg, #531dab 0%, #722ed1 100%)",
                 color: "#fff",
                 padding: "10px 16px",
                 borderRadius: 8,
@@ -9485,7 +9529,9 @@ export default function SLFPortal() {
               }}
             >
               <EyeOutlined />
-              <Text strong style={{ color: "#fff" }}>Developer View</Text>
+              <Text strong style={{ color: "#fff" }}>
+                {isPlanningUnitView ? "Planning Unit View" : "Developer View"}
+              </Text>
               {/* The dot separators only make sense while this reads as one line.
                   Below md the banner wraps into stacked rows and they are hidden
                   (see .slf-dev-banner), where they would otherwise dangle at the
@@ -9509,13 +9555,26 @@ export default function SLFPortal() {
                   "READ-ONLY" tag over a session that can submit, save a baseline
                   and delete a draft is worse than no tag: it tells the developer
                   their next click is safe when it is not. */}
-              <Tag
-                className="slf-dev-banner-tag"
-                color="volcano"
-                style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}
-              >
-                FULL CONTROL — WRITES ARE LIVE
-              </Tag>
+              {isPlanningUnitView ? (
+                <Tag
+                  className="slf-dev-banner-tag"
+                  color="gold"
+                  style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}
+                >
+                  VIEW-ONLY
+                  {portalUser?.planningUnitValidUntil
+                    ? ` · access until ${dayjs(portalUser.planningUnitValidUntil).format("MMM D, YYYY")}`
+                    : ""}
+                </Tag>
+              ) : (
+                <Tag
+                  className="slf-dev-banner-tag"
+                  color="volcano"
+                  style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}
+                >
+                  FULL CONTROL — WRITES ARE LIVE
+                </Tag>
+              )}
             </div>
           )}
           {!isOnline && (

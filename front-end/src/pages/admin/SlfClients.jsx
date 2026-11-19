@@ -47,7 +47,7 @@ const FLAG_LABELS = {
   invalid_baseline: "Invalid baseline",
   unmigrated_baseline_client: "Not yet migrated",
   ambiguous_duplicate: "Listed under two types",
-  region_unclassified: "No province (Region 3 unknown)",
+  region_unclassified: "No location (Region 3 unknown)",
   validation_mismatch: "Totals mismatch",
 };
 // Tag colour by how much a person is needed: red needs a decision, orange is

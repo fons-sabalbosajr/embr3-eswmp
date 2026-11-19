@@ -105,10 +105,8 @@ test("Cell Waste Placement uses the portal's placement rule", () => {
 });
 
 test("the developer portal picker names facilities as Province - SLF Name", () => {
-  const src = fs.readFileSync(path.join(__dirname, "..", "routes", "devPortal.js"), "utf8");
-  const start = src.indexOf("const facilityLabel = (f) =>");
-  const body = src.slice(start, src.indexOf("};", start) + 2);
-  const facilityLabel = new Function(`${body}; return facilityLabel;`)();
+  // Shared by the Developer Portal and Planning Unit pickers (utils/portalUserPicker).
+  const { facilityLabel } = require("../utils/portalUserPicker");
   assert.equal(
     facilityLabel({ lgu: "Aurora - LGU Baler Sanitary Landfill Facility", province: "Aurora" }),
     "Aurora - LGU Baler Sanitary Landfill Facility",

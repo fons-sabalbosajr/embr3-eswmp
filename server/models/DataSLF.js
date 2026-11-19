@@ -6,7 +6,17 @@ const { isHazardousWasteType } = require("../utils/wasteCategories");
 const clientSchema = new mongoose.Schema(
   {
     clientName: { type: String, trim: true },
-    clientType: { type: String, enum: ["Private", "LGU"], default: "Private" },
+    // No default: an unset type must stay visibly unset, not become "Private".
+    // LGU = municipal waste, Private = private sector waste. Required on the
+    // baseline save (routes/dataSLF.js → findClientsWithoutType).
+    // The setter maps "lgu"/"private" in any case to the enum and anything else
+    // (blank, a typo) to unset, so a trip that copies a typeless client is saved
+    // with the type missing instead of failing validation.
+    clientType: {
+      type: String,
+      enum: ["Private", "LGU"],
+      set: (v) => ({ lgu: "LGU", private: "Private" })[String(v ?? "").trim().toLowerCase()],
+    },
     // Free-text client address. The structured region/province/municipality fields
     // below are PSGC-coded and cannot hold the "Client Address" column the portal's
     // hauler bulk upload accepts (and the hauler export reads back), so an uploaded

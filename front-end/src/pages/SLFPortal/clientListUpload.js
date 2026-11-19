@@ -271,7 +271,7 @@ const CLIENT_FIELDS = CLIENT_UPLOAD_COLUMNS.map((column) => column.field);
  */
 export const mergeClientListUpload = (existingClients = [], rows = []) => {
   const merged = (existingClients || []).map((client) =>
-    typeof client === "string" ? { clientName: client, clientType: "Private" } : { ...client },
+    typeof client === "string" ? { clientName: client, clientType: "" } : { ...client },
   );
   const indexByName = new Map();
   merged.forEach((client, index) => {
@@ -300,9 +300,10 @@ export const mergeClientListUpload = (existingClients = [], rows = []) => {
       merged[existingIndex] = { ...merged[existingIndex], ...rest };
       return;
     }
+    // Rows are validated first ("Client Type is required"), so `patch` carries
+    // the chosen type; no default is supplied.
     const created = {
       key: `client-upload-${Date.now()}-${rowIndex}`,
-      clientType: "Private",
       ...patch,
     };
     indexByName.set(identity, merged.length);
@@ -331,7 +332,7 @@ export const buildClientExportRows = (hauler = {}) => {
     .filter((client) => String(client.clientName || "").trim())
     .map((client) => ({
       clientName: String(client.clientName || "").trim(),
-      clientType: client.clientType || "Private",
+      clientType: client.clientType || "",
       clientAddress: client.clientAddress || client.address || "",
       // The *Name fields first: a PSGC code is an identifier, not a place, and
       // writing one into the sheet would upload back as a nonsense province.

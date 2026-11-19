@@ -174,6 +174,7 @@ export function makeHaulerColumns({
         filters: [
           { text: "LGU", value: "LGU" },
           { text: "Private", value: "Private" },
+          { text: "Type not set", value: "Not set" },
           { text: "No clients encoded", value: NONE },
         ],
         onFilter: filterByClientType,
@@ -181,7 +182,7 @@ export function makeHaulerColumns({
           const types = clientTypesOf(h);
           return types.length
             ? types.map((type) => (
-                <Tag key={type} color={type === "LGU" ? "blue" : "green"}>
+                <Tag key={type} color={type === "LGU" ? "blue" : type === "Private" ? "green" : "red"}>
                   {type}
                 </Tag>
               ))

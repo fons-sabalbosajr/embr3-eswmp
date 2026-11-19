@@ -10,7 +10,8 @@ const { normalizeName } = require("../utils/region3");
 const { normMuni } = require("../utils/lguMatch");
 const { refreshAdmin } = require("../utils/socketEmit");
 const { authMiddleware, adminOnly, requirePermission } = require("../middleware/auth");
-const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
+const { getRegion3ProvinceSet } = require("../utils/region3");
+const { buildLocationIndex, inferClientLocation } = require("../utils/clientLocation");
 
 const router = express.Router();
 
@@ -69,11 +70,32 @@ function pickBody(body = {}) {
   return out;
 }
 
-// Classify a client's region from its saved province (Region 3 master data with
-// centralized fallback). Recomputed whenever province changes.
-async function computeRegionClass({ province, region }) {
-  const set = await getRegion3ProvinceSet();
-  return classifyRegion({ province, region }, set);
+// Classify a client Within / Outside Region 3 from every location field it has
+// (province, region, city/municipality, address, then the name), not the province
+// alone: a client saved as "Tanza" + no province is still Outside R3 (Cavite).
+// Recomputed whenever any of those change. Returns the full inference so the
+// caller can fill a province the evidence established.
+async function inferRecordLocation(record) {
+  const Region3Lgu = require("../models/Region3Lgu");
+  const [set, masters] = await Promise.all([
+    getRegion3ProvinceSet(),
+    Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
+      .select("name normalizedName province normalizedProvince aliases lguType").lean()
+      .catch(() => []),
+  ]);
+  return inferClientLocation(
+    {
+      province: record.province, region: record.region, municipalityCity: record.municipalityCity,
+      address: record.address || record.location, name: record.name, isLgu: record.type === "LGU",
+    },
+    buildLocationIndex(set, masters),
+  );
+}
+async function applyRegionClass(record) {
+  const loc = await inferRecordLocation(record);
+  record.regionClass = loc.regionClass;
+  if (!record.province && loc.province) record.province = loc.province;
+  return loc;
 }
 
 // Keep a canonical record's single portalUserRelationship in sync with the
@@ -1270,7 +1292,7 @@ router.post("/", requirePermission(PERM, "edit"), async (req, res) => {
     if (dup) return res.status(409).json({ message: "A client with this name and type already exists" });
 
     const record = new SlfClient({ ...body, createdBy: actor(req), updatedBy: actor(req) });
-    record.regionClass = await computeRegionClass({ province: body.province, region: body.region });
+    await applyRegionClass(record);
     syncSingleRelationship(record);
     await record.save();
     res.status(201).json(record);
@@ -1298,10 +1320,11 @@ router.put("/:id", requirePermission(PERM, "edit"), async (req, res) => {
     const dup = await findDuplicate({ name: nextName, type: nextType, excludeId: record._id });
     if (dup) return res.status(409).json({ message: "A client with this name and type already exists" });
 
-    const provinceChanged = body.province !== undefined && body.province !== record.province;
+    const locationChanged = ["province", "region", "municipalityCity", "address", "location", "name", "type"]
+      .some((k) => body[k] !== undefined && body[k] !== record[k]);
     Object.assign(record, body);
-    if (provinceChanged || body.region !== undefined) {
-      record.regionClass = await computeRegionClass({ province: record.province, region: record.region });
+    if (locationChanged || record.regionClass === "unclassified") {
+      await applyRegionClass(record);
     }
     syncSingleRelationship(record);
     record.updatedBy = actor(req);

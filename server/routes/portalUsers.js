@@ -237,8 +237,21 @@ router.patch("/:id/approve", async (req, res) => {
     if (slfs.length !== slfIds.length) {
       return res.status(404).json({ message: "One or more SLF facilities not found" });
     }
-    // Real portal accounts must never be assigned dummy/test facilities.
-    if (slfs.some((s) => s.isDummy)) {
+    // Training / test account (developer only): a newly registered account approved
+    // straight onto a TEST facility, for a live demonstration of registration →
+    // approval → submission. The account becomes a test account itself (isDummy),
+    // so the invariant "test accounts ↔ test facilities only" holds in both
+    // directions and nothing it submits can reach production figures.
+    const asTestAccount = req.body?.asTestAccount === true;
+    if (asTestAccount) {
+      if (req.user?.role !== "developer") {
+        return res.status(403).json({ message: "Only a developer can approve a training / test account." });
+      }
+      if (!slfs.every((s) => s.isDummy)) {
+        return res.status(400).json({ message: "A training / test account can only be assigned test (dummy) SLF facilities." });
+      }
+    } else if (slfs.some((s) => s.isDummy)) {
+      // Real portal accounts must never be assigned dummy/test facilities.
       return res.status(400).json({
         message: "Dummy/test SLF facilities cannot be assigned to real portal accounts. Manage dummy accounts in Developer Settings > Dummy Data Config.",
       });
@@ -256,6 +269,7 @@ router.patch("/:id/approve", async (req, res) => {
         assignedSlfName: slfDisplayNames,
         approvedBy: req.user.id,
         approvedAt: new Date(),
+        ...(asTestAccount ? { isDummy: true } : {}),
       },
       { returnDocument: "after", runValidators: true }
     ).select("-password");
@@ -267,7 +281,7 @@ router.patch("/:id/approve", async (req, res) => {
 
     res.json({ message: "User approved successfully", data: user });
     writeLog("info", "portal.approve", {
-      message: `Portal user approved: ${user.email}, assigned SLF: ${slfDisplayNames.join(", ")}`,
+      message: `Portal user approved${asTestAccount ? " as a TRAINING / TEST account" : ""}: ${user.email}, assigned SLF: ${slfDisplayNames.join(", ")}`,
       user: req.user.id,
       ip: req.ip,
     });

@@ -97,8 +97,12 @@ function Stat({ label, value, hint }) {
   );
 }
 
+// The rank is stored on the row, not taken from the render index: with pagination
+// the index restarts at 1 on every page, so page 2 would rank its first hauler #1.
+const withRank = (rows) => (rows || []).map((r, i) => ({ ...r, __rank: i + 1 }));
+
 const rankColumns = (unitLabel) => [
-  { title: "#", key: "i", width: 40, render: (_, __, i) => i + 1 },
+  { title: "#", dataIndex: "__rank", key: "rank", width: 40 },
   { title: "Name", dataIndex: "name", key: "name", ellipsis: true },
   { title: "Trips", dataIndex: "trips", key: "trips", width: 70, align: "right" },
   {
@@ -117,6 +121,22 @@ export default function PortalReportModal({ open, onClose }) {
   const [error, setError] = useState("");
   const [range, setRange] = useState(null);
   const printRef = useRef(null);
+  // Tables are paginated ON SCREEN only. Print and Word export build their own
+  // document from the full report data (portalReportDocument.js), so they always
+  // carry every row. The one path that prints this modal's DOM, the popup-blocked
+  // fallback below, switches pagination off first so nothing is left on page 2.
+  const [printAll, setPrintAll] = useState(false);
+  const pager = (rows) =>
+    printAll
+      ? false
+      : {
+          pageSize: 10,
+          size: "small",
+          hideOnSinglePage: true,
+          showSizeChanger: (rows?.length || 0) > 10,
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (total, [from, to]) => `${from}–${to} of ${total}`,
+        };
 
   const [refreshing, setRefreshing] = useState(false);
   const [liveUpdatedAt, setLiveUpdatedAt] = useState(null);
@@ -232,7 +252,14 @@ export default function PortalReportModal({ open, onClose }) {
     }
     if (!win) {
       ensurePrintStyles();
-      window.print();
+      // Show every row before printing the modal itself, then restore paging.
+      setPrintAll(true);
+      const restore = () => {
+        setPrintAll(false);
+        window.removeEventListener("afterprint", restore);
+      };
+      window.addEventListener("afterprint", restore);
+      setTimeout(() => window.print(), 150);
       return;
     }
     win.document.open();
@@ -414,7 +441,7 @@ export default function PortalReportModal({ open, onClose }) {
           <Section title="Submission Status">
             <Table
               size="small"
-              pagination={false}
+              pagination={pager(statusRows)}
               dataSource={statusRows}
               columns={[
                 { title: "Status", dataIndex: "status", key: "status", render: (v) => <Tag>{String(v).replace(/_/g, " ")}</Tag> },
@@ -436,7 +463,7 @@ export default function PortalReportModal({ open, onClose }) {
           <Section title="Monthly Disposal" breakBefore>
             <Table
               size="small"
-              pagination={false}
+              pagination={pager(report.monthly)}
               rowKey="month"
               dataSource={report.monthly || []}
               columns={[
@@ -454,7 +481,7 @@ export default function PortalReportModal({ open, onClose }) {
           <Section title="Disposal Cells" subtitle="Capacity and remaining space at the facility as of this report.">
             <Table
               size="small"
-              pagination={false}
+              pagination={pager(report.cells)}
               rowKey="name"
               dataSource={report.cells || []}
               columns={[
@@ -476,17 +503,17 @@ export default function PortalReportModal({ open, onClose }) {
           </Section>
 
           <Section title="Waste by Type" breakBefore>
-            <Table size="small" pagination={false} rowKey="name" dataSource={report.byWasteType || []} columns={rankColumns(unitLabel)}
+            <Table size="small" pagination={pager(report.byWasteType)} rowKey="name" dataSource={withRank(report.byWasteType)} columns={rankColumns(unitLabel)}
               locale={{ emptyText: <Empty description="No data" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>
 
           <Section title="Disposal by Hauler">
-            <Table size="small" pagination={false} rowKey="name" dataSource={report.byHauler || []} columns={rankColumns(unitLabel)}
+            <Table size="small" pagination={pager(report.byHauler)} rowKey="name" dataSource={withRank(report.byHauler)} columns={rankColumns(unitLabel)}
               locale={{ emptyText: <Empty description="No haulers recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>
 
           <Section title="Disposal by Client">
-            <Table size="small" pagination={false} rowKey="name" dataSource={report.byClient || []} columns={rankColumns(unitLabel)}
+            <Table size="small" pagination={pager(report.byClient)} rowKey="name" dataSource={withRank(report.byClient)} columns={rankColumns(unitLabel)}
               locale={{ emptyText: <Empty description="No clients recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>
 
@@ -494,7 +521,7 @@ export default function PortalReportModal({ open, onClose }) {
             title="Disposal by Cell"
             subtitle="Waste from this account's submissions in the reporting period, by the cell it was placed in. Disposal Cells above is the facility's full standing (baseline, all submissions and EMB adjustments), so the two are not expected to match."
           >
-            <Table size="small" pagination={false} rowKey="name" dataSource={report.byCell || []} columns={rankColumns(unitLabel)}
+            <Table size="small" pagination={pager(report.byCell)} rowKey="name" dataSource={withRank(report.byCell)} columns={rankColumns(unitLabel)}
               locale={{ emptyText: <Empty description="No placements recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} />
           </Section>
 

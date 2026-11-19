@@ -7,6 +7,7 @@ const UserPortal = require("../models/UserPortal");
 const { authMiddleware, developerOnly } = require("../middleware/auth");
 const { sendDevPortalPinEmail } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
+const { listPickablePortalUsers } = require("../utils/portalUserPicker");
 
 const router = express.Router();
 
@@ -211,48 +212,9 @@ router.get("/portal-users", async (req, res) => {
   try {
     const dev = await requireDevStage(req, res, "devImpersonate");
     if (!dev) return;
-    // Only ACTUAL, active portal users — exclude dummy/seed/test accounts,
-    // blocked/disabled accounts, and any not-yet-approved (pending/rejected)
-    // accounts. Enforced here (backend) so direct API access can't bypass it.
-    const users = await UserPortal.find({
-      status: "approved",
-      isDummy: { $ne: true },
-      blocked: { $ne: true },
-    })
-      .select("firstName lastName email companyName assignedSlf assignedSlfName status isDummy")
-      // The picker identifies an account by its landfill + province, and province
-      // lives on the facility, not on the portal user — so it is resolved here
-      // rather than making the client fetch facilities just to draw a label.
-      .populate("assignedSlf", "province lgu")
-      .lean();
-
-    // "Province - SLF Name", from the FACILITY record — the name the SLF Data
-    // Table shows. The account's own `assignedSlfName` is a copy taken when the
-    // account was assigned and drifts when a facility is renamed; most facility
-    // names already start with their province, the rest get it prefixed.
-    const facilityLabel = (f) => {
-      const name = String(f?.lgu || "").trim();
-      const province = String(f?.province || "").trim();
-      if (!name) return province;
-      if (!province || name.toLowerCase().startsWith(`${province.toLowerCase()} -`)) return name;
-      return `${province} - ${name}`;
-    };
-    const withProvince = users.map((u) => {
-      const facilities = Array.isArray(u.assignedSlf) ? u.assignedSlf : [];
-      const provinces = [
-        ...new Set(facilities.map((f) => f?.province).filter(Boolean)),
-      ];
-      const slfLabels = [...new Set(facilities.map(facilityLabel).filter(Boolean))];
-      return { ...u, province: provinces.join(", "), slfLabels };
-    });
-
-    // Sort by the facility label, then account name — clearer than createdAt.
-    const label = (u) =>
-      u.slfLabels?.[0] ||
-      (Array.isArray(u.assignedSlfName) ? u.assignedSlfName[0] : u.assignedSlfName) ||
-      u.companyName || `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || "";
-    withProvince.sort((a, b) => label(a).localeCompare(label(b)));
-    res.json(withProvince);
+    // Shared with the Planning Unit picker (utils/portalUserPicker): approved,
+    // real, unblocked accounts only, labelled "Province - SLF Name".
+    res.json(await listPickablePortalUsers());
   } catch (e) {
     res.status(500).json({ message: "Server error", error: e.message });
   }

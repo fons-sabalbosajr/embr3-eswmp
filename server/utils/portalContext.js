@@ -129,6 +129,34 @@ async function resolvePortalContext(req, { targetEmail, targetPortalUserId } = {
     return { email: target.email, portalUser: target, isDeveloper: true, impersonating: true, actor };
   }
 
+  // ── Planning Unit: VIEW-ONLY context on the account chosen at sign-in ─────
+  // routes/planningUnit.js issues this token; middleware/planningUnitGuard.js has
+  // already refused it if the access is off, expired or revoked, and refuses every
+  // write it makes. It may name another account explicitly, like a developer, so
+  // the viewer can move between facilities without signing in again.
+  if (decoded.role === "planning_unit") {
+    const boundId = String(decoded.portalContextUserId || "").trim();
+    let target = null;
+    if (requestedId) target = await UserPortal.findById(requestedId).select(PORTAL_USER_SAFE_FIELDS);
+    else if (requestedEmail) target = await UserPortal.findOne({ email: requestedEmail }).select(PORTAL_USER_SAFE_FIELDS);
+    else if (boundId) target = await UserPortal.findById(boundId).select(PORTAL_USER_SAFE_FIELDS);
+    else throw new PortalContextError("Planning Unit view requires a selected portal account.", 400);
+    if (!target) throw new PortalContextError("Target portal user not found", 404);
+    // Same pool the picker offers: never a pending, blocked or test account.
+    if (target.status !== "approved" || target.isDummy || target.blocked) {
+      throw new PortalContextError("That portal account is not available to the Planning Unit view.", 403);
+    }
+    return {
+      email: target.email,
+      portalUser: target,
+      isDeveloper: false,
+      isPlanningUnit: true,
+      impersonating: true,
+      readOnly: true,
+      actor: decoded.email || "planning-unit",
+    };
+  }
+
   // ── Anyone else (incl. ordinary admins) ───────────────────────────────────
   throw new PortalContextError("Portal access requires a portal account or developer role.", 403);
 }
@@ -152,6 +180,14 @@ async function resolvePortalContext(req, { targetEmail, targetPortalUserId } = {
 // Call this at the top of any portal route that WRITES.
 function assertPortalWriteAllowed(ctx, req) {
   if (!ctx.impersonating) return;
+  // A read-only context (Planning Unit) never writes. The /api guard already
+  // refuses its non-GET requests; this is the second lock on the same door.
+  if (ctx.readOnly) {
+    throw new PortalContextError(
+      "Planning Unit access is view-only. Changes can only be made by the facility's own SLF Portal account.",
+      403,
+    );
+  }
   writeLog("warn", "portal.context.developer-write", {
     message: `Developer wrote to ${ctx.email}'s portal data`,
     user: ctx.actor,

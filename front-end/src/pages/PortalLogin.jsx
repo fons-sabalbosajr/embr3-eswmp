@@ -66,6 +66,12 @@ export default function PortalLogin() {
   const [devPortalUsers, setDevPortalUsers] = useState([]);
   const [devSelectedUser, setDevSelectedUser] = useState(null);
   const [devLoading, setDevLoading] = useState(false);
+  // The PIN → account picker modal serves two privileged sign-ins: Developer
+  // Portal access ("developer", full control) and Planning Unit access
+  // ("planning", view-only, time-limited). Same steps, different endpoints.
+  const [accessMode, setAccessMode] = useState("developer");
+  const isPlanning = accessMode === "planning";
+  const accessApi = isPlanning ? "/planning-unit" : "/dev-portal";
   const [loginForm] = Form.useForm();
   const [devForm] = Form.useForm();
   const navigate = useNavigate();
@@ -175,6 +181,9 @@ export default function PortalLogin() {
       if (navigator.onLine && (status === 401 || status === 404)) {
         const handledAsDeveloper = await tryDeveloperLogin(values);
         if (handledAsDeveloper) return;
+        // Planning Unit access signs in through the same fields too.
+        const handledAsPlanningUnit = await tryPlanningUnitLogin(values);
+        if (handledAsPlanningUnit) return;
       }
       // Offer VERA alongside the error dialog: the modal states WHAT went wrong,
       // the hint offers help working out what to do about it.
@@ -198,9 +207,35 @@ export default function PortalLogin() {
   // Returns true when the attempt was handled as a developer (PIN prompt shown
   // or a developer-specific error surfaced), false when it's not a developer so
   // the caller falls back to the standard portal login error.
+  // Planning Unit credentials (a username, not an email) entered in the same
+  // fields. True when handled: PIN prompt shown, or a Planning-Unit-specific
+  // refusal (turned off / expired / locked) surfaced instead of "Login Failed".
+  const tryPlanningUnitLogin = async ({ email, password }) => {
+    try {
+      const { data } = await api.post("/planning-unit/login", { username: email, password });
+      setAccessMode("planning");
+      setDevStageToken(data.stageToken);
+      setDevStage("pin");
+      setDevModalOpen(true);
+      return true;
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 403 || status === 429) {
+        showError({
+          type: "error",
+          title: "Planning Unit Access",
+          message: err.response?.data?.message || "Planning Unit access is unavailable.",
+        });
+        return true;
+      }
+      return false;
+    }
+  };
+
   const tryDeveloperLogin = async ({ email, password }) => {
     try {
       const { data } = await api.post("/dev-portal/override", { email, password });
+      setAccessMode("developer");
       setDevStageToken(data.stageToken);
       setDevStage("pin");
       setDevModalOpen(true);
@@ -252,6 +287,7 @@ export default function PortalLogin() {
     setDevSessionToken("");
     setDevPortalUsers([]);
     setDevSelectedUser(null);
+    setAccessMode("developer");
     devForm.resetFields();
   };
 
@@ -260,12 +296,12 @@ export default function PortalLogin() {
       const v = await devForm.validateFields(["pin"]);
       setDevLoading(true);
       const { data } = await api.post(
-        "/dev-portal/verify-pin",
+        `${accessApi}/verify-pin`,
         { pin: v.pin },
         { headers: { Authorization: `Bearer ${devStageToken}` } },
       );
       setDevSessionToken(data.sessionToken);
-      const { data: users } = await api.get("/dev-portal/portal-users", {
+      const { data: users } = await api.get(`${accessApi}/portal-users`, {
         headers: { Authorization: `Bearer ${data.sessionToken}` },
       });
       setDevPortalUsers(Array.isArray(users) ? users : []);
@@ -283,11 +319,26 @@ export default function PortalLogin() {
     try {
       setDevLoading(true);
       const { data } = await api.post(
-        "/dev-portal/impersonate",
+        isPlanning ? "/planning-unit/open" : "/dev-portal/impersonate",
         { portalUserId: devSelectedUser },
         { headers: { Authorization: `Bearer ${devSessionToken}` } },
       );
       secureStorage.set("portal_token", data.token);
+      if (isPlanning) {
+        // View-only Planning Unit session. The server refuses every write from
+        // this token; these flags drive the banner and the portal's notices.
+        secureStorage.setJSON("portal_user", {
+          ...data.user,
+          developerContext: true,
+          planningUnit: true,
+          readOnly: true,
+          developerEmail: data.viewer || "Planning Unit",
+          planningUnitValidUntil: data.validUntil || null,
+        });
+        resetDevFlow();
+        navigate("/slfportal");
+        return;
+      }
       // The token issued here is the DEVELOPER's, carrying an explicit portal
       // context — it is not the portal user's own token. The session is read-only
       // and the backend enforces that; these flags only drive the UI badge and
@@ -618,7 +669,7 @@ export default function PortalLogin() {
         title={
           <Space>
             <SafetyCertificateOutlined />
-            Developer Portal Access (Debug)
+            {isPlanning ? "Planning Unit Access (View-only)" : "Developer Portal Access (Debug)"}
           </Space>
         }
         open={devModalOpen}
@@ -631,8 +682,8 @@ export default function PortalLogin() {
               ]
             : [
                 <Button key="cancel" onClick={resetDevFlow}>Cancel</Button>,
-                <Button key="start" type="primary" danger loading={devLoading} disabled={!devSelectedUser} onClick={startImpersonation}>
-                  Start Debug Session
+                <Button key="start" type="primary" danger={!isPlanning} loading={devLoading} disabled={!devSelectedUser} onClick={startImpersonation}>
+                  {isPlanning ? "Open View-only" : "Start Debug Session"}
                 </Button>,
               ]
         }
@@ -660,10 +711,12 @@ export default function PortalLogin() {
                 }}
               >
                 <Text strong style={{ display: "block", color: "#ad4e00", marginBottom: 4 }}>
-                  Enter Dev Portal PIN
+                  {isPlanning ? "Enter Planning Unit PIN" : "Enter Dev Portal PIN"}
                 </Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Use the 6-digit PIN configured in Developer &gt; App Settings &gt; Dev Portal Credential.
+                  {isPlanning
+                    ? "Use the 6-digit PIN issued to the Planning Unit by the EMB Region III system administrator. This access is view-only."
+                    : "Use the 6-digit PIN configured in Developer > App Settings > Dev Portal Credential."}
                 </Text>
               </div>
               <Form.Item
@@ -695,7 +748,7 @@ export default function PortalLogin() {
             </>
           )}
           {devStage === "select" && (
-            <Form.Item label="Select a portal user to debug">
+            <Form.Item label={isPlanning ? "Select the SLF portal account to view" : "Select a portal user to debug"}>
               <Select
                 showSearch
                 placeholder="Choose a portal account"

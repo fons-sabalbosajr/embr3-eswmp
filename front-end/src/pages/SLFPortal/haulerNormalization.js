@@ -24,7 +24,8 @@ export const normalizeClientRecord = (client, index = 0) => {
     return {
       key: index,
       clientName: client,
-      clientType: "Private",
+      // Unknown, not "Private": Client Type is required and must be chosen.
+      clientType: "",
       region: "",
       province: "",
       municipality: "",
@@ -38,7 +39,9 @@ export const cleanClientForSubmit = (client, index = 0) => {
   const { key, ...rest } = normalized;
   return {
     clientName: rest.clientName || "",
-    clientType: rest.clientType || "Private",
+    // Sent as chosen. A blank is refused by the baseline save (CLIENT_TYPE_REQUIRED)
+    // rather than silently stored as "Private".
+    clientType: rest.clientType || "",
     // Kept in the submit payload — this whitelist used to strip it, so a Client
     // Address entered or bulk-uploaded never reached the server.
     clientAddress: rest.clientAddress || rest.address || "",
@@ -241,7 +244,7 @@ export const buildHaulerExportRows = (hauler = {}, fallbackUnit = "m³") => {
     const clientName = String(client.clientName || "").trim();
     if (!clientName) return;
     const group = {
-      clientType: client.clientType || "Private",
+      clientType: client.clientType || "",
       clientAddress: client.clientAddress || client.address || "",
       // The *Name fields first: a PSGC code is an identifier, not a place, and
       // printing one into the sheet would upload back as a nonsense province.
