@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-11-23
+
+### Fixed
+- **Submission History › Company / Type**: the type tag and company name sat in
+  a row that could not shrink, so a long name (50–66 characters in live data)
+  ran out of its column into the next one. The cell is now two contained lines:
+  the name (bold, up to 2 lines, full name on hover), then the type tag and the
+  address (one line, clipped, full address on hover).
+
+### Added
+- `seeds/seedPortalUpdatesNov2026b.js` — the portal announcement for the 1.9
+  release (24 Nov – 8 Dec 2026). Previews by default; `--apply` publishes it.
+  No email is sent.
+
 ## [1.9.0] — 2026-11-23
 
 ### Changed — Waste in Cell formula (occupancy calculation v6)
