@@ -38,6 +38,26 @@ export const fmtNumber = (v) =>
 const DASH = "—";
 
 /**
+ * One line per permit EMB has on file — "DP-R03-26-00891 · Domestic · Renewal
+ * (valid to Jan 25, 2027)" — from the permit LIST, falling back to the legacy
+ * single field. Shared by the on-screen report and both exports.
+ */
+export function permitLines(list, legacyNo, legacyValidity, formatDate) {
+  const dt = formatDate || ((v) => (v ? String(v) : DASH));
+  const rows = Array.isArray(list) && list.length
+    ? list
+    : legacyNo || legacyValidity
+      ? [{ permitNo: legacyNo, validity: legacyValidity }]
+      : [];
+  return rows.map((p) => {
+    const parts = [p.permitNo || DASH, p.permitType, p.status].filter(Boolean).join(" · ");
+    if (!p.validity) return parts;
+    const expired = new Date(p.validity) < new Date(new Date().toDateString());
+    return `${parts} (${expired ? "expired" : "valid to"} ${dt(p.validity)})`;
+  });
+}
+
+/**
  * @param {(v:any, fallback?:string)=>string} formatDate injected so the document
  *   uses the SAME date formatting the screen does, without importing dayjs here.
  */
@@ -124,6 +144,56 @@ export function buildReportDocument(report, { unitLabel = "m³", statusRows = []
     ),
   );
 
+  // ── Daily disposal ───────────────────────────────────────────────────────
+  // One row per day, then that day's submissions indented beneath it, so the
+  // printed copy carries the same per-day breakdown the screen does (the screen
+  // folds the submissions into an expandable row; paper cannot).
+  const daily = Array.isArray(report.daily) ? report.daily : [];
+  if (daily.length) {
+    const dayRows = [];
+    const sum = { submissions: 0, trucks: 0, residualTons: 0, hazardousTons: 0, tons: 0 };
+    daily.forEach((d) => {
+      Object.keys(sum).forEach((k) => { sum[k] += Number(d[k] || 0); });
+      dayRows.push([
+        `<strong>${esc(d.date === "undated" ? "Undated" : dt(d.date, "ddd, MMM D, YYYY"))}</strong>`,
+        fmtNumber(d.submissions),
+        fmtNumber(d.trucks),
+        fmtNumber(d.residualTons),
+        fmtNumber(d.hazardousTons),
+        `<strong>${fmtNumber(d.tons)}</strong>`,
+      ]);
+      (d.items || []).forEach((item) => {
+        dayRows.push([
+          `<span class="sub">&nbsp;&nbsp;&nbsp;${esc(item.id)} &middot; ${esc(String(item.status || "").replace(/_/g, " "))}</span>`,
+          "",
+          fmtNumber(item.trucks),
+          "",
+          "",
+          fmtNumber(item.tons),
+        ]);
+      });
+    });
+    dayRows.push([
+      `<strong>Total &middot; ${fmtNumber(daily.length)} day(s)</strong>`,
+      `<strong>${fmtNumber(sum.submissions)}</strong>`,
+      `<strong>${fmtNumber(sum.trucks)}</strong>`,
+      `<strong>${fmtNumber(sum.residualTons)}</strong>`,
+      `<strong>${fmtNumber(sum.hazardousTons)}</strong>`,
+      `<strong>${fmtNumber(sum.tons)}</strong>`,
+    ]);
+    push(
+      section(
+        "Daily Disposal",
+        "Every submission by disposal date. Reverted or rejected entries are listed with 0 volume.",
+        table(
+          ["Date / Submission", "Submissions", "Entries", `Residual (${unitLabel})`, `Hazardous (${unitLabel})`, `Total (${unitLabel})`],
+          dayRows,
+          { align: ["", "right", "right", "right", "right", "right"] },
+        ),
+      ),
+    );
+  }
+
   // ── Facility & permits ───────────────────────────────────────────────────
   push(
     section(
@@ -138,21 +208,18 @@ export function buildReportDocument(report, { unitLabel = "m³", statusRows = []
           ["Operational status", esc(f.status || DASH)],
           [
             "Permit to Operate",
-            esc(
-              `${f.permitToOperate || DASH}${
-                f.permitToOperateValidity ? ` (valid to ${dt(f.permitToOperateValidity)})` : ""
-              }`,
-            ),
+            permitLines(f.permitToOperatePermits, f.permitToOperate, f.permitToOperateValidity, dt)
+              .map(esc)
+              .join("<br/>") || DASH,
           ],
           [
             "Discharge Permit",
-            esc(
-              `${f.dischargePermit || DASH}${
-                f.dischargePermitValidity ? ` (valid to ${dt(f.dischargePermitValidity)})` : ""
-              }`,
-            ),
+            permitLines(f.dischargePermits, f.dischargePermit, f.dischargePermitValidity, dt)
+              .map(esc)
+              .join("<br/>") || DASH,
           ],
           ["ECC No.", esc(f.eccNo || DASH)],
+          ["Hazwaste Gen. ID", esc(f.hazwasteGenerationId || DASH)],
         ],
       ),
     ),

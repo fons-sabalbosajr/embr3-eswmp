@@ -549,7 +549,13 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  scrollbar-color: var(--v-line) transparent;
+}
+/* Firefox only — in Chromium a standard scrollbar-color overrides the app-wide
+   6px ::-webkit-scrollbar design (index.css) and draws a wider bar. */
+@supports not selector(::-webkit-scrollbar) {
+  .vera-messages {
+    scrollbar-color: var(--v-line) transparent;
+  }
 }
 
 .vera-msg {

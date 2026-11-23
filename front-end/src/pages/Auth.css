@@ -419,19 +419,7 @@
   padding-right: 4px;
 }
 
-.auth-announcement-scroll::-webkit-scrollbar {
-  width: 6px;
-}
-
-.auth-announcement-scroll::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(92, 118, 144, 0.45);
-}
-
-.auth-announcement-scroll::-webkit-scrollbar-track {
-  background: rgba(208, 220, 232, 0.35);
-  border-radius: 999px;
-}
+/* Scrollbar: the app-wide design in index.css (6px, transparent track). */
 
 .auth-announcement-message {
   color: #27415c;

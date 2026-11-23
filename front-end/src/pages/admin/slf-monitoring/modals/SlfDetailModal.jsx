@@ -296,10 +296,28 @@ export default function SlfDetailModal({
                       detailViewRecord.wasteReceivedUnit || "m³",
                     );
                     const estVolume = 0;
-                    const capacity = detailViewRecord.volumeCapacity || 0;
                     const capacityUnit = normalizeUnit(
-                      detailViewRecord.volumeCapacityUnit || "m³",
+                      detailViewRecord.volumeCapacityUnit ||
+                        detailViewRecord.cellCapacityUnits?.find(Boolean) ||
+                        "m³",
                     );
+                    // A blank facility Volume Capacity (General Tinio) falls back
+                    // to the sum of its cells' capacities, each converted into
+                    // the facility unit, instead of reading as no capacity at all.
+                    const capacity =
+                      Number(detailViewRecord.volumeCapacity || 0) ||
+                      (detailViewRecord.cellCapacities || []).reduce(
+                        (sum, cap, i) =>
+                          sum +
+                          (isNonExistentCell(detailViewRecord.cellStatuses?.[i])
+                            ? 0
+                            : convertVolume(
+                                Number(cap || 0),
+                                detailViewRecord.cellCapacityUnits?.[i] || capacityUnit,
+                                capacityUnit,
+                              ) || 0),
+                        0,
+                      );
                     const wasteReceivedInCapacityUnit = convertVolume(
                       wasteReceived,
                       wasteReceivedUnit,
@@ -645,8 +663,21 @@ export default function SlfDetailModal({
                                               <Tooltip title={tally.declaredCells ? `Includes ${tally.declaredCells} admin-declared cell figure${tally.declaredCells === 1 ? "" : "s"} (the declared base).` : "Baseline volume placed in the cells."}>
                                                 <span>Baseline in cells: <Text strong>{formatVolume(tally.baseline, unit)}</Text></span>
                                               </Tooltip>
-                                              <span style={{ color: "#2f54eb" }}>+ Submissions in cells: <Text strong style={{ color: "#2f54eb" }}>{formatVolume(tally.submitted, unit)}</Text></span>
+                                              <span style={{ color: "#2f54eb" }}>+ Approved submissions in cells: <Text strong style={{ color: "#2f54eb" }}>{formatVolume(tally.submitted, unit)}</Text></span>
                                               <span>= Waste in cells: <Text strong>{formatVolume(tally.inCells, unit)}</Text></span>
+                                              {(() => {
+                                                // Pending review: holds capacity, not yet in any cell.
+                                                const fillUnit = normalizeUnit(detailViewRecord.cellFillUnits?.find(Boolean) || unit);
+                                                const pending = (detailViewRecord.cellFillPendingValues || []).reduce(
+                                                  (s, v) => s + (convertVolume(Number(v || 0), fillUnit, unit) || 0),
+                                                  0,
+                                                );
+                                                return pending > 0 ? (
+                                                  <Tooltip title="Submitted but not yet approved. It is reserved against the cell's capacity and added to Waste in Cell once approved. Reverted entries are never counted.">
+                                                    <span style={{ color: "#d48806" }}>(pending review: <Text strong style={{ color: "#d48806" }}>{formatVolume(pending, unit)}</Text>)</span>
+                                                  </Tooltip>
+                                                ) : null;
+                                              })()}
                                               {tally.unplaced > 0 && (
                                                 <Tooltip title="Submitted and counted as received, but not yet organized into a cell by the operator, so it is in no cell's figure.">
                                                   <span style={{ color: "#d46b08" }}>+ awaiting placement: <Text strong style={{ color: "#d46b08" }}>{formatVolume(tally.unplaced, unit)}</Text></span>
@@ -787,6 +818,21 @@ export default function SlfDetailModal({
                                               key={i}
                                               style={{ textAlign: "center" }}
                                             >
+                                              {/* A cell that cannot receive waste
+                                                  (Reserved / Under Construction /
+                                                  Not Existed) but holds approved
+                                                  placements — e.g. Sta Rosa Cell 4,
+                                                  re-tagged Reserved after a load
+                                                  was placed in it. Flagged so the
+                                                  placement can be corrected. */}
+                                              {/reserved|construction|not.?exist/i.test(cellSt) &&
+                                                Number(detailViewRecord.cellFillSubmittedValues?.[i] || 0) > 0 && (
+                                                  <Tooltip title={`This cell is "${cellSt}" but holds ${formatVolume(Number(detailViewRecord.cellFillSubmittedValues[i]), cellFillUnit)} of approved submissions. Correct those placements (Cell Waste Placement → correct cell) or change the cell's status.`}>
+                                                    <Tag color="red" style={{ marginBottom: 4, fontSize: 10, whiteSpace: "normal" }}>
+                                                      Holds waste — check placement
+                                                    </Tag>
+                                                  </Tooltip>
+                                                )}
                                               {/* The arc is drawn as the Volume in
                                                   Cell CONTRIBUTIONS — baseline
                                                   (blue) + submitted (gold) — which

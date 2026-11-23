@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Avatar, Button, Modal, Slider, Space, Typography, message } from "antd";
+import { Avatar, Button, Dropdown, Modal, Slider, Space, Tooltip, Typography, message } from "antd";
 import { CameraOutlined, DeleteOutlined, UserOutlined } from "@ant-design/icons";
 import api from "../api";
 
@@ -70,7 +70,10 @@ function renderCrop(canvas, img, zoom, offX, offY, px) {
   ctx.drawImage(img, sx, sy, side, side, 0, 0, px, px);
 }
 
-export default function ProfilePhotoEditor({ photoUrl, size = 88, color = "#1a3353", fallback, onChange, disabled = false, disabledReason = "" }) {
+// `cameraOnly` (portal My Profile): the camera button on the avatar is the ONLY
+// control — no "Add/Change photo · Remove" links underneath. With a photo set,
+// the button opens a small menu (Change photo / Remove photo).
+export default function ProfilePhotoEditor({ photoUrl, size = 88, color = "#1a3353", fallback, onChange, disabled = false, disabledReason = "", cameraOnly = false }) {
   const inputRef = useRef(null);
   const previewRef = useRef(null);
   const [source, setSource] = useState(null); // { img, url }
@@ -159,7 +162,40 @@ export default function ProfilePhotoEditor({ photoUrl, size = 88, color = "#1a33
           fallback={fallback}
           style={{ background: color, fontSize: typeof size === "number" ? Math.round(size * 0.38) : undefined }}
         />
-        {!disabled && (
+        {!disabled && cameraOnly && (
+          <Tooltip title={photoUrl ? "Change profile picture" : "Add a profile picture"}>
+            {photoUrl ? (
+              <Dropdown
+                trigger={["click"]}
+                menu={{
+                  items: [
+                    { key: "change", icon: <CameraOutlined />, label: "Change photo" },
+                    { key: "remove", icon: <DeleteOutlined />, label: "Remove photo", danger: true },
+                  ],
+                  onClick: ({ key }) => (key === "remove" ? remove() : pick()),
+                }}
+              >
+                <Button
+                  type="primary"
+                  shape="circle"
+                  icon={<CameraOutlined />}
+                  aria-label="Change profile picture"
+                  style={{ position: "absolute", right: -4, bottom: -4, background: "#1a3353", border: "2px solid #fff", boxShadow: "0 1px 4px rgba(0,0,0,.3)" }}
+                />
+              </Dropdown>
+            ) : (
+              <Button
+                type="primary"
+                shape="circle"
+                icon={<CameraOutlined />}
+                onClick={pick}
+                aria-label="Add a profile picture"
+                style={{ position: "absolute", right: -4, bottom: -4, background: "#1a3353", border: "2px solid #fff", boxShadow: "0 1px 4px rgba(0,0,0,.3)" }}
+              />
+            )}
+          </Tooltip>
+        )}
+        {!disabled && !cameraOnly && (
           <Button
             shape="circle"
             size="small"
@@ -172,7 +208,7 @@ export default function ProfilePhotoEditor({ photoUrl, size = 88, color = "#1a33
       </div>
       {disabled ? (
         disabledReason ? <Text type="secondary" style={{ fontSize: 12 }}>{disabledReason}</Text> : null
-      ) : (
+      ) : cameraOnly ? null : (
         <Space size={4}>
           <Button size="small" type="link" icon={<CameraOutlined />} onClick={pick}>
             {photoUrl ? "Change photo" : "Add photo"}

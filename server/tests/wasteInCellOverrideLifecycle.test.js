@@ -147,99 +147,42 @@ test("a rejected or reverted submission does not fill a cell", () => {
     const occ = computeCellOccupancy(FACILITY, [submission("x", 100, "2026-03-01", 0, status)]);
     assert.equal(occ.rows[0].total, 0, `${status} must not count`);
   });
-  // …while pending and acknowledged both do, which is the app's existing rule.
-  ["pending", "acknowledged", "revert_requested"].forEach((status) => {
+  // Waste in Cell = baseline + APPROVED. revert_requested is still approved until
+  // EMB actually reverts it. Pending only reserves capacity.
+  ["acknowledged", "revert_requested"].forEach((status) => {
     const occ = computeCellOccupancy(FACILITY, [submission("x", 100, "2026-03-01", 0, status)]);
     assert.equal(occ.rows[0].total, 100, `${status} must count`);
   });
+  const pending = computeCellOccupancy(FACILITY, [submission("x", 100, "2026-03-01", 0, "pending")]);
+  assert.equal(pending.rows[0].total, 0, "pending is not yet in the cell");
+  assert.equal(pending.cellFillPendingValues[0], 100, "…but it holds the capacity");
 });
 
-// ── Scenario 5/6/7 — the override's whole life ──────────────────────────────
-test("declare → approve → recompute: the declaration holds and the approval lands", () => {
-  let facility = { ...FACILITY };
-  const entries = [submission("s1", 100, "2026-03-01", 0)];
-
-  // Automatic value: 100.
-  facility = persist(facility, computeCellOccupancy(facility, entries));
-  assert.equal(facility.cellFillValues[0], 100);
-
-  // Scenario 5 — the admin declares 120 for Cell 1.
-  facility = declare(facility, 0, 120, "2026-04-01");
-  let occ = computeCellOccupancy(facility, entries);
-  facility = persist(facility, occ);
-  assert.equal(occ.rows[0].total, 120, "the admin's figure is what the cell reports");
-
-  // …and it survives refetch / reload / any number of recomputes.
-  for (let i = 0; i < 5; i += 1) {
-    occ = computeCellOccupancy(facility, entries);
-    facility = persist(facility, occ);
-  }
-  assert.equal(occ.rows[0].total, 120, "the override neither decays nor compounds");
-
-  // Scenario 6 — a new submission is approved AFTER the override.
-  entries.unshift(submission("s2", 10, "2026-04-05", 0));
-  occ = computeCellOccupancy(facility, entries);
-  facility = persist(facility, occ);
-  assert.equal(occ.rows[0].total, 130, "120 held, and the 10 t was recorded — not 110, not 120");
-  assert.equal(occ.rows[0].overrideBase, 120);
-  assert.equal(occ.rows[0].postOverrideSubmitted, 10);
-  assert.equal(occ.rows[0].derivedTotal, 110, "what the data alone says is still available");
-
-  // Scenario 9 — several approvals landing close together each land once.
-  entries.unshift(submission("s3", 5, "2026-04-06", 0));
-  entries.unshift(submission("s4", 5, "2026-04-06", 0));
-  occ = computeCellOccupancy(facility, entries);
-  facility = persist(facility, occ);
-  assert.equal(occ.rows[0].total, 140);
-
-  // Repeated recomputes over the same set stay put — no lost or double updates.
-  const settled = computeCellOccupancy(persist(facility, occ), entries);
-  assert.equal(settled.rows[0].total, 140);
-
-  // Scenario 7 — the admin clears the field: back to the canonical automatic
-  // value, which is every submission counted once.
-  facility = clearDeclaration(facility, 0);
-  occ = computeCellOccupancy(facility, entries);
-  assert.equal(occ.rows[0].total, 120, "100 + 10 + 5 + 5, derived");
-  assert.equal(occ.rows[0].overridden, undefined);
-});
-
-test("re-declaring absorbs what accumulated, and starts a fresh window", () => {
-  const entries = [submission("after", 10, "2026-04-05", 0), submission("before", 100, "2026-03-01", 0)];
-  let facility = declare({ ...FACILITY }, 0, 120, "2026-04-01");
-  assert.equal(computeCellOccupancy(facility, entries).rows[0].total, 130);
-
-  // The admin now declares 130 — the figure they can see — with a later stamp.
-  facility = declare(facility, 0, 130, "2026-04-10");
-  const occ = computeCellOccupancy(facility, entries);
-  assert.equal(occ.rows[0].total, 130, "the 10 t is inside the new declaration, not added again");
-  assert.equal(occ.rows[0].postOverrideSubmitted, 0);
-});
-
-test("an override on one cell leaves every other cell fully automatic", () => {
-  const entries = [
-    submission("a", 100, "2026-03-01", 0),
-    submission("b", 60, "2026-04-05", 1),
-  ];
+// ── No override: the formula always wins (occupancy calc v6) ────────────────
+test("a stored admin declaration no longer replaces baseline + approved submissions", () => {
+  // The Porac defect: cells read the typed 1,310,353 / 683,202 m³ while their
+  // own baseline alone was larger, so baseline and approvals were invisible.
+  const entries = [submission("s2", 10, "2026-04-05", 0), submission("s1", 100, "2026-03-01", 0)];
   const facility = declare({ ...FACILITY }, 0, 120, "2026-04-01");
   const occ = computeCellOccupancy(facility, entries);
-  assert.equal(occ.rows[0].total, 120);
-  assert.equal(occ.rows[0].overridden, true);
-  assert.equal(occ.rows[1].total, 60);
-  assert.equal(occ.rows[1].overridden, undefined, "Cell 2 is derived, and says so");
+  assert.equal(occ.rows[0].total, 110, "100 + 10 approved — the typed 120 is not used");
+  assert.equal(occ.rows[0].overridden, undefined, "nothing is presented as overridden");
+  assert.equal(occ.rows[0].legacyOverride, 120, "the old declaration stays visible for audit");
+  // Stable across recomputes from the persisted document.
+  const again = computeCellOccupancy(persist(facility, occ), entries);
+  assert.deepEqual(again.cellFillValues, occ.cellFillValues);
 });
 
-test("the facility total and the sum of its cells stay reconcilable under an override", () => {
+test("the facility total and the sum of its cells stay reconcilable", () => {
   const entries = [
     submission("placed", 100, "2026-03-01", 0),
     { ...submission("unplaced", 40, "2026-03-02", 0), trucks: [{ actualVolume: 40, actualVolumeUnit: "tons", wasteType: "Residual", cellIndex: null, vehicles: [] }] },
   ];
-  const facility = declare({ ...FACILITY }, 0, 120, "2026-04-01");
-  const occ = computeCellOccupancy(facility, entries);
+  const occ = computeCellOccupancy(declare({ ...FACILITY }, 0, 120, "2026-04-01"), entries);
   // Waste awaiting placement is reported, never attributed to a cell nobody chose.
   assert.equal(occ.unplacedTotal, 40);
-  assert.equal(occ.cellTotal, 120);
-  assert.equal(occ.totalVolume, 160, "cells + unplaced");
+  assert.equal(occ.cellTotal, 100);
+  assert.equal(occ.totalVolume, 140, "cells + unplaced");
 });
 
 // ── The declaration has to stay attached to ITS cell ────────────────────────
@@ -281,8 +224,9 @@ test("deleting a cell moves each declaration with its cell, not onto its neighbo
   // …and the remapped arrays are what the calculation then reads.
   const facility = { ...record, ...update };
   const occ = computeCellOccupancy(facility, [submission("s", 5, "2026-03-01", 0)]);
-  assert.equal(occ.rows[1].total, 300, "cell C keeps its declared figure at its new index");
-  assert.equal(occ.rows[0].overridden, undefined, "cell B did not inherit one");
+  // The declaration is audit-only now, but it must still sit on the right cell.
+  assert.equal(occ.rows[1].legacyOverride, 300, "cell C keeps its declaration at its new index");
+  assert.equal(occ.rows[0].legacyOverride, undefined, "cell B did not inherit one");
 });
 
 test("a newly added cell starts with no declaration of its own", () => {

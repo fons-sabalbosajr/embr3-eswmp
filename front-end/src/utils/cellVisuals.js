@@ -348,6 +348,57 @@ export function getSlfCapacityColor(
   return baseColor;
 }
 
+// ── Cell gauge VISUAL STATE ──────────────────────────────────────────────────
+// What a cell gauge looks like, decided by the cell's STATUS first and — only
+// for a cell still receiving waste — by how full it is.
+//
+// Before this, every non-active cell (Used/Completed, Closed, Reserved, Under
+// Construction) was drawn in one muted grey at 45–55% opacity, so a full,
+// completed cell looked exactly like an empty reserved one. Each state now has
+// its own colour, drawn at full strength, whatever the cell holds.
+//
+// ONE list, used by the gauges AND the legend, so the two cannot disagree.
+export const CELL_GAUGE_STATES = {
+  normal: { key: "normal", label: "Normal", color: "#52c41a", fill: "solid", description: "Active, under 70% full." },
+  nearFull: { key: "nearFull", label: "Near Full", color: "#faad14", fill: "solid", description: "Active, 70–89% full — plan the next cell." },
+  full: { key: "full", label: "Full", color: "#ff4d4f", fill: "solid", description: "Active, 90–100% full — stop directing waste here." },
+  over: { key: "over", label: "Over Capacity", color: "#a8071a", fill: "solid", description: "Holds more than its declared capacity." },
+  completed: { key: "completed", label: "Used / Completed", color: "#722ed1", fill: "solid", description: "Filled and taken out of service." },
+  closed: { key: "closed", label: "Closed", color: "#595959", fill: "solid", description: "Closed — no longer receiving waste." },
+  construction: { key: "construction", label: "Under Construction", color: "#2f54eb", fill: "dashed", description: "Being built — not yet receiving waste." },
+  reserved: { key: "reserved", label: "Reserved", color: "#13c2c2", fill: "dashed", description: "Reserved for a future cell." },
+  noData: { key: "noData", label: "No Capacity Data", color: "#8c8c8c", fill: "solid", description: "No capacity declared, so fullness cannot be measured." },
+};
+export const CELL_GAUGE_STATE_LIST = [
+  CELL_GAUGE_STATES.normal,
+  CELL_GAUGE_STATES.nearFull,
+  CELL_GAUGE_STATES.full,
+  CELL_GAUGE_STATES.over,
+  CELL_GAUGE_STATES.completed,
+  CELL_GAUGE_STATES.closed,
+  CELL_GAUGE_STATES.construction,
+  CELL_GAUGE_STATES.reserved,
+];
+
+/**
+ * @param {string} status  stored cell status
+ * @param {number|null} percent utilization (null when no capacity is declared)
+ * @returns one of CELL_GAUGE_STATES
+ */
+export function resolveCellGaugeState(status, percent) {
+  const key = getCellStatusConfig(status).key;
+  if (key === "completed" || key === "full") return CELL_GAUGE_STATES.completed;
+  if (key === "closed") return CELL_GAUGE_STATES.closed;
+  if (key === "construction") return CELL_GAUGE_STATES.construction;
+  if (key === "reserved") return CELL_GAUGE_STATES.reserved;
+  const pct = Number(percent);
+  if (percent == null || !Number.isFinite(pct)) return CELL_GAUGE_STATES.noData;
+  if (pct > 100) return CELL_GAUGE_STATES.over;
+  if (pct >= 90) return CELL_GAUGE_STATES.full;
+  if (pct >= 70) return CELL_GAUGE_STATES.nearFull;
+  return CELL_GAUGE_STATES.normal;
+}
+
 // ── Cell availability for NEW waste placement ────────────────────────────────
 // THE single rule for "can this cell accept new waste?", shared by the portal
 // cell selectors, submission validation, edit workflow and admin capacity views

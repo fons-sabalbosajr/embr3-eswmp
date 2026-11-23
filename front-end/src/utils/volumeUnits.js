@@ -88,17 +88,21 @@ export const CONVERSION_WARNINGS = {
   "unsupported-pair": "Volume is recorded in a unit this system cannot convert.",
 };
 
-// The unit an SLF facility DECLARES, per the fields "Set Field Units" writes.
-// Order mirrors the precedence the app already used (wasteReceivedUnit first).
-// Falls back to m³ only when the facility declares nothing at all.
+// The unit an SLF facility DECLARES — ONE rule for admin, portal and server
+// (server/utils/volumeUnits.js and the occupancy recompute use the same order).
+//
+// The capacity units come first because only an admin ever sets them.
+// `wasteReceivedUnit` is written by the occupancy recompute, so reading it first
+// let a derived value re-declare the facility: General Tinio showed capacities in
+// m³ beside "received" in tons, and admin and portal disagreed.
 export function resolveFacilityUnit(facility, fallback = TONS) {
   const candidates = [
-    facility?.wasteReceivedUnit,
     facility?.volumeCapacityUnit,
+    (facility?.cellCapacityUnits || []).find(Boolean),
+    facility?.wasteReceivedUnit,
     facility?.receivingVolumeCapacityUnit,
     facility?.estimatedVolumeWasteUnit,
     facility?.baselineUnit,
-    (facility?.cellCapacityUnits || []).find(Boolean),
     (facility?.cellFillUnits || []).find(Boolean),
   ];
   for (const c of candidates) {

@@ -69,8 +69,13 @@ const {
   collectCellNames,
   applyResolvedCellNames,
   applyResolvedCellNamesToAll,
-  resolveBaselineCellEntries,
 } = require("../utils/cellNaming");
+const {
+  FACILITY_CELL_UNIT_SELECT,
+  prepareBaselineCellEntriesForSave,
+  resolveBaselineCellEntriesForRead,
+  sanitizeBaselineMov,
+} = require("../utils/baselineCellEntries");
 const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
@@ -324,6 +329,7 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
         // submitted contributions without re-deriving (and re-diverging).
         cellFillBaselineValues: occupancy.cellFillBaselineValues,
         cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
+        cellFillPendingValues: occupancy.cellFillPendingValues,
         baselineVolumeTotal: occupancy.baselineTotal,
         submittedVolumeTotal: occupancy.submittedTotal,
         // Stamped so the repair sweep can tell figures written by the CURRENT
@@ -839,6 +845,7 @@ const BASELINE_PROJECTION = {
   accreditedHaulers: 1,
   activeCellEntries: 1,
   closedCellEntries: 1,
+  baselineMov: 1,
   submittedBy: 1,
   baselineUpdateApproved: 1,
   baselineUpdateRequested: 1,
@@ -2887,7 +2894,7 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
       if (facCells === undefined) {
         facCells = await SlfFacility.findById(genId)
           .select(
-            "numberOfCell cellStatuses cellNames cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
+            "numberOfCell cellStatuses cellNames cellCapacities cellFillValues cellFillPendingValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
           )
           .lean();
         facilityCellCache.set(key, facCells || null);
@@ -3431,7 +3438,7 @@ router.get("/baseline/:slfName", async (req, res) => {
       ? { slfGenerator: slfObjectId }
       : { $or: nameOrFilters };
 
-    const facilityCellSelect = "numberOfCell cellNames cellTypes cellStatuses cellCapacities";
+    const facilityCellSelect = FACILITY_CELL_UNIT_SELECT;
     const [containers, recent, facilityById] = await Promise.all([
       DataSLF.find({
         $and: [{ deletedAt: null }, identityFilter, BASELINE_ONLY_FILTER, baselineDataMatch],
@@ -3599,8 +3606,16 @@ router.get("/baseline/:slfName", async (req, res) => {
       closedCellHazardousVolume: valueOf("closedCellHazardousVolume"),
       closedCellHazardousUnit: unitFor("closedCellHazardousVolume", "closedCellHazardousUnit", baselineUnit),
       acceptsHazardousWaste: valueOf("acceptsHazardousWaste") || false,
-      activeCellEntries: resolveBaselineCellEntries(valueOf("activeCellEntries") || [], facilityForCells),
-      closedCellEntries: resolveBaselineCellEntries(valueOf("closedCellEntries") || [], facilityForCells),
+      // Bound to the admin's cells AND converted into each cell's declared unit,
+      // so the portal shows the same unit the admin configured.
+      activeCellEntries: resolveBaselineCellEntriesForRead(valueOf("activeCellEntries") || [], facilityForCells),
+      closedCellEntries: resolveBaselineCellEntriesForRead(valueOf("closedCellEntries") || [], facilityForCells),
+      // Section-level MOV, from the record the portal writes baseline values to.
+      baselineMov: (hasContainer ? latest : matchedCandidates.find((c) => c?.baselineMov))?.baselineMov || {
+        activeCells: [],
+        closedCells: [],
+        haulers: [],
+      },
       accreditedHaulers: haulerDoc?.accreditedHaulers || [],
       baselineUpdateApproved,
       baselineUpdateRequested,
@@ -3723,6 +3738,7 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
       accreditedHaulers: d.accreditedHaulers || [],
       activeCellEntries: d.activeCellEntries || [],
       closedCellEntries: d.closedCellEntries || [],
+      baselineMov: d.baselineMov || { activeCells: [], closedCells: [], haulers: [] },
       submittedBy: d.submittedBy,
       baselineUpdateApproved: d.baselineUpdateApproved || false,
       baselineUpdateRequested: d.baselineUpdateRequested || false,
@@ -3738,10 +3754,19 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
     const facilityIds = [...new Set(results.map((r) => String(r.slfGenerator || "")).filter(Boolean))];
     const facilities = facilityIds.length
       ? await SlfFacility.find({ _id: { $in: facilityIds } })
-          .select("lgu ownership")
+          .select(`lgu ownership ${FACILITY_CELL_UNIT_SELECT}`)
           .lean()
           .catch(() => [])
       : [];
+    // Same cell binding + declared-unit conversion the portal read applies, so the
+    // admin Baseline Data table and the portal never show one cell in two units.
+    const facilityById = new Map(facilities.map((f) => [String(f._id), f]));
+    results.forEach((row) => {
+      const facility = facilityById.get(String(row.slfGenerator || ""));
+      if (!facility) return;
+      row.activeCellEntries = resolveBaselineCellEntriesForRead(row.activeCellEntries, facility);
+      row.closedCellEntries = resolveBaselineCellEntriesForRead(row.closedCellEntries, facility);
+    });
     const merged = mergeBaselineRowsByFacility(results, facilities).sort((a, b) =>
       String(a.slfName || "").localeCompare(String(b.slfName || "")),
     );
@@ -4216,6 +4241,27 @@ router.put("/baselines/:id", async (req, res) => {
         continue;
       }
       entry[f] = req.body[f];
+    }
+    // Cell entries follow the unit the admin declared for each cell — the same
+    // rule the portal save applies — so an admin edit can't reintroduce a conflict.
+    if (entry.slfGenerator && (req.body.activeCellEntries !== undefined || req.body.closedCellEntries !== undefined)) {
+      const unitFacility = await SlfFacility.findById(entry.slfGenerator)
+        .select(FACILITY_CELL_UNIT_SELECT)
+        .lean()
+        .catch(() => null);
+      if (unitFacility) {
+        const actor = getRequestActor(req);
+        if (req.body.activeCellEntries !== undefined) {
+          entry.activeCellEntries = prepareBaselineCellEntriesForSave(
+            req.body.activeCellEntries, unitFacility, { actor },
+          );
+        }
+        if (req.body.closedCellEntries !== undefined) {
+          entry.closedCellEntries = prepareBaselineCellEntriesForSave(
+            req.body.closedCellEntries, unitFacility, { closed: true, actor },
+          );
+        }
+      }
     }
     await entry.save();
 
@@ -7376,7 +7422,7 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
       facility = await SlfFacility.findById(entry.slfGenerator)
         .select(
           "numberOfCell cellStatuses cellNames cellTypes cellSubmissionAllowed lgu " +
-            "cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
+            "cellCapacities cellFillValues cellFillPendingValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
         )
         .lean();
     }
@@ -7704,7 +7750,7 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       const key = String(genId);
       if (facilityCache.has(key)) return facilityCache.get(key);
       const fac = await SlfFacility.findById(genId)
-        .select("numberOfCell cellStatuses cellNames cellTypes cellSubmissionAllowed cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit")
+        .select("numberOfCell cellStatuses cellNames cellTypes cellSubmissionAllowed cellCapacities cellFillValues cellFillPendingValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit")
         .lean();
       facilityCache.set(key, fac || null);
       return fac || null;
@@ -9839,6 +9885,7 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       activeCellEntries, closedCellEntries,
       accreditedHaulers,
       acceptsHazardousWaste,
+      baselineMov,
     } = req.body || {};
 
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
@@ -9929,7 +9976,7 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
         // being made for `isDummy`.
         : genId
           ? SlfFacility.findById(genId)
-              .select("isDummy numberOfCell cellNames cellTypes cellStatuses cellCapacities")
+              .select(`isDummy ${FACILITY_CELL_UNIT_SELECT}`)
               .lean()
           : Promise.resolve(null),
       submittedBy
@@ -10061,12 +10108,17 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       // the relationship is a stable cellIndex rather than a display name that an
       // admin rename would orphan. This is the source-side half of the fix; the
       // read path resolves the rows already in the database the same way.
-      activeCellEntries: resolveBaselineCellEntries(activeCellEntries, saveFacility),
-      closedCellEntries: resolveBaselineCellEntries(closedCellEntries, saveFacility),
+      // ...and converted into the unit the admin DECLARED for that cell, so an
+      // operator can never store a cell in a unit that conflicts with the admin
+      // side. Closure date / MOV attachments are whitelisted here too.
+      activeCellEntries: prepareBaselineCellEntriesForSave(activeCellEntries, saveFacility, { actor: submittedBy }),
+      closedCellEntries: prepareBaselineCellEntriesForSave(closedCellEntries, saveFacility, { closed: true, actor: submittedBy }),
       accreditedHaulers: accreditedHaulers
         ? sanitizeAccreditedHaulers(accreditedHaulers, baselineUnit || totalVolumeAcceptedUnit || "m³")
         : accreditedHaulers,
       acceptsHazardousWaste,
+      // Undefined (left out of the $set) when the request carries no MOV block.
+      baselineMov: sanitizeBaselineMov(baselineMov, submittedBy),
     };
     // Normalize enum-constrained unit fields so an unexpected unit string can't
     // trigger a Mongoose ValidationError (500) on the baseline-only doc create.

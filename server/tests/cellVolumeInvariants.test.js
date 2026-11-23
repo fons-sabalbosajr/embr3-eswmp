@@ -100,15 +100,17 @@ test("the record carrying the baseline is not counted again as a submission", ()
 });
 
 // ── Rule B — no duplication ─────────────────────────────────────────────────
-test("only pending / acknowledged / revert_requested volumes hold capacity", () => {
+test("Waste in Cell counts APPROVED volume; pending only reserves capacity; rejected/reverted count nowhere", () => {
   const occ = computeCellOccupancy(FACILITY, [
     BASELINE,
     submission("s1", 1, 100, "acknowledged"),
     submission("s2", 1, 50, "pending"),
     submission("s3", 1, 999, "rejected"),
     submission("s4", 1, 999, "reverted"),
+    submission("s5", 1, 7, "revert_requested"), // approved until EMB actually reverts it
   ]);
-  assert.equal(cell(occ, 1).submitted, 150);
+  assert.equal(cell(occ, 1).submitted, 107, "baseline + approved formula");
+  assert.equal(cell(occ, 1).pending, 50, "pending is held against capacity only");
   assert.equal(ACTIVE_VOLUME_STATUSES.has("rejected"), false);
   assert.equal(ACTIVE_VOLUME_STATUSES.has("reverted"), false);
 });
@@ -370,7 +372,9 @@ test("with no baseline container the cutoff comes from the EARLIEST baseline cop
     occ.placedSubmittedTotal > 0,
     "submitted volume must reach the cell — this is the empty Submission column",
   );
-  assert.equal(occ.rows[0].baseline, 5000, "the baseline is still counted exactly once");
+  // 5,000 m³ in the facility's DECLARED unit (tons) — counted exactly once.
+  assert.equal(occ.unit, "tons", "the facility's declared unit, not the first truck's");
+  assert.equal(occ.rows[0].baseline, 2500, "the baseline is still counted exactly once");
 });
 
 test("a real baseline container still dates the cutoff on its own", () => {

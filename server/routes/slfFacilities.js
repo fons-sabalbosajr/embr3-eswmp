@@ -409,6 +409,7 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
     // let the Submitted Volume tile disagree with the Baseline Breakdown.
     cellFillBaselineValues: occupancy.cellFillBaselineValues,
     cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
+    cellFillPendingValues: occupancy.cellFillPendingValues,
     baselineVolumeTotal: occupancy.baselineTotal,
     submittedVolumeTotal: occupancy.submittedTotal,
   };
@@ -450,9 +451,11 @@ router.get("/portal/:id", async (req, res) => {
       "cellFillOverridden cellFillOverrideValues " +
       // Provenance split, so the portal's own tiles read the same numbers the
       // admin dashboards do instead of re-deriving their own.
-      "cellFillBaselineValues cellFillSubmittedValues baselineVolumeTotal submittedVolumeTotal " +
+      "cellFillBaselineValues cellFillSubmittedValues cellFillPendingValues baselineVolumeTotal submittedVolumeTotal " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
-      "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
+      // hazwasteGenerationId was never selected, so the portal Dashboard's
+      // "Hazardous Waste Generator ID" tile read "Not encoded" for EVERY SLF.
+      "eccNo hazwasteGenerationId dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
       "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles preventiveMeasureFileDetails scrpDetails";
 
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
@@ -891,11 +894,14 @@ router.put("/:id", adminOnly, async (req, res) => {
     //
     // A supplied figure marks that cell as overridden; clearing the field hands
     // it back to the derived baseline + submissions value.
-    const fillsDeclared = update.cellFillValuesDeclared === true;
+    //
+    // NO LONGER ACCEPTED (occupancy calc v6): Waste in Cell is always baseline +
+    // approved submissions, so a typed figure would be stored but never used.
+    // The flag is consumed and ignored; the existing declarations stay on the
+    // record for audit only. Correct the baseline or the submission instead.
+    const fillsDeclared = false;
     delete update.cellFillValuesDeclared;
-    const declaredFills = fillsDeclared && Array.isArray(update.cellFillValues)
-      ? [...update.cellFillValues]
-      : null;
+    const declaredFills = null;
 
     // The Cell Infrastructure editor's row → original-cell mapping, used by the
     // merge to move each cell's server-derived override record with its cell.

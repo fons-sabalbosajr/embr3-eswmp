@@ -27,7 +27,9 @@ import {
   UndoOutlined,
   WarningOutlined,
   SearchOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
+import dayjs from "dayjs";
 import { resolveFacilityUnit, normalizeUnit, convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
 import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 import {
@@ -119,6 +121,15 @@ function OverviewPanel({
   slfInfoLoading,
   haulers,
   activeSlfName,
+  // The facility unit EMB DECLARED (utils/volumeUnits → resolveFacilityUnit,
+  // the same rule the admin SLF Table uses). Every figure on this dashboard —
+  // totals, charts and cell gauges — is shown in it, so admin and portal never
+  // show the same SLF in two units.
+  declaredUnit,
+  // When facility details (permits, cells) were last read from the server, and
+  // a way to re-read them now — so the operator can see the data is current.
+  slfInfoSyncedAt,
+  onRefreshSlfInfo,
   // Optional quick-action callbacks — the dashboard hides a button when its
   // handler isn't supplied, so this stays backward-compatible.
   onCreateSubmission,
@@ -206,7 +217,7 @@ function OverviewPanel({
   }, [ownSubmissions]);
   // #7: show the recorded volume in the facility's single declared baseline unit,
   // never "m³ / tons" side-by-side. m³ and tons are kept in lockstep upstream.
-  const baselineUnit = resolveFacilityUnit(slfInfo);
+  const baselineUnit = normalizeUnit(declaredUnit) || resolveFacilityUnit(slfInfo);
   const recordedVolume = normalizeUnit(baselineUnit) === "tons" ? volumeTotals.tons : volumeTotals.m3;
   const recordedVolumeLabel = masked
     ? MASK_PLACEHOLDER
@@ -712,12 +723,35 @@ function OverviewPanel({
    * the flat legacy fields are folded in so nothing recorded before the array
    * existed is dropped.
    */
-  const permitReferences = (list, legacyNo, legacyValidity) => {
+  // Each row carries the same columns the admin's Permits table shows — the DP
+  // type and the status EMB recorded (New / Renewal) — not just the number, so
+  // the operator's view matches what EMB maintains. `expired` flags an older
+  // renewal still on file so it does not read as the current permit.
+  const permitReferences = (list, legacyNo, legacyValidity, legacyStatus) => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const isExpired = (validity) => {
+      if (!validity) return false;
+      const d = new Date(validity);
+      return !Number.isNaN(d.getTime()) && d < todayStart;
+    };
     const rows = (Array.isArray(list) ? list : [])
       .filter((item) => item?.permitNo || item?.validity)
-      .map((item) => ({ permitNo: item.permitNo || "", validity: item.validity || "" }));
+      .map((item) => ({
+        permitNo: item.permitNo || "",
+        validity: item.validity || "",
+        permitType: item.permitType || "",
+        recordedStatus: item.status || "",
+        expired: isExpired(item.validity),
+      }));
     if (!rows.length && (legacyNo || legacyValidity)) {
-      rows.push({ permitNo: legacyNo || "", validity: legacyValidity || "" });
+      rows.push({
+        permitNo: legacyNo || "",
+        validity: legacyValidity || "",
+        permitType: "",
+        recordedStatus: legacyStatus || "",
+        expired: isExpired(legacyValidity),
+      });
     }
     // Newest validity first so the current reference reads first.
     return rows.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0));
@@ -730,11 +764,13 @@ function OverviewPanel({
     slfInfo?.permitToOperatePermits,
     slfInfo?.permitToOperate,
     slfInfo?.permitToOperateValidity,
+    slfInfo?.permitToOperateStatus,
   );
   const dpReferences = permitReferences(
     slfInfo?.dischargePermits,
     slfInfo?.dischargePermit,
     slfInfo?.dischargePermitValidity,
+    slfInfo?.dischargePermitStatus,
   );
 
   const permitCards = [
@@ -860,8 +896,16 @@ function OverviewPanel({
     const typeConfig = getCellTypeConfig(slfInfo?.cellTypes?.[idx]);
     const capUnit = resolveCellUnit(slfInfo, idx, "capacity");
     const fillUnit = resolveCellUnit(slfInfo, idx, "fill");
-    const capacity = convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, capUnit) ?? 0;
-    const fill = convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, capUnit) ?? 0;
+    // Shown in the dashboard's ONE unit (the operator's declared unit). Converted,
+    // never relabelled, so the percentage is unchanged; a pair that cannot be
+    // converted stays in the cell's own unit rather than showing a wrong number.
+    const viewUnit = normalizeUnit(baselineUnit) || capUnit;
+    const capInView = convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, viewUnit);
+    const fillInView = convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, viewUnit);
+    const convertible = capInView !== null && fillInView !== null;
+    const unit = convertible ? viewUnit : capUnit;
+    const capacity = convertible ? capInView : convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, capUnit) ?? 0;
+    const fill = convertible ? fillInView : convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, capUnit) ?? 0;
     const pct = capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null;
     const statusLabel = String(stored || statusConfig?.label || "").toLowerCase();
     // Band precedence: what the admin declared about the cell first, then how
@@ -894,13 +938,13 @@ function OverviewPanel({
       submissionClosed,
       capacity,
       fill,
-      unit: capUnit,
+      unit,
       pct,
       band,
     });
   }
   return rows;
-  }, [slfInfo, cellCount]);
+  }, [slfInfo, cellCount, baselineUnit]);
   const cellBandCounts = useMemo(() => cellUtilization.reduce(
     (acc, c) => {
       if (c.band === "full") acc.full += 1;
@@ -1051,6 +1095,21 @@ function OverviewPanel({
             className="slf-section"
             size="small"
             title={<Space><DashboardOutlined /> <Text strong>SLF Overview</Text></Space>}
+            extra={
+              // Permits and facility details are maintained by EMB. They refresh
+              // live when EMB saves, on reconnect, and on return to this tab; the
+              // timestamp shows how current they are, and Refresh re-reads now.
+              <Space size={6}>
+                {slfInfoSyncedAt && (
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    Synced with EMB {dayjs(slfInfoSyncedAt).format("h:mm A")}
+                  </Text>
+                )}
+                {onRefreshSlfInfo && (
+                  <Button size="small" type="text" icon={<ReloadOutlined />} onClick={onRefreshSlfInfo} aria-label="Refresh facility details" />
+                )}
+              </Space>
+            }
             loading={slfInfoLoading}
             style={{ borderRadius: 8 }}
             bodyStyle={{ padding: 12 }}
@@ -1102,21 +1161,45 @@ function OverviewPanel({
                     references.map((reference, index) => (
                       <div
                         key={`${reference.permitNo}-${reference.validity}-${index}`}
-                        style={{
-                          display: "flex",
-                          alignItems: "baseline",
-                          justifyContent: "space-between",
-                          gap: 8,
-                          marginTop: index === 0 ? 1 : 3,
-                        }}
+                        style={{ marginTop: index === 0 ? 1 : 5, opacity: reference.expired && index > 0 ? 0.7 : 1 }}
                       >
-                        <span style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>
-                          {reference.permitNo || "—"}
-                        </span>
-                        {reference.validity && (
-                          <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
-                            valid to {formatValidity(reference.validity)}
-                          </Text>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "baseline",
+                            justifyContent: "space-between",
+                            gap: 8,
+                          }}
+                        >
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>
+                            {reference.permitNo || "—"}
+                          </span>
+                          {reference.validity && (
+                            <Text
+                              type={reference.expired ? "danger" : "secondary"}
+                              style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                            >
+                              {reference.expired ? "expired" : "valid to"} {formatValidity(reference.validity)}
+                            </Text>
+                          )}
+                        </div>
+                        {/* The admin's own columns for this permit (DP type,
+                            recorded New / Renewal status). */}
+                        {(reference.permitType || reference.recordedStatus) && (
+                          <div style={{ marginTop: 2 }}>
+                            {reference.permitType && (
+                              <Tag style={{ fontSize: 10, lineHeight: "16px", marginInlineEnd: 4 }}>
+                                {reference.permitType}
+                              </Tag>
+                            )}
+                            {reference.recordedStatus &&
+                              !isPermitNotRequired(reference.recordedStatus) &&
+                              !isPermitNotIssued(reference.recordedStatus) && (
+                                <Tag color="geekblue" style={{ fontSize: 10, lineHeight: "16px", marginInlineEnd: 0 }}>
+                                  {reference.recordedStatus}
+                                </Tag>
+                              )}
+                          </div>
                         )}
                       </div>
                     ))

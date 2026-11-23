@@ -97,7 +97,13 @@ function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = nu
   const capUnit = facility?.cellCapacityUnits?.[idx] || facility?.volumeCapacityUnit || "m³";
   const fillUnit = facility?.cellFillUnits?.[idx] || facility?.wasteReceivedUnit || capUnit;
   const cap = toBaseM3(facility?.cellCapacities?.[idx], capUnit);
-  const fill = toBaseM3(facility?.cellFillValues?.[idx], fillUnit);
+  // Committed space = Waste in Cell (baseline + approved) + volume still pending
+  // review. Pending left cellFillValues in occupancy calc v6 but must keep its
+  // space, or several pending loads could each pass this gate and overfill the
+  // cell once approved.
+  const fill =
+    toBaseM3(facility?.cellFillValues?.[idx], fillUnit) +
+    (toBaseM3(facility?.cellFillPendingValues?.[idx], fillUnit) || 0);
   const hasCap = cap > 0;
   const remaining = hasCap ? Math.max(0, cap - fill) : null;
   const utilization = hasCap ? Math.round((fill / cap) * 10000) / 100 : null;

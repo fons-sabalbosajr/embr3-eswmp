@@ -30,6 +30,7 @@ import {
   SaveOutlined,
   EnvironmentOutlined,
   UserOutlined,
+  WarningFilled,
 } from "@ant-design/icons";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import CellGaugeLegend from "./slf-monitoring/CellGaugeLegend";
@@ -39,7 +40,7 @@ import {
   getCellStatusConfig,
   isNonExistentCell,
   getCapacityStatus,
-  getSlfCapacityColor,
+  resolveCellGaugeState,
   CELL_TYPE_OPTIONS,
   CELL_STATUS_OPTIONS,
 } from "../../utils/cellVisuals";
@@ -273,14 +274,16 @@ function CellHoverDetails({ cell, row }) {
 
 
 function CellGauge({ cell, row }) {
-  const { typeConfig, statusConfig } = cell;
-  // Status/capacity-based gauge colour (centralized helper): the cell keeps its
-  // assigned type colour while available, escalates to warning/alarming/critical
-  // as it fills, and renders gray when the cell is nonexistent / has no data.
-  const color = getSlfCapacityColor(cell.percent, {
-    baseColor: typeConfig.color,
-    exists: statusConfig.key !== "not-existing",
-  });
+  // Colour = the cell's STATE (status first, then fullness for an active cell),
+  // drawn at full strength — see resolveCellGaugeState. A completed or closed
+  // cell keeps its colour however much it holds, instead of the muted grey that
+  // made it look like an empty reserved cell.
+  const state = resolveCellGaugeState(cell.status, cell.percent);
+  const color = state.color;
+  // A cell that cannot receive waste but holds submitted placements (e.g. a
+  // cell re-tagged Reserved after a load was placed in it).
+  const misplaced =
+    (state.key === "reserved" || state.key === "construction") && Number(cell.submittedUsed || 0) > 0;
   return (
     <Popover
       placement="top"
@@ -288,32 +291,58 @@ function CellGauge({ cell, row }) {
       title={<Text strong style={{ fontSize: 13 }}>{cell.name}</Text>}
       mouseEnterDelay={0.15}
     >
-      <div style={{ textAlign: "center", minWidth: 62, cursor: "pointer" }}>
+      <div style={{ textAlign: "center", minWidth: 66, cursor: "pointer", position: "relative" }}>
+        {misplaced && (
+          <Tooltip title="This cell cannot receive waste but holds submitted placements — correct them or change its status.">
+            <WarningFilled style={{ position: "absolute", top: -2, right: 2, color: "#ff4d4f", fontSize: 12, zIndex: 1 }} />
+          </Tooltip>
+        )}
         <GaugeMeter
           percent={cell.percent}
           color={color}
+          // A light ring in the state's own colour, so the state reads even
+          // when the cell is nearly empty.
+          trackColor={`${color}26`}
           size={60}
-          thickness={4}
+          thickness={5}
           percentFontSize={11}
           noDataFontSize={9}
           noDataText="n/a"
-          fillStyle={statusConfig.fill}
-          fillOpacity={statusConfig.opacity}
+          fillStyle={state.fill}
+          fillOpacity={1}
         />
         <div
           style={{
             fontSize: 10,
-            fontWeight: 400,
+            fontWeight: 600,
             marginTop: 1,
-            color,
-            opacity: statusConfig.disabled ? 0.65 : 1,
-            maxWidth: 70,
+            color: "#262626",
+            maxWidth: 74,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
           {cell.name}
+        </div>
+        <div
+          style={{
+            display: "inline-block",
+            marginTop: 2,
+            padding: "0 6px",
+            borderRadius: 8,
+            fontSize: 9,
+            lineHeight: "14px",
+            fontWeight: 600,
+            color: "#fff",
+            background: color,
+            maxWidth: 74,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {state.label}
         </div>
       </div>
     </Popover>
@@ -796,7 +825,7 @@ export default function CellInfraOverview({
                   {/* The "Available Cells" column is a wall of coloured gauges; without
                       a key the colours are unreadable. Same shared legend as every
                       other cell gauge in the app. */}
-                  <CellGaugeLegend isDark={isDark} />
+                  <CellGaugeLegend isDark={isDark} statusMode="states" />
                 </>
               ) : (
                 <Empty description="No SLF cell infrastructure to show yet" />

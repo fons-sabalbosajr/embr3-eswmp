@@ -42,6 +42,7 @@ import {
 import Swal from "sweetalert2";
 import api from "../../api";
 import MessageUserButton from "../../components/MessageUserButton";
+import MovAttachmentList from "../../components/MovAttachmentList";
 import dayjs from "dayjs";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
@@ -110,23 +111,48 @@ function StatCard({ label, value, color, bg, border }) {
   );
 }
 
-function CellEntriesTable({ entries, unit = "m³" }) {
+// The section's Means of Verification, uploaded by the operator from the
+// section card on the portal's Baseline tab.
+function SectionMovLine({ mov }) {
+  if (!Array.isArray(mov) || !mov.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "0 0 8px", fontSize: 12 }}>
+      <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap", paddingTop: 1 }}>
+        MOV ({mov.length}):
+      </Text>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <MovAttachmentList attachments={mov} />
+      </div>
+    </div>
+  );
+}
+
+function CellEntriesTable({ entries, unit = "m³", mov }) {
   if (!entries?.length)
     return (
-      <Empty
-        description="No cell entries"
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-        style={{ margin: "8px 0" }}
-      />
+      <>
+        <SectionMovLine mov={mov} />
+        <Empty
+          description="No cell entries"
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          style={{ margin: "8px 0" }}
+        />
+      </>
     );
+  // Optional columns appear only when the operator supplied the detail, so older
+  // baselines keep their compact layout.
+  const hasDateClosed = entries.some((e) => e?.dateClosed);
+  const hasMov = entries.some((e) => e?.movAttachments?.length);
   return (
+    <>
+    <SectionMovLine mov={mov} />
     <Table
       dataSource={entries}
       rowKey={(_, i) => i}
       size="small"
       pagination={false}
       tableLayout="fixed"
-      scroll={{ x: 520 }}
+      scroll={{ x: 520 + (hasDateClosed ? 120 : 0) + (hasMov ? 130 : 0) }}
       style={{ fontSize: 11 }}
       columns={[
         {
@@ -170,8 +196,21 @@ function CellEntriesTable({ entries, unit = "m³" }) {
               "—"
             ),
         },
-      ]}
+        hasDateClosed && {
+          title: "Date Closed",
+          dataIndex: "dateClosed",
+          width: 120,
+          render: (v) => (v ? dayjs(v).format("MMM D, YYYY") : "—"),
+        },
+        hasMov && {
+          title: "MOV",
+          key: "mov",
+          width: 130,
+          render: (_, row) => <MovAttachmentList attachments={row.movAttachments} compact />,
+        },
+      ].filter(Boolean)}
     />
+    </>
   );
 }
 
@@ -434,7 +473,10 @@ export default function BaselineData({
       closedCellInertUnit: record.closedCellInertUnit || baselineUnit,
     });
     setActiveCells(
+      // Spread first so cellIndex / cellType / MOV attachments survive an admin
+      // edit — the editor only exposes name, type, volume and unit.
       (record.activeCellEntries || []).map((c, i) => ({
+        ...c,
         key: `ac_${i}`,
         cellName: c.cellName || "",
         wasteType: c.wasteType || "",
@@ -444,6 +486,7 @@ export default function BaselineData({
     );
     setClosedCells(
       (record.closedCellEntries || []).map((c, i) => ({
+        ...c,
         key: `cc_${i}`,
         cellName: c.cellName || "",
         wasteType: c.wasteType || "",
@@ -1075,6 +1118,7 @@ export default function BaselineData({
             <CellEntriesTable
               entries={r.activeCellEntries}
               unit={getBaselineUnit(r)}
+              mov={r.baselineMov?.activeCells}
             />
           </div>
         )}
@@ -1103,6 +1147,7 @@ export default function BaselineData({
             <CellEntriesTable
               entries={r.closedCellEntries}
               unit={getBaselineUnit(r)}
+              mov={r.baselineMov?.closedCells}
             />
           </div>
         )}
@@ -1455,6 +1500,7 @@ export default function BaselineData({
                           <CellEntriesTable
                             entries={r.activeCellEntries}
                             unit={getBaselineUnit(r)}
+              mov={r.baselineMov?.activeCells}
                           />
                         ) : (
                           <Row gutter={8}>
@@ -1516,6 +1562,7 @@ export default function BaselineData({
                           <CellEntriesTable
                             entries={r.closedCellEntries}
                             unit={getBaselineUnit(r)}
+              mov={r.baselineMov?.closedCells}
                           />
                         ) : (
                           <Row gutter={8}>
@@ -1575,11 +1622,16 @@ export default function BaselineData({
                         ),
                         children:
                           (r.accreditedHaulers || []).length === 0 ? (
-                            <Empty
-                              description="No accredited haulers"
-                              image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            />
+                            <>
+                              <SectionMovLine mov={r.baselineMov?.haulers} />
+                              <Empty
+                                description="No accredited haulers"
+                                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                              />
+                            </>
                           ) : (
+                            <>
+                            <SectionMovLine mov={r.baselineMov?.haulers} />
                             <Table
                               dataSource={r.accreditedHaulers}
                               rowKey={(h, i) => `${h.haulerName}-${i}`}
@@ -1696,6 +1748,7 @@ export default function BaselineData({
                                 },
                               ]}
                             />
+                            </>
                           ),
                       },
                     ]}

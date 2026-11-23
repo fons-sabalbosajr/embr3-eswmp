@@ -2,6 +2,10 @@
 // Formatting, baseline detection, admin-notice filtering, and cell-status
 // predicates. All pure: no hooks, no component state.
 
+// Explicit extension: this module is also loaded by the node:test suite, whose
+// ESM resolver does not guess extensions the way Vite does.
+import { convertVolume } from "../../utils/volumeUnits.js";
+
 export const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 
 /**
@@ -47,18 +51,34 @@ export const hasBaselinePayload = (data = {}) =>
       data.accreditedHaulers?.length)
   );
 
+// One total in `fallbackUnit` (the SLF's declared unit). Entries recorded in
+// another unit are CONVERTED into it rather than listed side by side as
+// "430,738 m³, 4,194 tons" — that mixed figure is what read as a unit conflict.
+// An entry that can't be converted keeps its own unit in the summary.
 export const formatEntryVolumeSummary = (entries = [], fallbackUnit = "m³") => {
+  const target = normalizeUnit(fallbackUnit);
   const totals = entries.reduce((acc, entry) => {
     const unit = normalizeUnit(entry.unit || fallbackUnit);
-    acc[unit] = (acc[unit] || 0) + Number(entry.volume || 0);
+    const converted = convertVolume(Number(entry.volume || 0), unit, target);
+    const key = converted === null ? unit : target;
+    const value = converted === null ? Number(entry.volume || 0) : converted;
+    acc[key] = (acc[key] || 0) + value;
     return acc;
   }, {});
   const summary = Object.entries(totals)
     .filter(([, volume]) => volume > 0)
-    .map(([unit, volume]) => `${volume.toLocaleString()} ${unit}`)
+    .map(([unit, volume]) => `${volume.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}`)
     .join(", ");
   return summary || `0 ${normalizeUnit(fallbackUnit)}`;
 };
+
+// The section-level MOV block, always with all three lists present.
+export const BASELINE_MOV_SECTIONS = ["activeCells", "closedCells", "haulers"];
+export const normalizeBaselineMov = (value) =>
+  BASELINE_MOV_SECTIONS.reduce((acc, key) => {
+    acc[key] = Array.isArray(value?.[key]) ? value[key].filter((a) => a?.url) : [];
+    return acc;
+  }, {});
 
 export const isTestAdminNotice = (item = {}) => {
   const isAdminNotice =

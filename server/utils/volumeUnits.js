@@ -61,15 +61,17 @@ function convertVolumeSafe({ value, fromUnit, toUnit }) {
   return { value: converted, ok: true, reason: null };
 }
 
-// The unit an SLF facility DECLARES, read from the fields "Set Field Units" writes.
+// The unit an SLF facility DECLARES. Same order as the front-end module and the
+// occupancy recompute: admin-set capacity units first, `wasteReceivedUnit`
+// (written by the recompute) after them.
 function resolveFacilityUnit(facility, fallback = TONS) {
   const candidates = [
-    facility?.wasteReceivedUnit,
     facility?.volumeCapacityUnit,
+    (facility?.cellCapacityUnits || []).find(Boolean),
+    facility?.wasteReceivedUnit,
     facility?.receivingVolumeCapacityUnit,
     facility?.estimatedVolumeWasteUnit,
     facility?.baselineUnit,
-    (facility?.cellCapacityUnits || []).find(Boolean),
     (facility?.cellFillUnits || []).find(Boolean),
   ];
   for (const c of candidates) {

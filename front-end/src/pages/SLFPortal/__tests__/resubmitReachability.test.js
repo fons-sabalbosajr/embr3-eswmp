@@ -59,8 +59,10 @@ test("a reverted row offers Resubmit, never Remove", () => {
   assert.match(columns, /\{!needsResubmit && \(\s*<Tooltip title="Remove from my history/);
 });
 
-test("the history has a Remarks column that labels resubmissions", () => {
-  assert.match(columns, /title: "Remarks",\s*key: "remarks"/);
+test("the history's Status / Remarks column labels resubmissions", () => {
+  // Status and Remarks are ONE column: the tag, then the reason beneath it.
+  assert.match(columns, /title: "Status \/ Remarks",/);
+  assert.match(columns, /\{renderStatusTag\(v, r\)\}\s*\{remark\}/);
   assert.match(columns, /Resubmission\{resub\.count > 1/);
   assert.match(columns, /Needs correction — Edit &amp; Resubmit/);
 });

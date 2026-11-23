@@ -1,5 +1,6 @@
 import { Space, Tag, Tooltip, Typography } from "antd";
 import { VOLUME_METRICS } from "../../../utils/volumeMetrics";
+import { CELL_GAUGE_STATE_LIST } from "../../../utils/cellVisuals";
 
 const { Text } = Typography;
 
@@ -76,8 +77,16 @@ const item = ({ key, label, color, description }, dashed) => (
 /**
  * @param {boolean} [showVolumeComposition] hide the volume rows when the facility
  *   has no baseline/submitted split recorded (legacy records)
+ * @param {"fullness"|"states"} [statusMode] "states" keys the per-STATUS gauge
+ *   colours (Used/Completed, Closed, Reserved…; see resolveCellGaugeState) used
+ *   by the Cell Infrastructure Overview. The default keeps the fullness tags the
+ *   other gauges are drawn with, so each legend matches its own gauges.
  */
-export default function CellGaugeLegend({ isDark = false, showVolumeComposition = true }) {
+export default function CellGaugeLegend({ isDark = false, showVolumeComposition = true, statusMode = "fullness" }) {
+  const statusItems =
+    statusMode === "states"
+      ? CELL_GAUGE_STATE_LIST.map((s) => ({ ...s, range: "—", dashed: s.fill === "dashed" }))
+      : FULLNESS_STATUS;
   return (
     <div
       style={{
@@ -121,11 +130,21 @@ export default function CellGaugeLegend({ isDark = false, showVolumeComposition 
           Cell status
         </Text>
         <Space size={8} wrap>
-          {FULLNESS_STATUS.map((s) => (
+          {statusItems.map((s) => (
             <Tooltip key={s.key} title={s.description}>
               <Tag
-                color={s.color}
-                style={{ margin: 0, fontSize: 10.5, lineHeight: "18px", borderRadius: 10 }}
+                color={s.dashed ? undefined : s.color}
+                style={{
+                  margin: 0,
+                  fontSize: 10.5,
+                  lineHeight: "18px",
+                  borderRadius: 10,
+                  // Dashed states (reserved / under construction) are drawn as
+                  // dashed arcs on the gauge, so their key is dashed too.
+                  ...(s.dashed
+                    ? { border: `1.5px dashed ${s.color}`, color: s.color, background: `${s.color}14` }
+                    : {}),
+                }}
               >
                 {s.label}
                 {s.range !== "—" ? ` · ${s.range}` : ""}

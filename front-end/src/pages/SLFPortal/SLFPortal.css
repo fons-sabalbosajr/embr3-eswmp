@@ -1906,3 +1906,97 @@ body.slf-portal-active .ant-table-wrapper .ant-table-body {
 .slf-detail-fit .ant-typography {
   font-size: inherit !important;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   TABLET LAYER — iPad 13" (≈1024 px portrait, ≈1366 px landscape) and similar.
+   ─────────────────────────────────────────────────────────────────────────────
+   Scoped to the portal (body.slf-portal-active) and to tablet widths, so phone
+   and desktop layouts are untouched. The sidebar also starts collapsed in this
+   range (index.jsx → isTablet).
+
+   The problem it fixes: most portal tables declare no horizontal scroll, so on a
+   tablet antd SQUEEZED every column into the width it had — headers broke into
+   one letter per line and figures wrapped mid-number. Here a table keeps its
+   columns readable and scrolls sideways inside its own card instead.
+   ══════════════════════════════════════════════════════════════════════════════ */
+@media (min-width: 768px) and (max-width: 1366px) {
+  body.slf-portal-active .slf-portal-content {
+    padding: 16px !important;
+  }
+
+  /* Tables: scroll sideways inside their container, smooth on touch. */
+  body.slf-portal-active .ant-table-wrapper {
+    max-width: 100%;
+  }
+  body.slf-portal-active .ant-table-content,
+  body.slf-portal-active .ant-table-body {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Headers stay on one line so a column keeps a readable minimum width (the
+     table scrolls rather than crushing it); body cells still wrap. */
+  body.slf-portal-active .ant-table-thead > tr > th {
+    white-space: nowrap;
+    font-size: 12px;
+    padding: 8px 10px !important;
+  }
+  body.slf-portal-active .ant-table-tbody > tr > td {
+    font-size: 12.5px;
+    padding: 8px 10px !important;
+  }
+  body.slf-portal-active .ant-table-small .ant-table-thead > tr > th,
+  body.slf-portal-active .ant-table-small .ant-table-tbody > tr > td {
+    padding: 6px 8px !important;
+  }
+  /* Numbers never break in the middle. */
+  body.slf-portal-active .ant-table-cell[style*="text-align: right"],
+  body.slf-portal-active .ant-table-cell.ant-table-cell-align-right {
+    white-space: nowrap;
+  }
+  /* Detail/fit tables intentionally wrap everything (see .slf-detail-fit). */
+  body.slf-portal-active .slf-detail-fit .ant-table-thead > tr > th {
+    white-space: normal !important;
+  }
+
+  /* Card headers: actions (Add Entry, Upload MOV, Export…) wrap under the
+     title instead of pushing it off the card. */
+  body.slf-portal-active .ant-card-head-wrapper {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  body.slf-portal-active .ant-card-extra {
+    margin-inline-start: auto;
+    max-width: 100%;
+  }
+  body.slf-portal-active .slf-baseline-section-card .ant-card-head-title {
+    white-space: normal;
+  }
+
+  /* Tab bars with extra content (the Data Entry unit tag) wrap too. */
+  body.slf-portal-active .ant-tabs-nav {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* Wide modals (detail views are 1000–1200 px) fit the tablet with a margin. */
+  body.slf-portal-active .ant-modal {
+    max-width: calc(100vw - 32px) !important;
+  }
+  body.slf-portal-active .ant-modal-body {
+    overflow-x: auto;
+  }
+
+  /* Touch targets: small icon buttons in table action columns get a usable size. */
+  body.slf-portal-active .ant-table .ant-btn-sm.ant-btn-icon-only {
+    min-width: 32px;
+    height: 32px;
+  }
+}
+
+/* iPad portrait specifically: the five-across KPI / overview grids drop to
+   three so each tile keeps its label on one line. */
+@media (min-width: 768px) and (max-width: 1100px) {
+  body.slf-portal-active .eswmp-grid-5 {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}

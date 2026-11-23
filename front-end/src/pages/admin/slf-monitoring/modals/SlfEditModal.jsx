@@ -1,5 +1,5 @@
 import HaulerClientsEditor from "../../slf-monitoring/HaulerClientsEditor";
-import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, SLF_DOCUMENT_TYPE_OPTIONS, THREE_DECIMAL_STEP, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, fileUrlFromValue, formatFileSize, formatThreeDecimalInput, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, parseDecimalInput, renderUploadStatusCell, resolveMediaOpenUrl, resolveMediaUrl, resolveUploadName, slfUploadProps, uploadEventToFileList, uploadFileFromValue } from "../../slf-monitoring/helpers.jsx";
+import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, SLF_DOCUMENT_TYPE_OPTIONS, THREE_DECIMAL_STEP, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, fileUrlFromValue, formatFileSize, formatThreeDecimalInput, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, resolveFacilityUnit, parseDecimalInput, renderUploadStatusCell, resolveMediaOpenUrl, resolveMediaUrl, resolveUploadName, slfUploadProps, uploadEventToFileList, uploadFileFromValue } from "../../slf-monitoring/helpers.jsx";
 import { AlertOutlined, BankOutlined, BarChartOutlined, CalculatorOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined, SafetyCertificateOutlined, TeamOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
 // `Image` MUST be imported from antd. Without it, JSX <Image> resolves to the
 // browser's global Image constructor and React throws "Please use the 'new'
@@ -32,22 +32,22 @@ const CELL_ARRAY_FIELDS = [
 ];
 
 /**
- * Read-only breakdown of one cell's recorded Waste in Cell: baseline + portal
- * submissions = the figure the data gives, and, when an admin declared the
- * cell's figure, that declaration. Reads the facility's stored split
- * (cellFillBaselineValues / cellFillSubmittedValues), written by the same server
- * recompute that writes cellFillValues, so it always matches the View modal.
+ * Read-only Waste in Cell for one cell: Baseline + Approved submissions — the
+ * SAME stored figures the View modal draws (cellFillBaselineValues /
+ * cellFillSubmittedValues / cellFillValues, written by the server recompute),
+ * converted into the unit this form edits in, so the two modals never differ.
+ * Pending-review volume is shown beside it: it holds capacity but is not in the
+ * cell until EMB approves it.
  */
-function CellFillBreakdown({ record, index }) {
+function CellFillBreakdown({ record, index, unit }) {
   if (!record?._id) return null;
-  const unit = record.cellFillUnits?.[index] || record.wasteReceivedUnit || "";
-  const baseline = Number(record.cellFillBaselineValues?.[index] || 0);
-  const submitted = Number(record.cellFillSubmittedValues?.[index] || 0);
-  const effective = Number(record.cellFillValues?.[index] || 0);
-  const declared = Boolean(record.cellFillOverridden?.[index]);
-  const declaredBase = record.cellFillOverrideValues?.[index];
-  const declaredAt = record.cellFillOverrideAt?.[index];
-  if (!declared && baseline <= 0 && submitted <= 0 && effective <= 0) return null;
+  const storedUnit = record.cellFillUnits?.[index] || record.wasteReceivedUnit || unit;
+  const inUnit = (v) => convertVolume(Number(v || 0), storedUnit, unit) ?? Number(v || 0);
+  const baseline = inUnit(record.cellFillBaselineValues?.[index]);
+  const submitted = inUnit(record.cellFillSubmittedValues?.[index]);
+  const pending = inUnit(record.cellFillPendingValues?.[index]);
+  const effective = inUnit(record.cellFillValues?.[index]);
+  const legacy = Boolean(record.cellFillOverridden?.[index]);
   const fmt = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
   return (
     <div
@@ -55,21 +55,30 @@ function CellFillBreakdown({ record, index }) {
         fontSize: 11,
         lineHeight: 1.5,
         margin: "-2px 0 8px",
-        padding: "4px 8px",
+        padding: "6px 8px",
         borderRadius: 6,
         background: "rgba(47, 84, 235, 0.06)",
       }}
     >
       <div>
-        Baseline <b>{fmt(baseline)}</b> + Portal submissions{" "}
-        <b style={{ color: "#2f54eb" }}>{fmt(submitted)}</b> ={" "}
-        <b>{fmt(baseline + submitted)}</b> {unit}
+        <Text type="secondary" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.3 }}>
+          Waste in Cell
+        </Text>{" "}
+        <b style={{ fontSize: 13 }}>{fmt(effective)}</b> {unit}
       </div>
-      {declared && (
-        <div style={{ color: "#722ed1" }}>
-          Admin-declared{declaredBase != null ? ` base ${fmt(declaredBase)} ${unit}` : ""}
-          {declaredAt ? ` on ${new Date(declaredAt).toLocaleDateString()}` : ""} — recorded figure{" "}
-          <b>{fmt(effective)}</b> {unit}. Clear Waste in Cell to use the data figure.
+      <div>
+        Baseline <b>{fmt(baseline)}</b> + Approved submissions{" "}
+        <b style={{ color: "#2f54eb" }}>{fmt(submitted)}</b> = <b>{fmt(baseline + submitted)}</b> {unit}
+      </div>
+      {pending > 0 && (
+        <div style={{ color: "#d48806" }}>
+          + {fmt(pending)} {unit} pending review (reserved against capacity, added once approved)
+        </div>
+      )}
+      {legacy && (
+        <div style={{ color: "#8c8c8c" }}>
+          An older hand-typed figure ({fmt(inUnit(record.cellFillOverrideValues?.[index]))} {unit}) is no
+          longer used — Waste in Cell always follows the formula.
         </div>
       )}
     </div>
@@ -95,7 +104,6 @@ export default function SlfEditModal({
   mbaOptions,
   slfStatusOptions,
   cellActionSaving,
-  handleCellFillValueChange,
   saveCellStatusNow,
   saveCellSubmissionAllowedNow,
   preventiveUploadEventToFileList,
@@ -1530,13 +1538,17 @@ export default function SlfEditModal({
                         if (cellCount < 1) return null;
                         // #5/#7: cells use the facility's single declared baseline
                         // unit (shown as a locked addon), not a per-cell picker.
+                        // The ONE declared-unit rule (shared with the View modal,
+                        // the portal and the server). openEdit converts every cell
+                        // figure into it, so number and label always agree.
                         const cellBaselineUnit =
                           normalizeUnit(
-                            form.getFieldValue("wasteReceivedUnit") ||
-                              form.getFieldValue("volumeCapacityUnit") ||
-                              (form.getFieldValue("cellCapacityUnits") || []).find(Boolean) ||
-                              (form.getFieldValue("cellFillUnits") || []).find(Boolean) ||
-                              "tons",
+                            resolveFacilityUnit({
+                              volumeCapacityUnit: form.getFieldValue("volumeCapacityUnit"),
+                              cellCapacityUnits: form.getFieldValue("cellCapacityUnits") || [],
+                              wasteReceivedUnit: form.getFieldValue("wasteReceivedUnit"),
+                              cellFillUnits: form.getFieldValue("cellFillUnits") || [],
+                            }),
                           ) || "tons";
                         return (
                           <>
@@ -1668,8 +1680,17 @@ export default function SlfEditModal({
                                                   </Form.Item>
                                                 </Col>
                                                 <Col span={12}>
+                                                  {/* READ-ONLY: Waste in Cell is
+                                                      baseline + approved submissions,
+                                                      recomputed by the server. A typed
+                                                      figure used to replace it and hid
+                                                      the baseline and every approval. */}
                                                   <Form.Item
-                                                    label="Waste in Cell"
+                                                    label={
+                                                      <Tooltip title="Baseline + approved portal submissions. Change the baseline or the submission to change it.">
+                                                        <span>Waste in Cell</span>
+                                                      </Tooltip>
+                                                    }
                                                     name={[
                                                       "cellFillValues",
                                                       i,
@@ -1682,31 +1703,22 @@ export default function SlfEditModal({
                                                       style={{
                                                         width: "100%",
                                                       }}
-                                                      min={0}
-                                                      step={THREE_DECIMAL_STEP}
+                                                      disabled
+                                                      readOnly
                                                       precision={3}
-                                                      placeholder="Deposited"
+                                                      placeholder="0"
                                                       addonAfter={
                                                         cellBaselineUnit
                                                       }
                                                       formatter={formatThreeDecimalInput}
                                                       parser={parseDecimalInput}
-                                                      onChange={(value) =>
-                                                        handleCellFillValueChange(
-                                                          i,
-                                                          value,
-                                                        )
-                                                      }
                                                     />
                                                   </Form.Item>
                                                 </Col>
                                               </Row>
-                                              {/* What the recorded Waste in Cell is
-                                                  made of, from the split the server
-                                                  writes with every recompute — so an
-                                                  admin sees baseline vs. portal
-                                                  submissions before typing over it. */}
-                                              <CellFillBreakdown record={editing} index={i} />
+                                              {/* The formula behind it — the same
+                                                  stored split the View modal draws. */}
+                                              <CellFillBreakdown record={editing} index={i} unit={cellBaselineUnit} />
                                               <Row gutter={8}>
                                                 <Col span={12}>
                                                   <Form.Item

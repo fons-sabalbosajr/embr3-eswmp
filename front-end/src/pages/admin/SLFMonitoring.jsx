@@ -207,6 +207,7 @@ import {
   slfUploadProps,
   uploadEventToFileList,
   convertVolume,
+  resolveFacilityUnit,
   getWasteKind,
   isHazardousCellType,
   resolveMediaUrl,
@@ -217,7 +218,6 @@ import {
   fileNameFromUrl,
   getServedClientCount,
 } from "./slf-monitoring/helpers.jsx";
-import { declaredCellFills } from "./slf-monitoring/cellTally";
 
 const EMPTY_ROWS = [];
 
@@ -1228,15 +1228,7 @@ export default function SLFMonitoring({
     });
   };
 
-  // The Waste in Cell figures as LOADED into the form, and which of them were
-  // already admin-declared. See declaredFillValues() for why this is needed.
-  const loadedFillRef = useRef({ values: [], overridden: [] });
-
   const populateForm = (record) => {
-    loadedFillRef.current = {
-      values: Array.isArray(record.cellFillValues) ? [...record.cellFillValues] : [],
-      overridden: Array.isArray(record.cellFillOverridden) ? [...record.cellFillOverridden] : [],
-    };
     const receivingFacilities = record.receivingFacilities?.length
       ? record.receivingFacilities
       : (record.mrfDetails || []).map((item) => ({
@@ -1271,24 +1263,26 @@ export default function SLFMonitoring({
             },
           ]
         : [];
-    const declaredCellUnit = normalizeUnit(
-      record.wasteReceivedUnit ||
-        record.volumeCapacityUnit ||
-        record.receivingVolumeCapacityUnit ||
-        record.estimatedVolumeWasteUnit ||
-        record.cellCapacityUnits?.find(Boolean) ||
-        record.cellFillUnits?.find(Boolean) ||
-        "tons",
-    );
+    // THE declared unit (same rule as the View modal, the portal and the server).
+    const declaredCellUnit = normalizeUnit(resolveFacilityUnit(record)) || "tons";
+    // The form edits every cell in that one unit, so each stored figure is
+    // CONVERTED into it here. Showing a cell's stored number under the facility
+    // unit — and then saving it stamped with that unit — reinterpreted the
+    // quantity (General Tinio: 2,052 m³ read and saved as 2,052 tons).
+    const inDeclaredUnit = (values = [], units = []) =>
+      (values || []).map((value, i) => {
+        if (value === null || value === undefined || value === "") return value;
+        const converted = convertVolume(value, units?.[i] || declaredCellUnit, declaredCellUnit);
+        return converted === null ? value : Math.round(converted * 1000) / 1000;
+      });
+    const cellSlots = Math.max(record.numberOfCell || 0, (record.cellCapacities || []).length);
     form.setFieldsValue({
       ...record,
       cellNames:
         record.cellNames ||
         Array.from({ length: record.numberOfCell || 0 }, () => ""),
-      cellCapacities: record.cellCapacities || [],
-      cellCapacityUnits:
-        record.cellCapacityUnits ||
-        Array.from({ length: record.numberOfCell || 0 }, () => declaredCellUnit),
+      cellCapacities: inDeclaredUnit(record.cellCapacities, record.cellCapacityUnits),
+      cellCapacityUnits: Array.from({ length: cellSlots }, () => declaredCellUnit),
       cellStatuses: (
         record.cellStatuses ||
         Array.from({ length: record.numberOfCell || 0 }, () => "Active Cell")
@@ -1302,15 +1296,22 @@ export default function SLFMonitoring({
       cellNotes:
         record.cellNotes ||
         Array.from({ length: record.numberOfCell || 0 }, () => ""),
-      cellFillValues:
-        record.cellFillValues ||
-        Array.from({ length: record.numberOfCell || 0 }, () => null),
-      cellFillUnits:
-        record.cellFillUnits ||
-        Array.from({ length: record.numberOfCell || 0 }, () => declaredCellUnit),
+      cellFillValues: record.cellFillValues
+        ? inDeclaredUnit(record.cellFillValues, record.cellFillUnits)
+        : Array.from({ length: record.numberOfCell || 0 }, () => null),
+      cellFillUnits: Array.from({ length: cellSlots }, () => declaredCellUnit),
+      volumeCapacity:
+        record.volumeCapacity != null && record.volumeCapacity !== ""
+          ? convertVolume(record.volumeCapacity, record.volumeCapacityUnit || declaredCellUnit, declaredCellUnit) ?? record.volumeCapacity
+          : record.volumeCapacity,
+      actualResidualWasteReceived:
+        record.actualResidualWasteReceived != null && record.actualResidualWasteReceived !== ""
+          ? convertVolume(record.actualResidualWasteReceived, record.wasteReceivedUnit || declaredCellUnit, declaredCellUnit) ?? record.actualResidualWasteReceived
+          : record.actualResidualWasteReceived,
+      wasteReceivedUnit: declaredCellUnit,
       lguServedList: record.lguServedList || [],
       privateCompaniesServed: record.privateCompaniesServed || [],
-      volumeCapacityUnit: record.volumeCapacityUnit || declaredCellUnit,
+      volumeCapacityUnit: declaredCellUnit,
       receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || declaredCellUnit,
       wastewaterTreatmentFacilityType: asStringArray(
         record.wastewaterTreatmentFacilityType,
@@ -1338,7 +1339,6 @@ export default function SLFMonitoring({
       dateReportReviewedFocal: record.dateReportReviewedFocal
         ? dayjs(record.dateReportReviewedFocal)
         : null,
-      wasteReceivedUnit: record.wasteReceivedUnit || declaredCellUnit,
       estimatedVolumeWasteUnit: record.estimatedVolumeWasteUnit || declaredCellUnit,
       dateReportApproved: record.dateReportApproved
         ? dayjs(record.dateReportApproved)
@@ -1400,7 +1400,6 @@ export default function SLFMonitoring({
 
   const openAdd = () => {
     // A new facility has no loaded figures: whatever is typed is a declaration.
-    loadedFillRef.current = { values: [], overridden: [] };
     setEditing(null);
     setEditYear(new Date().getFullYear());
     setEditYearRecords([]);
@@ -1460,7 +1459,6 @@ export default function SLFMonitoring({
     } else {
       // Blank record for this year — keep location fields from current editing
       const current = editing || {};
-      loadedFillRef.current = { values: [], overridden: [] };
       setEditing({
         _id: null,
         lgu: current.lgu,
@@ -1837,13 +1835,17 @@ export default function SLFMonitoring({
       // cards no longer offer a per-cell unit picker, so stamp every cell's unit to
       // the baseline here (values are already entered/kept in that unit facility-wide
       // via the unit-change handlers).
+      // Same declared-unit rule as everywhere else. The form already holds every
+      // cell's figure CONVERTED into this unit (see openEdit), so stamping it on
+      // every cell is a label that matches the number, not a reinterpretation.
       const baselineCellUnit =
         normalizeUnit(
-          fieldValue("wasteReceivedUnit") ||
-            fieldValue("volumeCapacityUnit") ||
-            (fieldValue("cellCapacityUnits", []) || []).find(Boolean) ||
-            (fieldValue("cellFillUnits", []) || []).find(Boolean) ||
-            "tons",
+          resolveFacilityUnit({
+            volumeCapacityUnit: fieldValue("volumeCapacityUnit"),
+            cellCapacityUnits: fieldValue("cellCapacityUnits", []),
+            wasteReceivedUnit: fieldValue("wasteReceivedUnit"),
+            cellFillUnits: fieldValue("cellFillUnits", []),
+          }),
         ) || "tons";
       const cellCountForUnits =
         Number(fieldValue("numberOfCell", 0)) ||
@@ -1960,18 +1962,10 @@ export default function SLFMonitoring({
           .filter((d) => d.title || d.url || d.description || d.docType),
       };
       Object.assign(payload, computeFields(payload));
-      // This form is the only place a "Waste in Cell" figure is typed by hand.
-      // Saying so marks the cells the admin filled in as admin-declared, so the
-      // figure survives the derived recompute instead of being overwritten by
-      // the next submission. A cell left blank stays derived.
-      //
-      // ONLY the cells the admin actually declared. The inputs are pre-filled
-      // with the DERIVED figure, so sending them back as-is declared every cell
-      // on every save — editing a permit froze each cell's current total as an
-      // admin base, and later corrections (a revert, a baseline change) stopped
-      // reaching it. An untouched derived cell is sent blank and stays derived.
-      payload.cellFillValues = declaredFillValues(payload.cellFillValues);
-      payload.cellFillValuesDeclared = true;
+      // Waste in Cell is no longer typed here: it is always baseline + approved
+      // submissions, recomputed by the server after this save. The derived
+      // figures are sent back only so cells keep their place when the list
+      // changes; the server never treats them as a declaration.
       if (editing && editing._id) {
         const { data } = await api.put(
           `/slf-facilities/${editing._id}`,
@@ -2089,20 +2083,6 @@ export default function SLFMonitoring({
       actualResidualWasteReceived: Number(total.toFixed(3)),
       wasteReceivedUnit: targetUnit,
     });
-  };
-
-  // Which Waste in Cell values are DECLARATIONS: a cell that was already
-  // admin-declared keeps whatever the field now says (blank clears it), and a
-  // derived cell counts only if the admin changed its figure. Everything else
-  // goes back blank so the server leaves it derived.
-  const declaredFillValues = (formFills = []) =>
-    declaredCellFills(formFills, loadedFillRef.current);
-
-  const handleCellFillValueChange = (index, value) => {
-    const nextFills = [...(form.getFieldValue("cellFillValues") || [])];
-    nextFills[index] = value;
-    form.setFieldsValue({ cellFillValues: nextFills });
-    syncWasteReceivedFromCellFills(nextFills);
   };
 
   const handleCellCapacityUnitChange = (index, value) => {
@@ -3185,7 +3165,6 @@ export default function SLFMonitoring({
         mbaOptions={mbaOptions}
         slfStatusOptions={slfStatusOptions}
         cellActionSaving={cellActionSaving}
-        handleCellFillValueChange={handleCellFillValueChange}
         saveCellStatusNow={saveCellStatusNow}
         saveCellSubmissionAllowedNow={saveCellSubmissionAllowedNow}
         preventiveUploadEventToFileList={preventiveUploadEventToFileList}

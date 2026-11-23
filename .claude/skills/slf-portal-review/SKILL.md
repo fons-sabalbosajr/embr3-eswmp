@@ -1,6 +1,7 @@
 ---
 name: slf-portal-review
-description: Recurring maintenance, monitoring, and improvement pass for the SLF Portal (portal-user side) of the EMBR3 ESWMP app — monitors portal users' Excel/CSV uploads and submissions, verifies submissions reflect in the SLF Dashboard capacity gauges, audits for cross-portal-user data leakage, exercises portal functions for correctness, improves the portal→admin submission pipeline, fixes broken portal-side code, upgrades the assigned-SLF dashboard from submitted data, and enforces the over-capacity / data-correction submission notes that block submission. Use whenever the user says "check the SLF Portal", "review the portal side", "monitor portal users", "check portal submissions", "is portal data leaking", "why won't the submission proceed", "over capacity", "check the SLF dashboard capacity", "improve portal submissions", or asks about anything on the portal-user (SLF facility) side of this app.
+description: Recurring maintenance, monitoring, and improvement pass for the SLF Portal (portal-user side) of the EMBR3 ESWMP app — monitors portal users' Excel/CSV uploads and submissions, verifies submissions reflect in the SLF Dashboard capacity gauges, audits for cross-portal-user data leakage, exercises portal functions for correctness, improves the portal→admin submission pipeline, fixes broken portal-side code, upgrades the assigned-SLF dashboard from submitted data, and enforces the over-capacity / data-correction submission notes that block submission. Use only when the user asks for a review or monitoring PASS: "check the SLF Portal", "review the portal side", "monitor portal users", "check portal submissions", "is portal data leaking". Do NOT use for a specific bug fix or feature request on the portal — handle those directly.
+model: sonnet
 ---
 
 # SLF Portal Review & Improvement
@@ -22,10 +23,16 @@ Never trade either of those for convenience or speed.
 a short fix-run-repeat loop. The repo has two package roots —
 `front-end/` (Vite/React) and `server/` (Express/Mongoose). Detect the
 build/test command per root (`npm run build` / `npm run lint` in front-end,
-`npm start` / any test script in server); run it, and on failure diagnose, make
-the smallest correcting fix, and re-run. Stop on pass, on the same failure
-twice, or after ~10 iterations. Never leave a change applied-but-unverified. If
+`npm start` / any test script in server); run only the test files for the code
+you touched (full suite once at the end). On failure, make the smallest
+correcting fix and re-run. Stop on pass, on the same failure twice, or after 3
+iterations. Never leave a change applied-but-unverified. If
 no command exists for a root, say so and skip its loop rather than guessing.
+
+**Scope (read first):** run ONLY the sections the user names. With no sections
+named, run 3 (data isolation) and 8 (capacity gate) — the two invariants — and
+list the others as available. Run all nine only when the user asks for a "full"
+review. Skip `npm audit` and live flow-driving (section 4) unless asked.
 
 ## 0. Context map (read this first — don't re-derive it)
 

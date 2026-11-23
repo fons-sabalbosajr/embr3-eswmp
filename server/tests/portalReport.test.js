@@ -260,9 +260,23 @@ test("REGRESSION — cell fill is read in its OWN unit, not the capacity's", () 
       cellFillValues: [100], cellFillUnits: ["tons"],
     },
   });
-  assert.equal(r.cells[0].capacity, 500, "1000 m³ → 500 t");
-  assert.equal(r.cells[0].fill, 100, "already tons — not halved through the capacity unit");
+  // The report speaks the facility's DECLARED unit — m³ here (its cells).
+  assert.equal(r.unit, "m³");
+  assert.equal(r.cells[0].capacity, 1000, "1000 m³ stays 1000 m³");
+  assert.equal(r.cells[0].fill, 200, "100 t read in its OWN unit → 200 m³, not relabelled");
   assert.equal(r.cells[0].utilization, 20);
+});
+
+test("an m³ facility gets its report in m³ (Limay)", () => {
+  const r = buildPortalReport(
+    [{ idNo: "S1", status: "acknowledged", dateOfDisposal: "2026-10-01T00:00:00.000Z",
+       trucks: [{ hauler: "H", actualVolume: 10, actualVolumeUnit: "m³", wasteType: "Residual" }] }],
+    { facility: { lgu: "Limay", volumeCapacityUnit: "m³", cellCapacityUnits: ["m³"] } },
+  );
+  assert.equal(r.unit, "m³");
+  assert.equal(r.totals.totalTons, 10, "10 m³ reported as 10 m³, not 5 t");
+  assert.equal(r.daily[0].tons, 10);
+  assert.equal(r.byHauler[0].tons, 10);
 });
 
 test("clients are counted whether stored as objects or as plain strings", () => {

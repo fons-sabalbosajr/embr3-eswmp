@@ -28,8 +28,29 @@
 
 const { convertVolume } = require("./volumeUnits");
 
-/** Submission statuses whose volumes count toward occupancy. */
+/**
+ * Submission statuses whose waste still STANDS (reports, received totals).
+ * A reverted or rejected submission no longer stands; a resubmission does again.
+ */
 const ACTIVE_VOLUME_STATUSES = new Set(["pending", "acknowledged", "revert_requested"]);
+
+/**
+ * Statuses whose volume is IN THE CELL — the Waste in Cell formula:
+ *
+ *     Waste in Cell = baseline + APPROVED submissions
+ *
+ * "approved" is `acknowledged` (and the legacy spelling). `revert_requested` is an
+ * approved entry the operator has asked to revert; until EMB actually reverts it,
+ * it is still approved. A reverted entry is excluded until it is resubmitted and
+ * approved again.
+ *
+ * PENDING volume is deliberately NOT in Waste in Cell, but it is still tracked per
+ * cell (`cellFillPendingValues`) so the capacity gate can count it: otherwise
+ * several pending loads could each pass the "is the cell full?" check and overfill
+ * the cell once approved.
+ */
+const CELL_FILL_STATUSES = new Set(["acknowledged", "approved", "revert_requested"]);
+const PENDING_STATUSES = new Set(["pending"]);
 
 /** DataSLF fields the calculation needs; use as a `.select()` projection. */
 const OCCUPANCY_ENTRY_FIELDS =
@@ -37,7 +58,7 @@ const OCCUPANCY_ENTRY_FIELDS =
   "totalVolumeAccepted totalVolumeAcceptedUnit baselineUnit " +
   "activeCellResidualVolume activeCellResidualUnit " +
   "activeCellInertVolume activeCellInertUnit " +
-  "activeCellHazardousVolume activeCellHazardousUnit activeCellEntries " +
+  "activeCellHazardousVolume activeCellHazardousUnit activeCellEntries closedCellEntries " +
   "trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellIndex trucks.cellName " +
   "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.cellIndex";
 
@@ -81,6 +102,7 @@ const OCCUPANCY_ENTRY_PROJECTION = {
   activeCellHazardousVolume: 1,
   activeCellHazardousUnit: 1,
   activeCellEntries: 1,
+  closedCellEntries: 1,
   trucks: {
     $map: {
       input: { $ifNull: ["$trucks", []] },
@@ -196,30 +218,69 @@ function isBaselineEntry(entry) {
     entry?.activeCellResidualVolume != null ||
     entry?.activeCellInertVolume != null ||
     entry?.activeCellHazardousVolume != null ||
-    !!entry?.activeCellEntries?.length
+    !!entry?.activeCellEntries?.length ||
+    // A baseline that only declares CLOSED cells is still a baseline.
+    !!entry?.closedCellEntries?.length
   );
 }
 
 /**
- * The unit every number in the result is expressed in. Preference order matches
- * what the portal displays: an actual submitted unit, then the baseline's unit,
- * then whatever the facility declares.
+ * The unit every number in the result is expressed in: the unit the ADMIN
+ * declared for the facility.
+ *
+ * It used to be "the first truck's unit", falling back to the baseline's — and
+ * because the recompute then WRITES that unit back as `wasteReceivedUnit`, one
+ * load typed in tons silently re-declared an m³ facility as tons. That is how
+ * General Tinio came to show capacities in m³ beside fill in tons, and why admin
+ * and portal could disagree. The declared capacity units come first because they
+ * are only ever set by an admin; `wasteReceivedUnit` is last among the facility
+ * fields because this recompute writes it. Submission/baseline units are only a
+ * last resort for a facility that declares nothing.
  */
 function resolveTargetUnit(baseline, submissions, facility) {
+  const known = (u) => /^(m³|m3|tons?)$/i.test(String(u || "").trim());
+  const declared = [
+    facility?.volumeCapacityUnit,
+    ...(facility?.cellCapacityUnits || []),
+    facility?.wasteReceivedUnit,
+    facility?.receivingVolumeCapacityUnit,
+    facility?.estimatedVolumeWasteUnit,
+  ].find(known);
+  if (declared) return displayUnit(declared);
   return displayUnit(
-    submissions
-      .flatMap((entry) => entry.trucks || [])
-      .find((truck) => Number(truck?.actualVolume || 0) > 0 && truck.actualVolumeUnit)?.actualVolumeUnit ||
-      (baseline?.activeCellEntries || []).find((entry) => Number(entry?.volume || 0) > 0 && entry.unit)?.unit ||
-      baseline?.baselineUnit ||
-      baseline?.activeCellResidualUnit ||
+    baseline?.baselineUnit ||
       baseline?.totalVolumeAcceptedUnit ||
-      facility?.wasteReceivedUnit ||
-      facility?.cellFillUnits?.find(Boolean) ||
-      facility?.cellCapacityUnits?.find(Boolean) ||
-      facility?.volumeCapacityUnit ||
+      (baseline?.activeCellEntries || []).find((entry) => Number(entry?.volume || 0) > 0 && entry.unit)?.unit ||
+      submissions
+        .flatMap((entry) => entry.trucks || [])
+        .find((truck) => Number(truck?.actualVolume || 0) > 0 && truck.actualVolumeUnit)?.actualVolumeUnit ||
       "m³",
   );
+}
+
+/**
+ * The cell a BASELINE row belongs to: its stored, in-range `cellIndex` first
+ * (the stable link written on every save), then an exact name match, then the
+ * "Cell N" convention. Returns null when nothing identifies a cell.
+ *
+ * Parsing the name first was wrong for named cells — "Treated Hazardous Waste
+ * Cell (M501)" parsed as cell 501 and fell through to a guess.
+ */
+function baselineRowCellIndex(facility, rows, entry) {
+  const raw = entry?.cellIndex;
+  const stored = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+  if (Number.isInteger(stored) && stored >= 0 && rows[stored]) return stored;
+  const name = String(entry?.cellName || "").trim().toLowerCase();
+  if (name) {
+    const byName = (facility?.cellNames || []).findIndex((n) => String(n || "").trim().toLowerCase() === name);
+    if (byName >= 0 && rows[byName]) return byName;
+    const positional = /^\s*cell\s*0*(\d+)\s*$/i.exec(name);
+    if (positional) {
+      const idx = Number(positional[1]) - 1;
+      if (idx >= 0 && rows[idx]) return idx;
+    }
+  }
+  return null;
 }
 
 /**
@@ -383,26 +444,26 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
     // The part of `submitted` that was recorded after this cell's admin
     // declaration. Zero for every cell that has no accumulating override.
     submittedAfterOverride: 0,
+    // Placed by submissions still PENDING review — not in Waste in Cell, but
+    // reserved against the cell's capacity (see CELL_FILL_STATUSES).
+    pending: 0,
     unconvertible: 0,
     status: normalizeCellStatus(facility?.cellStatuses?.[index]),
     hazardous: isHazardousCell(facility?.cellTypes?.[index] || "Residual"),
   }));
-
-  // Read once per cell, before any volume is placed — `placeSubmitted` needs to
-  // know, for each incoming volume, whether it post-dates the declaration for
-  // the cell it is landing in.
-  const overrides = rows.map((row) => readCellOverride(facility, row.index));
 
   // The newest record that actually carries baseline figures IS the baseline;
   // it is never also counted as a submission.
   const baseline = chooseBaselineEntry(entries);
   const baselineId = baseline?._id ? String(baseline._id) : "";
 
+  const isSubmission = (entry) => String(entry._id || "") !== baselineId && hasTruckVolume(entry);
+  // Waste in Cell = baseline + APPROVED submissions. Reverted/rejected never count.
   const submissions = entries.filter(
-    (entry) =>
-      ACTIVE_VOLUME_STATUSES.has(entry.status || "pending") &&
-      String(entry._id || "") !== baselineId &&
-      hasTruckVolume(entry),
+    (entry) => CELL_FILL_STATUSES.has(entry.status || "pending") && isSubmission(entry),
+  );
+  const pendingSubmissions = entries.filter(
+    (entry) => PENDING_STATUSES.has(entry.status || "pending") && isSubmission(entry),
   );
 
   // THE UNIT MUST NOT DEPEND ON WHICH ENTRIES SURVIVED FILTERING.
@@ -423,10 +484,20 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
   );
 
   // ── Baseline contribution ──
+  //
+  // ACTIVE and CLOSED cell entries both belong in their cells — a closed cell
+  // still holds the waste disposed into it. Closed entries were never counted,
+  // so a Used/Completed cell always read 0 however much its baseline declared.
+  // A closed entry is only placed when it identifies a real cell; it is never
+  // guessed into an open one.
+  let unplacedBaselineTotal = 0;
   if (baseline?.activeCellEntries?.length) {
     baseline.activeCellEntries.forEach((entry, orderIndex) => {
+      const bound = baselineRowCellIndex(facility, rows, entry);
+      // Legacy rows with no usable cell keep the old placement (name ordinal,
+      // then list position) so their figures do not vanish.
       const parsed = parseCellIndex(entry.cellName);
-      const preferred = parsed != null && parsed >= 0 ? parsed : orderIndex;
+      const preferred = bound ?? (parsed != null && parsed >= 0 && rows[parsed] ? parsed : orderIndex);
       addVolume(
         rows,
         findBestCellIndex(rows, entry.wasteType, preferred),
@@ -436,7 +507,18 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
         "baseline",
       );
     });
-  } else if (baseline) {
+  }
+  (baseline?.closedCellEntries || []).forEach((entry) => {
+    const bound = baselineRowCellIndex(facility, rows, entry);
+    const fromUnit = entry.unit || baseline.baselineUnit || targetUnit;
+    if (bound === null) {
+      const converted = convertVolume(Number(entry.volume || 0), fromUnit, targetUnit);
+      if (converted && converted > 0) unplacedBaselineTotal += converted;
+      return;
+    }
+    addVolume(rows, bound, entry.volume, fromUnit, targetUnit, "baseline");
+  });
+  if (!baseline?.activeCellEntries?.length && baseline) {
     [
       { value: baseline.activeCellResidualVolume, unit: baseline.activeCellResidualUnit, wasteType: "Residual" },
       { value: baseline.activeCellInertVolume, unit: baseline.activeCellInertUnit, wasteType: "Treated Hazardous Waste" },
@@ -468,21 +550,29 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
   // exists to resolve. Per-vehicle placements are more specific than the truck's
   // own, so they win when present.
   let unplacedTotal = 0;
+  let pendingUnplacedTotal = 0;
   const placeSubmitted = (volume, fromUnit, wasteType, cellIndex, entry) => {
     const explicit =
       cellIndex === null || cellIndex === undefined || cellIndex === "" ? null : Number(cellIndex);
-    if (explicit === null || !Number.isInteger(explicit) || explicit < 0 || !rows[explicit]) {
+    const placed = explicit !== null && Number.isInteger(explicit) && explicit >= 0 && rows[explicit];
+    // PENDING: reserved against the cell's capacity only. It is in neither
+    // Waste in Cell nor the received total until EMB approves it.
+    if (PENDING_STATUSES.has(entry.status || "pending")) {
+      const converted = convertVolume(Number(volume || 0), fromUnit, targetUnit);
+      if (!(converted && converted > 0)) return;
+      if (placed) rows[findBestCellIndex(rows, wasteType, explicit)].pending += converted;
+      else pendingUnplacedTotal += converted;
+      return;
+    }
+    if (!placed) {
       const converted = convertVolume(Number(volume || 0), fromUnit, targetUnit);
       if (converted && converted > 0) unplacedTotal += converted;
       return;
     }
-    const target = findBestCellIndex(rows, wasteType, explicit);
-    const override = overrides[target];
-    const afterOverride = !!override?.accumulates && isRecordedAfter(entry, override.at);
-    addVolume(rows, target, volume, fromUnit, targetUnit, "submitted", afterOverride);
+    addVolume(rows, findBestCellIndex(rows, wasteType, explicit), volume, fromUnit, targetUnit, "submitted");
   };
 
-  submissions.forEach((entry) => {
+  [...submissions, ...pendingSubmissions].forEach((entry) => {
     (entry.trucks || []).forEach((truck) => {
       const vehicles = (Array.isArray(truck.vehicles) ? truck.vehicles : []).filter(
         (v) => Number(v?.actualVolume || 0) > 0,
@@ -519,47 +609,19 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
     });
   });
 
-  // ── Admin override ──
+  // ── No admin override ──
   //
-  // Waste in Cell is derived, but an admin may TYPE a cell's figure (SLF Table →
-  // Edit → Waste in Cell) when the recorded submissions do not reflect what is
-  // physically in the cell. Where `cellFillOverridden[i]` is set, the declared
-  // figure becomes the cell's BASE, applied here — at the one place every
-  // consumer reads — so it survives the next recompute and shows identically in
-  // Facility Details, Cell Infrastructure and the portal.
-  //
-  // ── An override must not swallow later submissions ─────────────────────────
-  // The declaration replaced what was recorded AT THAT MOMENT. A submission
-  // recorded afterwards is waste the declaration could not have accounted for,
-  // so it is ADDED on top:
-  //
-  //     effective = declared base + submissions recorded after the declaration
-  //
-  // A plain replacement (what this used to be) would silently discard every
-  // approval that followed: an admin who declared 120 would still read 120 after
-  // a 10 t load was approved, and the only trace of that load would be in the
-  // provenance split nobody totals. It is not double-counted either — waste that
-  // already existed when the figure was typed is inside the declared number and
-  // is NOT re-added (see isRecordedAfter).
-  //
-  // The derived parts are kept beside the result (never overwritten) so the
-  // override stays auditable against what the data alone says.
+  // Waste in Cell is ALWAYS the formula: baseline + approved submissions. An
+  // admin-typed figure used to REPLACE it (cellFillOverridden), which is how
+  // Porac's cells read 1,310,353 / 683,202 m³ while their own baseline alone was
+  // 1,758,761 / 1,969,689 m³ — the baseline and every approved submission were
+  // invisible, and the View and Edit modals could disagree. To change a cell's
+  // figure, correct the BASELINE (or the submission); the formula then carries
+  // it everywhere. The stored override fields are left untouched for audit and
+  // only surfaced as `legacyOverride` so a screen can say what was ignored.
   rows.forEach((row) => {
-    const override = overrides[row.index];
-    if (!override) return;
-    const base = convertVolume(
-      override.value,
-      override.unit || facility?.cellFillUnits?.[row.index] || targetUnit,
-      targetUnit,
-    );
-    if (base === null || Number.isNaN(base)) return;
-    const since = override.accumulates ? row.submittedAfterOverride : 0;
-    row.derivedTotal = round3(row.total);
-    row.overridden = true;
-    row.overrideBase = round3(base);
-    row.overriddenAt = override.at;
-    row.postOverrideSubmitted = round3(since);
-    row.total = base + since;
+    const legacy = readCellOverride(facility, row.index);
+    if (legacy) row.legacyOverride = round3(legacy.value);
   });
 
   const cellFillValues = rows.map((row) => round3(row.total));
@@ -581,6 +643,11 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
     cellFillUnits: rows.map(() => targetUnit),
     cellFillBaselineValues: rows.map((row) => round3(row.baseline)),
     cellFillSubmittedValues: rows.map((row) => round3(row.submitted)),
+    // Pending-review volume per cell, reserved against capacity (not in fill).
+    cellFillPendingValues: rows.map((row) => round3(row.pending)),
+    pendingTotal: round3(rows.reduce((sum, row) => sum + row.pending, 0) + pendingUnplacedTotal),
+    // A closed-cell baseline row that names no real cell.
+    unplacedBaselineTotal: round3(unplacedBaselineTotal),
     totalVolume,
     baselineTotal,
     submittedTotal,
@@ -754,8 +821,14 @@ async function preBaselineExclusionEnabled() {
  *       earlier records is dated from the first record with those figures, not
  *       from the copy (see baselineCutoffDate). Limay, Prime Waste Solution and
  *       Maria Aurora had submissions excluded under the old date.
+ *   6 — Waste in Cell = baseline + APPROVED submissions only (pending is
+ *       reserved against capacity in cellFillPendingValues, reverted never
+ *       counts); admin-typed overrides no longer replace the formula; closed-cell
+ *       baseline entries are placed in their cells; baseline rows bind by their
+ *       stored cellIndex; the unit is the facility's DECLARED unit, not the first
+ *       truck's.
  */
-const OCCUPANCY_CALC_VERSION = 5;
+const OCCUPANCY_CALC_VERSION = 6;
 
 module.exports = {
   computeCellOccupancy,
@@ -770,6 +843,8 @@ module.exports = {
   isRecordedAfter,
   OVERRIDE_FACILITY_FIELDS,
   ACTIVE_VOLUME_STATUSES,
+  CELL_FILL_STATUSES,
+  PENDING_STATUSES,
   OCCUPANCY_ENTRY_FIELDS,
   OCCUPANCY_ENTRY_PROJECTION,
   isActiveCellStatus,

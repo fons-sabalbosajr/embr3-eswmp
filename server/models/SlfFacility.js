@@ -163,6 +163,10 @@ const slfFacilitySchema = new mongoose.Schema(
     // of each recomputing its own and disagreeing.
     cellFillBaselineValues: [threeDecimalNumber],
     cellFillSubmittedValues: [threeDecimalNumber],
+    // Volume placed by submissions still PENDING review, per cell. Not part of
+    // Waste in Cell (baseline + approved), but reserved against capacity so the
+    // portal's cell-full gate cannot be passed by several pending loads at once.
+    cellFillPendingValues: [threeDecimalNumber],
     baselineVolumeTotal: threeDecimalNumber,
     submittedVolumeTotal: threeDecimalNumber,
     estimatedVolumeWaste: threeDecimalNumber,

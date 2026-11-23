@@ -33,13 +33,144 @@ export function makeHistoryColumns({
   // about it. Everything hidden here is still reachable — the row opens the same
   // detail modal, which shows the full record.
   //
-  //   xs  (<576)  ID No. · Date · Status · Actions
-  //   md  (>=768) + # · Entries · Remarks
-  //   lg  (>=992) + Type · Submitted
-  //   xl  (>=1200) + Company/Address · Cell Assigned
+  //   xs  (<576)  ID No. · Date · Status / Remarks · Actions
+  //   md  (>=768) + # · Entries
+  //   lg  (>=992) + Company / Type · Submitted
+  //   xl  (>=1200) + Cell Assigned
   const FROM_MD = ["md", "lg", "xl", "xxl"];
   const FROM_LG = ["lg", "xl", "xxl"];
   const FROM_XL = ["xl", "xxl"];
+
+  // ── Status and Remarks, rendered together in ONE column ─────────────────────
+  // The status says where the entry stands; the remark under it says why (the
+  // revert reason, or that it is a resubmission and the note sent back).
+  const renderStatusTag = (v, r) => {
+    // Mixed-status group: list each status with its count rather than
+    // stamping the whole group with one child's status.
+    if (r.isGroup) {
+      return (
+        <Space direction="vertical" size={2}>
+          {formatStatusSummary(r.statusCounts).map((line) => (
+            <Tag key={line} color={r.isMixedStatus ? "default" : "blue"} style={{ fontSize: 11 }}>
+              {line.toUpperCase()}
+            </Tag>
+          ))}
+        </Space>
+      );
+    }
+    if (v === "acknowledged") {
+      return (
+        <Space direction="vertical" size={2}>
+          <Tag icon={<CheckCircleOutlined />} color="success">
+            APPROVED
+          </Tag>
+          {r.revertRequested && (
+            <Tag color="orange" style={{ fontSize: 11 }}>
+              Revert Requested
+            </Tag>
+          )}
+        </Space>
+      );
+    }
+    if (v === "rejected") {
+      return (
+        <Tag icon={<CloseCircleOutlined />} color="error">
+          REJECTED
+        </Tag>
+      );
+    }
+    if (v === "reverted" || v === "editApproved") {
+      // Labelled. This was an icon-only tag, so the one status that needs the
+      // operator to act read as a blank orange chip. The revert reason now
+      // lives in the Remarks column.
+      return (
+        <Tag icon={<UndoOutlined />} color="volcano">
+          {v === "editApproved" ? "EDIT APPROVED" : "REVERTED"}
+        </Tag>
+      );
+    }
+    if (v === "revert_requested") {
+      return (
+        <Tag icon={<SyncOutlined />} color="orange">
+          REVERT REQUESTED
+        </Tag>
+      );
+    }
+    return (
+      <Tag
+        icon={<SyncOutlined spin />}
+        color="warning"
+        className="status-pending"
+      >
+        PENDING REVIEW
+      </Tag>
+    );
+  };
+
+  const renderRemarks = (r) => {
+    const rows = r.isGroup ? r.children || [] : [r];
+    const reverted = rows.filter(
+      (c) => c.status === "reverted" || c.status === "editApproved",
+    );
+    const resubmitted = rows.filter((c) => c.resubmission);
+    // Nothing to say: no placeholder under the status tag.
+    if (!reverted.length && !resubmitted.length) return null;
+    if (r.isGroup) {
+      return (
+        <Space size={4} wrap>
+          {reverted.length > 0 && (
+            <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11 }}>
+              {reverted.length} need correction
+            </Tag>
+          )}
+          {resubmitted.length > 0 && (
+            <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11 }}>
+              <SyncOutlined /> {resubmitted.length} resubmitted
+            </Tag>
+          )}
+        </Space>
+      );
+    }
+    const resub = r.resubmission;
+    return (
+      <Space direction="vertical" size={2} style={{ width: "100%" }}>
+        {reverted.length > 0 && (
+          <>
+            <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
+              Needs correction — Edit &amp; Resubmit
+            </Tag>
+            {r.revertReason && (
+              <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: r.revertReason }}>
+                Reason: {r.revertReason}
+              </Text>
+            )}
+          </>
+        )}
+        {resub && (
+          <>
+            <Tooltip
+              title={
+                [
+                  resub.at ? `Resubmitted ${dayjs(resub.at).format("MMM D, YYYY h:mm A")}` : "Resubmitted after revert",
+                  resub.previousIdNo ? `was ${resub.previousIdNo}` : "",
+                  resub.revertReason ? `Reverted for: ${resub.revertReason}` : "",
+                ].filter(Boolean).join(" · ")
+              }
+            >
+              <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
+                <SyncOutlined /> Resubmission{resub.count > 1 ? ` ×${resub.count}` : ""}
+              </Tag>
+            </Tooltip>
+            {resub.comment && (
+              <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: resub.comment }}>
+                “{resub.comment}”
+              </Text>
+            )}
+          </>
+        )}
+      </Space>
+    );
+  };
 
   return [
       { title: "#", key: "index", width: 50, align: "left", responsive: FROM_MD, render: (_, __, i) => i + 1 },
@@ -80,27 +211,46 @@ export function makeHistoryColumns({
         },
       },
       {
-        title: "Company / Address",
+        // Company, its Type and its address in ONE cell (they were three
+        // separate columns' worth of width for one fact: who the client is).
+        title: "Company / Type",
         key: "companyAddr",
-        // An operator's own company — the least useful cell on a small screen.
-        responsive: FROM_XL,
-        width: 220,
-        ellipsis: true,
+        responsive: FROM_LG,
+        width: 230,
+        filters: [
+          { text: "LGU", value: "LGU" },
+          { text: "Private", value: "Private" },
+        ],
+        onFilter: (value, record) =>
+          record.isGroup
+            ? (record.children || []).some((c) => c.companyType === value)
+            : record.companyType === value,
         render: (_, r) => (
-          <div>
-            <Text strong style={{ fontSize: 13 }}>
-              {r.lguCompanyName}
-            </Text>
+          <div style={{ minWidth: 0 }}>
+            <Space size={6} align="start" style={{ maxWidth: "100%" }}>
+              {r.companyType && (
+                <Tag
+                  color={r.companyType === "LGU" ? "blue" : "green"}
+                  style={{ marginInlineEnd: 0, fontSize: 10.5, lineHeight: "17px" }}
+                >
+                  {r.companyType}
+                </Tag>
+              )}
+              <Text strong style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
+                {r.lguCompanyName || "—"}
+              </Text>
+            </Space>
+            {r.address && (
+              <Text
+                type="secondary"
+                style={{ display: "block", fontSize: 11, marginTop: 2 }}
+                ellipsis={{ tooltip: r.address }}
+              >
+                {r.address}
+              </Text>
+            )}
           </div>
         ),
-      },
-      {
-        title: "Type",
-        dataIndex: "companyType",
-        key: "companyType",
-        width: 80,
-        responsive: FROM_LG,
-        render: (v) => <Tag color={v === "LGU" ? "blue" : "green"}>{v}</Tag>,
       },
       {
         title: "Entries",
@@ -163,10 +313,10 @@ export function makeHistoryColumns({
         },
       },
       {
-        title: "Status",
+        title: "Status / Remarks",
         dataIndex: "status",
         key: "status",
-        width: 150,
+        width: 270,
         filters: [
           { text: "Pending", value: "pending" },
           { text: "Approved", value: "acknowledged" },
@@ -180,139 +330,11 @@ export function makeHistoryColumns({
             ? Object.keys(record.statusCounts || {}).includes(value)
             : record.status === value,
         render: (v, r) => {
-          // Mixed-status group: list each status with its count rather than
-          // stamping the whole group with one child's status.
-          if (r.isGroup) {
-            return (
-              <Space direction="vertical" size={2}>
-                {formatStatusSummary(r.statusCounts).map((line) => (
-                  <Tag key={line} color={r.isMixedStatus ? "default" : "blue"} style={{ fontSize: 11 }}>
-                    {line.toUpperCase()}
-                  </Tag>
-                ))}
-              </Space>
-            );
-          }
-          if (v === "acknowledged") {
-            return (
-              <Space direction="vertical" size={2}>
-                <Tag icon={<CheckCircleOutlined />} color="success">
-                  APPROVED
-                </Tag>
-                {r.revertRequested && (
-                  <Tag color="orange" style={{ fontSize: 11 }}>
-                    Revert Requested
-                  </Tag>
-                )}
-              </Space>
-            );
-          }
-          if (v === "rejected") {
-            return (
-              <Tag icon={<CloseCircleOutlined />} color="error">
-                REJECTED
-              </Tag>
-            );
-          }
-          if (v === "reverted" || v === "editApproved") {
-            // Labelled. This was an icon-only tag, so the one status that needs the
-            // operator to act read as a blank orange chip. The revert reason now
-            // lives in the Remarks column.
-            return (
-              <Tag icon={<UndoOutlined />} color="volcano">
-                {v === "editApproved" ? "EDIT APPROVED" : "REVERTED"}
-              </Tag>
-            );
-          }
-          if (v === "revert_requested") {
-            return (
-              <Tag icon={<SyncOutlined />} color="orange">
-                REVERT REQUESTED
-              </Tag>
-            );
-          }
+          const remark = renderRemarks(r);
           return (
-            <Tag
-              icon={<SyncOutlined spin />}
-              color="warning"
-              className="status-pending"
-            >
-              PENDING REVIEW
-            </Tag>
-          );
-        },
-      },
-      {
-        title: "Remarks",
-        key: "remarks",
-        width: 220,
-        responsive: FROM_MD,
-        // What the operator needs to know about the row, in words: why it was
-        // reverted (and that it is waiting on them), or that it is a RESUBMISSION
-        // with the note they sent back. Same `resubmission` summary the admin
-        // Submissions Remarks column reads (server utils/resubmission.js).
-        render: (_, r) => {
-          const rows = r.isGroup ? r.children || [] : [r];
-          const reverted = rows.filter(
-            (c) => c.status === "reverted" || c.status === "editApproved",
-          );
-          const resubmitted = rows.filter((c) => c.resubmission);
-          if (!reverted.length && !resubmitted.length) {
-            return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
-          }
-          if (r.isGroup) {
-            return (
-              <Space size={4} wrap>
-                {reverted.length > 0 && (
-                  <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11 }}>
-                    {reverted.length} need correction
-                  </Tag>
-                )}
-                {resubmitted.length > 0 && (
-                  <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11 }}>
-                    <SyncOutlined /> {resubmitted.length} resubmitted
-                  </Tag>
-                )}
-              </Space>
-            );
-          }
-          const resub = r.resubmission;
-          return (
-            <Space direction="vertical" size={2} style={{ width: "100%" }}>
-              {reverted.length > 0 && (
-                <>
-                  <Tag color="volcano" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
-                    Needs correction — Edit &amp; Resubmit
-                  </Tag>
-                  {r.revertReason && (
-                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: r.revertReason }}>
-                      Reason: {r.revertReason}
-                    </Text>
-                  )}
-                </>
-              )}
-              {resub && (
-                <>
-                  <Tooltip
-                    title={
-                      [
-                        resub.at ? `Resubmitted ${dayjs(resub.at).format("MMM D, YYYY h:mm A")}` : "Resubmitted after revert",
-                        resub.previousIdNo ? `was ${resub.previousIdNo}` : "",
-                        resub.revertReason ? `Reverted for: ${resub.revertReason}` : "",
-                      ].filter(Boolean).join(" · ")
-                    }
-                  >
-                    <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 11, width: "fit-content" }}>
-                      <SyncOutlined /> Resubmission{resub.count > 1 ? ` ×${resub.count}` : ""}
-                    </Tag>
-                  </Tooltip>
-                  {resub.comment && (
-                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: resub.comment }}>
-                      “{resub.comment}”
-                    </Text>
-                  )}
-                </>
-              )}
+            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              {renderStatusTag(v, r)}
+              {remark}
             </Space>
           );
         },

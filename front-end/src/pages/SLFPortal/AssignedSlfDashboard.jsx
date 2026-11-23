@@ -26,6 +26,23 @@ import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text } = Typography;
 
+// The permit to show on the facility card: the newest entry of the permit list
+// EMB maintains (falling back to the legacy single field), with its validity.
+function currentPermitLabel(list, legacyNo, legacyValidity) {
+  const rows = (Array.isArray(list) ? list : []).filter((p) => p?.permitNo);
+  const latest = rows.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0))[0];
+  const permitNo = latest?.permitNo || legacyNo || "";
+  if (!permitNo) return "";
+  const validity = latest ? latest.validity : legacyValidity;
+  const d = validity ? new Date(validity) : null;
+  const suffix =
+    d && !Number.isNaN(d.getTime())
+      ? ` (valid to ${d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })})`
+      : "";
+  const more = rows.length > 1 ? ` +${rows.length - 1} more` : "";
+  return `${permitNo}${suffix}${more}`;
+}
+
 // ── Assigned SLF capacity dashboard ──
 // Presentational: the read-only "Assigned Sanitary Landfill Facility" card —
 // facility header, cell-capacity gauges, and baseline/utilization summary.
@@ -1311,13 +1328,16 @@ export default function AssignedSlfDashboard({
                                 label: "ECC No.",
                                 value: slfInfo.eccNo,
                               },
-                              slfInfo.dischargePermit && {
+                              // The permit LISTS EMB maintains (renewals, extra
+                              // lines), not just the legacy single field, which
+                              // could lag behind them.
+                              currentPermitLabel(slfInfo.dischargePermits, slfInfo.dischargePermit, slfInfo.dischargePermitValidity) && {
                                 label: "Discharge Permit",
-                                value: slfInfo.dischargePermit,
+                                value: currentPermitLabel(slfInfo.dischargePermits, slfInfo.dischargePermit, slfInfo.dischargePermitValidity),
                               },
-                              slfInfo.permitToOperate && {
+                              currentPermitLabel(slfInfo.permitToOperatePermits, slfInfo.permitToOperate, slfInfo.permitToOperateValidity) && {
                                 label: "Permit to Operate",
-                                value: slfInfo.permitToOperate,
+                                value: currentPermitLabel(slfInfo.permitToOperatePermits, slfInfo.permitToOperate, slfInfo.permitToOperateValidity),
                               },
                               slfInfo.hazwasteGenerationId && {
                                 label: "Hazwaste Gen. ID",

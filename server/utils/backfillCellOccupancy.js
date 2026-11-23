@@ -143,6 +143,7 @@ async function backfillCellOccupancy() {
               wasteReceivedUnit: occupancy.unit,
               cellFillBaselineValues: occupancy.cellFillBaselineValues,
               cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
+              cellFillPendingValues: occupancy.cellFillPendingValues,
               baselineVolumeTotal: occupancy.baselineTotal,
               submittedVolumeTotal: occupancy.submittedTotal,
               cellOccupancyVersion: OCCUPANCY_CALC_VERSION,

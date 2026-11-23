@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/emblogo.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+    <!-- Zoom must stay available on phones and tablets (pinch and Chrome's
+         zoom setting): never add maximum-scale=1 or user-scalable=no here. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, user-scalable=yes" />
     <title>EMBR3 Ecological Solid Waste Management Pipeline</title>
     <!-- VERA's display face (as in EMBR3 UCDS). Loaded without blocking the
          first paint (media swap), so a network that cannot reach Google Fonts

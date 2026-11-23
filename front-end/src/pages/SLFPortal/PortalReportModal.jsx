@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert, Button, DatePicker, Empty, Modal, Space, Spin, Table, Tag, Typography,
+  Alert, Button, DatePicker, Empty, Modal, Segmented, Space, Spin, Table, Tag, Typography,
 } from "antd";
-import { FilePdfOutlined, FileWordOutlined, PrinterOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  CalendarOutlined, FilePdfOutlined, FileWordOutlined, FilterOutlined, PrinterOutlined, ReloadOutlined,
+} from "@ant-design/icons";
 import dayjs from "dayjs";
 
 import api from "../../api";
 import { getSocket } from "../../utils/socket";
 import {
   buildReportDocument,
+  permitLines,
   wrapPrintable,
   wrapWord,
 } from "./portalReportDocument";
@@ -72,6 +75,11 @@ function ensurePrintStyles() {
 const NAVY = "#1a3353";
 const num = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const dt = (v, f = "MMM D, YYYY") => (v && dayjs(v).isValid() ? dayjs(v).format(f) : "—");
+// Every permit on file, one per line (see permitLines).
+const permitText = (list, legacyNo, legacyValidity) => {
+  const lines = permitLines(list, legacyNo, legacyValidity, dt);
+  return lines.length ? lines.map((line, i) => <div key={i}>{line}</div>) : "—";
+};
 
 function Section({ title, subtitle, children, breakBefore = false }) {
   return (
@@ -97,6 +105,31 @@ function Stat({ label, value, hint }) {
   );
 }
 
+// Reporting-period presets. A month plus which part of it — the whole month,
+// the 1st–15th, or the 16th–end — covers the periods operators report on
+// ("Oct 1–31", "Oct 1–15") in two clicks; a custom range covers anything else.
+const PERIOD_OPTIONS = [
+  { label: "Whole month", value: "month" },
+  { label: "1st – 15th", value: "first" },
+  { label: "16th – end", value: "second" },
+];
+function rangeForMonth(month, period) {
+  if (!month) return null;
+  const start = month.startOf("month");
+  if (period === "first") return [start, start.date(15)];
+  if (period === "second") return [start.date(16), start.endOf("month")];
+  return [start, start.endOf("month")];
+}
+
+const STATUS_COLORS = {
+  pending: "gold",
+  acknowledged: "green",
+  approved: "green",
+  reverted: "orange",
+  revert_requested: "orange",
+  rejected: "red",
+};
+
 // The rank is stored on the row, not taken from the render index: with pagination
 // the index restarts at 1 on every page, so page 2 would rank its first hauler #1.
 const withRank = (rows) => (rows || []).map((r, i) => ({ ...r, __rank: i + 1 }));
@@ -120,6 +153,9 @@ export default function PortalReportModal({ open, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [range, setRange] = useState(null);
+  // The month/part-of-month controls. Null month = a custom range or all dates.
+  const [periodMonth, setPeriodMonth] = useState(null);
+  const [periodPart, setPeriodPart] = useState("month");
   const printRef = useRef(null);
   // Tables are paginated ON SCREEN only. Print and Word export build their own
   // document from the full report data (portalReportDocument.js), so they always
@@ -204,8 +240,55 @@ export default function PortalReportModal({ open, onClose }) {
     load(range);
   };
 
-  const unitLabel = "tons";
+  // ── Period filter actions — each one reloads the report for its range ──
+  const applyRange = (next) => {
+    setRange(next);
+    load(next);
+  };
+  const pickMonth = (month) => {
+    setPeriodMonth(month);
+    applyRange(rangeForMonth(month, periodPart));
+  };
+  const pickPart = (part) => {
+    setPeriodPart(part);
+    const month = periodMonth || dayjs();
+    setPeriodMonth(month);
+    applyRange(rangeForMonth(month, part));
+  };
+  const pickCustom = (next) => {
+    setPeriodMonth(null);
+    applyRange(next);
+  };
+  const clearPeriod = () => {
+    setPeriodMonth(null);
+    setPeriodPart("month");
+    applyRange(null);
+  };
+  const periodLabel = range?.[0]
+    ? `${range[0].format("MMM D, YYYY")} – ${range[1].format("MMM D, YYYY")}`
+    : "All dates";
+
+  // The facility's declared unit, as the server states it (m³ for Limay) — the
+  // report used to be fixed at tons whatever the facility declared.
+  const unitLabel = report?.unit || "tons";
   const t = report?.totals;
+
+  // Daily rows carry the totals line for the table's summary row.
+  const dailyRows = useMemo(() => report?.daily || [], [report]);
+  const dailyTotals = useMemo(
+    () =>
+      dailyRows.reduce(
+        (acc, d) => ({
+          submissions: acc.submissions + (d.submissions || 0),
+          trucks: acc.trucks + (d.trucks || 0),
+          residualTons: acc.residualTons + (d.residualTons || 0),
+          hazardousTons: acc.hazardousTons + (d.hazardousTons || 0),
+          tons: acc.tons + (d.tons || 0),
+        }),
+        { submissions: 0, trucks: 0, residualTons: 0, hazardousTons: 0, tons: 0 },
+      ),
+    [dailyRows],
+  );
 
   const statusRows = useMemo(
     () =>
@@ -315,17 +398,18 @@ export default function PortalReportModal({ open, onClose }) {
       onCancel={onClose}
       width="min(1100px, 100%)"
       style={{ top: 20 }}
+      // The report scrolls INSIDE the modal (header and buttons stay put) instead
+      // of making the whole page one very long scroll.
+      styles={{
+        body: {
+          maxHeight: printAll ? "none" : "calc(100vh - 190px)",
+          overflowY: printAll ? "visible" : "auto",
+          paddingRight: 6,
+        },
+      }}
+      classNames={{ body: "slf-slim-scroll" }}
       footer={
         <Space wrap className="slf-portal-report-nonprint">
-          <RangePicker
-            value={range}
-            onChange={(next) => {
-              setRange(next);
-              load(next);
-            }}
-            allowClear
-            format="MM/DD/YYYY"
-          />
           <Button icon={<ReloadOutlined />} onClick={() => load(range)} loading={loading}>
             Refresh
           </Button>
@@ -344,6 +428,63 @@ export default function PortalReportModal({ open, onClose }) {
         </Space>
       }
     >
+      {/* ── Reporting period filter ── sticky so it stays reachable while the
+          report scrolls underneath it. */}
+      <div
+        className="slf-portal-report-nonprint"
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 3,
+          background: "#fff",
+          padding: "8px 10px",
+          margin: "0 0 12px",
+          border: "1px solid #e6ebf2",
+          borderRadius: 8,
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <Space size={6}>
+          <FilterOutlined style={{ color: NAVY }} />
+          <Text strong style={{ fontSize: 12.5 }}>Reporting period</Text>
+        </Space>
+        <DatePicker
+          picker="month"
+          value={periodMonth}
+          onChange={pickMonth}
+          placeholder="Select month"
+          format="MMM YYYY"
+          allowClear={false}
+          suffixIcon={<CalendarOutlined />}
+          style={{ width: 140 }}
+          disabledDate={(d) => d && d.isAfter(dayjs().endOf("month"))}
+        />
+        <Segmented
+          size="middle"
+          options={PERIOD_OPTIONS}
+          value={periodMonth ? periodPart : undefined}
+          onChange={pickPart}
+        />
+        <Text type="secondary" style={{ fontSize: 12 }}>or</Text>
+        <RangePicker
+          value={periodMonth ? null : range}
+          onChange={pickCustom}
+          allowClear
+          format="MMM D, YYYY"
+          placeholder={["Custom from", "to"]}
+          style={{ width: 260 }}
+        />
+        <Button size="small" onClick={clearPeriod} disabled={!range}>
+          All dates
+        </Button>
+        <Tag color="blue" style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}>
+          {periodLabel}
+        </Tag>
+      </div>
+
       {loading && (
         <div style={{ textAlign: "center", padding: "48px 0" }}>
           <Spin />
@@ -415,6 +556,76 @@ export default function PortalReportModal({ open, onClose }) {
             </div>
           </Section>
 
+          <Section
+            title="Daily Disposal"
+            subtitle={`Every submission by disposal date for ${periodLabel.toLowerCase() === "all dates" ? "all recorded dates" : periodLabel}. Expand a day to see its submissions; reverted or rejected entries are listed with 0 volume.`}
+          >
+            <Table
+              size="small"
+              rowKey="date"
+              dataSource={dailyRows}
+              pagination={false}
+              // Its own scroll area with a pinned header, so a month of days does
+              // not stretch the report. Printing expands it in full.
+              scroll={printAll ? undefined : { y: 340 }}
+              sticky={!printAll}
+              expandable={{
+                rowExpandable: (r) => (r.items || []).length > 0,
+                expandedRowRender: (r) => (
+                  <Table
+                    size="small"
+                    rowKey={(item, i) => `${item.id}-${i}`}
+                    dataSource={r.items || []}
+                    pagination={false}
+                    columns={[
+                      { title: "Submission", dataIndex: "id", key: "id" },
+                      {
+                        title: "Status",
+                        dataIndex: "status",
+                        key: "status",
+                        width: 150,
+                        render: (v) => <Tag color={STATUS_COLORS[v] || "default"}>{String(v).replace(/_/g, " ")}</Tag>,
+                      },
+                      { title: "Entries", dataIndex: "trucks", key: "trucks", width: 90, align: "right" },
+                      { title: `Volume (${unitLabel})`, dataIndex: "tons", key: "tons", width: 130, align: "right", render: num },
+                    ]}
+                  />
+                ),
+              }}
+              columns={[
+                {
+                  title: "Date",
+                  dataIndex: "date",
+                  key: "date",
+                  render: (v) => (v === "undated" ? "Undated" : dayjs(v).format("ddd, MMM D, YYYY")),
+                },
+                { title: "Submissions", dataIndex: "submissions", key: "submissions", width: 110, align: "right" },
+                { title: "Entries", dataIndex: "trucks", key: "trucks", width: 90, align: "right" },
+                { title: `Residual (${unitLabel})`, dataIndex: "residualTons", key: "residualTons", width: 130, align: "right", render: num },
+                { title: `Hazardous (${unitLabel})`, dataIndex: "hazardousTons", key: "hazardousTons", width: 130, align: "right", render: num },
+                { title: `Total (${unitLabel})`, dataIndex: "tons", key: "tons", width: 120, align: "right", render: (v) => <Text strong>{num(v)}</Text> },
+              ]}
+              summary={() =>
+                dailyRows.length > 0 ? (
+                  <Table.Summary fixed>
+                    <Table.Summary.Row style={{ background: "#f5f7fa" }}>
+                      <Table.Summary.Cell index={0} />
+                      <Table.Summary.Cell index={1}>
+                        <Text strong>Total · {dailyRows.length} day(s)</Text>
+                      </Table.Summary.Cell>
+                      <Table.Summary.Cell index={2} align="right"><Text strong>{num(dailyTotals.submissions)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={3} align="right"><Text strong>{num(dailyTotals.trucks)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={4} align="right"><Text strong>{num(dailyTotals.residualTons)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={5} align="right"><Text strong>{num(dailyTotals.hazardousTons)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={6} align="right"><Text strong>{num(dailyTotals.tons)}</Text></Table.Summary.Cell>
+                    </Table.Summary.Row>
+                  </Table.Summary>
+                ) : null
+              }
+              locale={{ emptyText: <Empty description="No submissions in this period" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            />
+          </Section>
+
           <Section title="Facility & Permits">
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <tbody>
@@ -423,9 +634,10 @@ export default function PortalReportModal({ open, onClose }) {
                   ["Province / Barangay", [report.facility?.province, report.facility?.barangay].filter(Boolean).join(" / ")],
                   ["Category / Ownership", [report.facility?.category, report.facility?.ownership].filter(Boolean).join(" / ")],
                   ["Operational status", report.facility?.status],
-                  ["Permit to Operate", `${report.facility?.permitToOperate || "—"}${report.facility?.permitToOperateValidity ? ` (valid to ${dt(report.facility.permitToOperateValidity)})` : ""}`],
-                  ["Discharge Permit", `${report.facility?.dischargePermit || "—"}${report.facility?.dischargePermitValidity ? ` (valid to ${dt(report.facility.dischargePermitValidity)})` : ""}`],
+                  ["Permit to Operate", permitText(report.facility?.permitToOperatePermits, report.facility?.permitToOperate, report.facility?.permitToOperateValidity)],
+                  ["Discharge Permit", permitText(report.facility?.dischargePermits, report.facility?.dischargePermit, report.facility?.dischargePermitValidity)],
                   ["ECC No.", report.facility?.eccNo],
+                  ["Hazwaste Gen. ID", report.facility?.hazwasteGenerationId],
                 ].map(([label, value]) => (
                   <tr key={label}>
                     <td style={{ padding: "3px 8px 3px 0", width: 190 }}>

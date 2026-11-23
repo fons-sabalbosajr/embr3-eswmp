@@ -1357,6 +1357,9 @@ router.get("/my-report", async (req, res) => {
 
     const [submissions, facility] = await Promise.all([
       DataSLF.find(query)
+        // An explicit reporting period is honoured in full, even when it reaches
+        // into a data year the year-visibility setting would otherwise hide.
+        .setOptions(Object.keys(dateFilter).length ? { includeHiddenYears: true } : {})
         .select(
           "idNo submissionId status dateOfDisposal createdAt baselineUnit " +
             "totalVolumeM3 totalVolumeTons residualVolumeTons hazardousVolumeTons trucks",
@@ -1367,8 +1370,15 @@ router.get("/my-report", async (req, res) => {
         ? SlfFacility.findById(assignedIds[0])
             .select(
               "lgu slfName province barangay category ownership statusOfSLF numberOfCell " +
-                "cellNames cellStatuses cellCapacities cellFillValues cellTypes cellCapacityUnits " +
-                "permitToOperate permitToOperateValidity dischargePermit dischargePermitValidity eccNo",
+                // cellFillUnits: the fill has its OWN unit (see buildPortalReport);
+                // without it "Used" was read in the capacity's unit and could be
+                // off by the m³↔tons factor.
+                "cellNames cellStatuses cellCapacities cellFillValues cellFillUnits cellTypes cellCapacityUnits " +
+                "permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits " +
+                "dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits " +
+                "eccNo hazwasteGenerationId " +
+                // The report is expressed in the facility's DECLARED unit.
+                "volumeCapacityUnit wasteReceivedUnit receivingVolumeCapacityUnit estimatedVolumeWasteUnit",
             )
             .lean()
             .catch(() => null)

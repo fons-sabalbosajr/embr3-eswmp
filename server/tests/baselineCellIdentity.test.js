@@ -186,12 +186,14 @@ const sliceRoute = (startMarker, endMarker) => {
 
 test("GET /baseline/:slfName resolves BOTH cell lists before responding", () => {
   const route = sliceRoute('router.get("/baseline/:slfName"', 'router.get("/baselines"');
+  // resolveBaselineCellEntriesForRead = resolveBaselineCellEntries + the cell's
+  // declared unit (utils/baselineCellEntries.js).
   assert.match(
     route,
-    /activeCellEntries: resolveBaselineCellEntries\(/,
+    /activeCellEntries: resolveBaselineCellEntriesForRead\(/,
     "the read that feeds Data Entry must bind rows to the admin's cells",
   );
-  assert.match(route, /closedCellEntries: resolveBaselineCellEntries\(/);
+  assert.match(route, /closedCellEntries: resolveBaselineCellEntriesForRead\(/);
   assert.match(route, /SlfFacility\.findById\(slfObjectId\)/, "the facility must be loaded to resolve against");
 });
 
@@ -203,15 +205,17 @@ test("the baseline read fetches the facility in PARALLEL with the baseline rows"
 
 test("PATCH /portal-save-baseline persists the resolved cellIndex", () => {
   const route = sliceRoute('router.patch("/portal-save-baseline/:slfName"', "module.exports");
+  // prepareBaselineCellEntriesForSave = resolveBaselineCellEntries + declared
+  // unit + whitelisted extras (utils/baselineCellEntries.js).
   assert.match(
     route,
-    /activeCellEntries: resolveBaselineCellEntries\(activeCellEntries, saveFacility\)/,
+    /activeCellEntries: prepareBaselineCellEntriesForSave\(activeCellEntries, saveFacility/,
     "new saves must store the stable index, not just a display name",
   );
-  assert.match(route, /closedCellEntries: resolveBaselineCellEntries\(closedCellEntries, saveFacility\)/);
+  assert.match(route, /closedCellEntries: prepareBaselineCellEntriesForSave\(closedCellEntries, saveFacility/);
   assert.match(
     route,
-    /select\("isDummy numberOfCell cellNames cellTypes cellStatuses cellCapacities"\)/,
+    /select\(`isDummy \$\{FACILITY_CELL_UNIT_SELECT\}`\)/,
     "the save path needs the cell arrays, and gets them from a query it already makes",
   );
 });

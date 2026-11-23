@@ -225,11 +225,14 @@ test("an announcement that opens the orientation tour holds the feature tour bac
   );
 });
 
-test("the panel its steps point at is opened first", () => {
-  // The Accredited Haulers panel does not mount its content while collapsed, so
-  // every step would anchor to nothing and antd would centre them.
-  assert.match(portal, /setBaselineSections\(\(prev\) => \(prev\.includes\("haulers"\)/);
-  assert.match(portal, /activeKey=\{baselineSections\}/);
+test("the section its steps point at is mounted and unfolded first", () => {
+  // The baseline sections are collapsible cards. A folded card HIDES its body
+  // (it stays mounted), and the tour unfolds the Accredited Haulers card before
+  // it opens, or every step would anchor to something invisible.
+  assert.match(portal, /key: "haulers",/);
+  assert.match(portal, /slf-baseline-section-card\$\{folded \? " is-folded" : ""\}/);
+  assert.match(portal, /body: folded \? \{ display: "none" \}/, "folded hides, never unmounts");
+  assert.match(portal, /setCollapsedBaselineCards\(\(prev\) => prev\.filter\(\(k\) => k !== "haulers"\)\)/);
 });
 
 test("closing is dismissal, and only a deliberate act records the release as seen", () => {

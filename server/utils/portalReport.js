@@ -29,7 +29,7 @@
 // period; they must not be able to disagree.
 
 const { ACTIVE_VOLUME_STATUSES } = require("./cellOccupancy");
-const { TON_PER_M3 } = require("./volumeUnits");
+const { TON_PER_M3, M3, TONS, resolveFacilityUnit } = require("./volumeUnits");
 const { isHazardousWasteType } = require("./wasteCategories");
 
 const num = (value) => {
@@ -109,6 +109,25 @@ function resolveCellLabel(facility, cellIndex, cellName) {
   return name;
 }
 
+/**
+ * A facility's permits as the admin records them: the list when there is one,
+ * else the single legacy field. Newest validity first.
+ */
+function permitList(list, legacyNo, legacyValidity, legacyStatus) {
+  const rows = (Array.isArray(list) ? list : [])
+    .filter((p) => text(p?.permitNo) || p?.validity)
+    .map((p) => ({
+      permitNo: text(p.permitNo),
+      permitType: text(p.permitType),
+      validity: p.validity || null,
+      status: text(p.status),
+    }));
+  if (!rows.length && (text(legacyNo) || legacyValidity)) {
+    rows.push({ permitNo: text(legacyNo), permitType: "", validity: legacyValidity || null, status: text(legacyStatus) });
+  }
+  return rows.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0));
+}
+
 /** Accumulate into a keyed bucket map. */
 function bump(map, key, patch) {
   if (!key) return;
@@ -145,6 +164,10 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
 
   const statuses = {};
   const monthly = new Map();
+  // Per-DAY breakdown, keyed by disposal date. Unlike `monthly` it lists EVERY
+  // submission of the day (with its status), so a reverted entry still shows up
+  // on its date — with 0 volume, for the same reason it adds none to the totals.
+  const daily = new Map();
   const byHauler = new Map();
   const byClient = new Map();
   const byCell = new Map();
@@ -174,6 +197,24 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
       if (!firstDisposal || disposal < firstDisposal) firstDisposal = disposal;
       if (!lastDisposal || disposal > lastDisposal) lastDisposal = disposal;
     }
+
+    const validDisposal = disposal && !Number.isNaN(disposal.getTime());
+    // UTC parts: dateOfDisposal is stored as the calendar date at 00:00Z, the
+    // same convention `monthly` reads below.
+    const dayKey = validDisposal ? disposal.toISOString().slice(0, 10) : "undated";
+    const day = daily.get(dayKey) || {
+      date: dayKey, submissions: 0, trucks: 0, tons: 0, residualTons: 0, hazardousTons: 0, items: [],
+    };
+    day.submissions += 1;
+    day.trucks += entryTrucks.length;
+    const dayItem = {
+      id: text(entry.idNo || entry.submissionId || entry._id),
+      status,
+      trucks: entryTrucks.length,
+      tons: 0,
+    };
+    day.items.push(dayItem);
+    daily.set(dayKey, day);
 
     if (!countsTowardVolume(status)) return;
 
@@ -257,6 +298,11 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
     residualTons += entryResidual;
     hazardousTons += entryHazardous;
 
+    dayItem.tons = Number(entryTons.toFixed(2));
+    day.tons += entryTons;
+    day.residualTons += entryResidual;
+    day.hazardousTons += entryHazardous;
+
     const monthKey =
       disposal && !Number.isNaN(disposal.getTime())
         ? `${disposal.getUTCFullYear()}-${String(disposal.getUTCMonth() + 1).padStart(2, "0")}`
@@ -322,7 +368,7 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
     .filter(([status]) => countsTowardVolume(status))
     .reduce((sum, [, n]) => sum + n, 0);
 
-  return {
+  return inReportUnit(facility ? resolveFacilityUnit(facility) : TONS, {
     generatedAt: new Date().toISOString(),
     scope: {
       // Stated in the payload so the document can print it. A reader must not
@@ -346,6 +392,21 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
           dischargePermit: facility.dischargePermit || "",
           dischargePermitValidity: facility.dischargePermitValidity || null,
           eccNo: facility.eccNo || "",
+          hazwasteGenerationId: facility.hazwasteGenerationId || "",
+          // The permit LISTS EMB maintains (renewals, several DP lines) — the
+          // single legacy fields above can lag behind them. Newest first.
+          permitToOperatePermits: permitList(
+            facility.permitToOperatePermits,
+            facility.permitToOperate,
+            facility.permitToOperateValidity,
+            facility.permitToOperateStatus,
+          ),
+          dischargePermits: permitList(
+            facility.dischargePermits,
+            facility.dischargePermit,
+            facility.dischargePermitValidity,
+            facility.dischargePermitStatus,
+          ),
         }
       : null,
     totals: {
@@ -373,12 +434,65 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
       residualTons: Number(row.residualTons.toFixed(2)),
       hazardousTons: Number(row.hazardousTons.toFixed(2)),
     })),
+    // Oldest day first, like `monthly`; "undated" sorts last.
+    daily: [...daily.values()]
+      .sort((a, b) => (a.date === "undated" ? 1 : b.date === "undated" ? -1 : a.date.localeCompare(b.date)))
+      .map((row) => ({
+        ...row,
+        tons: Number(row.tons.toFixed(2)),
+        residualTons: Number(row.residualTons.toFixed(2)),
+        hazardousTons: Number(row.hazardousTons.toFixed(2)),
+      })),
     byHauler: rank(byHauler),
     byClient: rank(byClient),
     byCell: rank(byCell),
     byWasteType: rank(byWasteType),
     cells,
-  };
+  });
 }
+
+/**
+ * Express every volume in the report in the facility's DECLARED unit.
+ *
+ * The report was fixed at tons, so an m³ facility (Limay) received a summary in
+ * a unit its admin record, its dashboard and its operator never use. Everything
+ * above is summed in tons (one normalisation point); this converts the finished
+ * figures with the same TON_PER_M3 factor and states the unit in `unit`.
+ *
+ * Field names keep their historical `…Tons` spelling for compatibility; their
+ * values are in `report.unit`.
+ */
+function inReportUnit(unitRaw, report) {
+  const unit = displayUnitOf(unitRaw);
+  report.unit = unit;
+  if (unit !== M3) return report;
+  const k = 1 / TON_PER_M3;
+  const conv = (v) => (Number.isFinite(Number(v)) ? Number((Number(v) * k).toFixed(2)) : v);
+  const t = report.totals;
+  t.totalTons = conv(t.totalTons);
+  t.residualTons = conv(t.residualTons);
+  t.hazardousTons = conv(t.hazardousTons);
+  const rows = (list) =>
+    (list || []).forEach((row) => {
+      ["tons", "residualTons", "hazardousTons"].forEach((key) => {
+        if (key in row) row[key] = conv(row[key]);
+      });
+      (row.items || []).forEach((item) => { item.tons = conv(item.tons); });
+    });
+  rows(report.monthly);
+  rows(report.daily);
+  [report.byHauler, report.byClient, report.byCell, report.byWasteType].forEach((list) =>
+    (list || []).forEach((row) => { row.tons = row.m3; }),
+  );
+  (report.cells || []).forEach((cell) => {
+    cell.capacity = conv(cell.capacity);
+    cell.fill = conv(cell.fill);
+    cell.remaining = conv(cell.remaining);
+    cell.unit = unit;
+  });
+  return report;
+}
+
+const displayUnitOf = (u) => (/^m(3|³)$/i.test(String(u || "").trim()) ? M3 : TONS);
 
 module.exports = { buildPortalReport, countsTowardVolume };

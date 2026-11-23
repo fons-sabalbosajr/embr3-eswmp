@@ -122,7 +122,11 @@ test("the portal sends the link when a correction is drafted or scheduled", () =
     "utf8",
   );
   assert.match(portal, /const correctionLink = \(\) => \(editingRevertedId \? \{ resubmitOf: editingRevertedId \} : \{\}\)/);
-  assert.equal((portal.match(/\.\.\.correctionLink\(\)/g) || []).length, 3, "draft create, draft update and schedule");
+  assert.equal(
+    (portal.match(/\.\.\.correctionLink\(\)/g) || []).length,
+    4,
+    "draft create, draft update, schedule create and schedule update (editing a scheduled run)",
+  );
   // Reopening a saved correction puts Data Entry back in resubmit mode.
   assert.match(portal, /setEditingRevertedId\(correctionOf\)/);
 });

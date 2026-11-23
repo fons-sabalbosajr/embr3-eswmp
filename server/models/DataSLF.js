@@ -139,6 +139,20 @@ const cellCorrectionSchema = new mongoose.Schema(
   { _id: true },
 );
 
+// One Means-of-Verification file attached to a baseline cell entry. Stored in
+// Google Drive (documents folder › "Baseline MOV") via POST /api/upload.
+const baselineMovAttachmentSchema = new mongoose.Schema(
+  {
+    url: { type: String, trim: true, required: true },
+    fileName: { type: String, trim: true },
+    mimeType: { type: String, trim: true },
+    size: { type: Number },
+    uploadedAt: { type: Date },
+    uploadedBy: { type: String, trim: true },
+  },
+  { _id: false },
+);
+
 const dataSLFSchema = new mongoose.Schema(
   {
     slfGenerator: {
@@ -184,6 +198,10 @@ const dataSLFSchema = new mongoose.Schema(
     closedCellHazardousVolume: { type: Number },
     closedCellHazardousUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     acceptsHazardousWaste: { type: Boolean, default: false },
+    // `unit` on a cell entry always follows the unit the admin DECLARED for that
+    // cell (SlfFacility.cellCapacityUnits[cellIndex], falling back to the
+    // facility unit). utils/baselineCellEntries.js converts on every save and
+    // read so the portal and admin never show the same cell in two units.
     activeCellEntries: [{
       cellName: { type: String, trim: true },
       cellType: { type: String, trim: true },
@@ -191,6 +209,9 @@ const dataSLFSchema = new mongoose.Schema(
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+      // Means of Verification uploaded by the operator (Google Drive documents
+      // folder › "Baseline MOV").
+      movAttachments: [baselineMovAttachmentSchema],
     }],
     closedCellEntries: [{
       cellName: { type: String, trim: true },
@@ -199,8 +220,18 @@ const dataSLFSchema = new mongoose.Schema(
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+      // When the cell was closed / completed / fully used.
+      dateClosed: { type: Date },
+      movAttachments: [baselineMovAttachmentSchema],
     }],
     accreditedHaulers: [haulerSchema],
+    // Means of Verification for each baseline SECTION, uploaded from the card
+    // header in the portal's Baseline tab (Google Drive documents › "Baseline MOV").
+    baselineMov: {
+      activeCells: [baselineMovAttachmentSchema],
+      closedCells: [baselineMovAttachmentSchema],
+      haulers: [baselineMovAttachmentSchema],
+    },
     // Baseline update approval
     baselineUpdateRequested: { type: Boolean, default: false },
     baselineUpdateRequestedAt: { type: Date },

@@ -113,22 +113,28 @@ function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
   };
 }
 
-function CellEntryUnitHint({ draftUnit, declaredUnit }) {
+function CellEntryUnitHint({ declaredUnit, hasCell }) {
   const declared = normalizeUnitLabel(declaredUnit || "tons");
-  const current = normalizeUnitLabel(draftUnit || declaredUnit || "tons");
-  if (current === declared) {
-    return (
-      <span style={{ fontSize: 11 }}>
-        Declared unit for this SLF: <strong>{declared}</strong>
-      </span>
-    );
-  }
   return (
-    <span style={{ fontSize: 11, color: "#d46b08" }}>
-      This SLF declares <strong>{declared}</strong>. Saving in {current} — the value
-      is converted to {declared} for all capacity calculations.
+    <span style={{ fontSize: 11 }}>
+      {hasCell ? "Unit declared by EMB for this cell" : "Declared unit for this SLF"}:{" "}
+      <strong>{declared}</strong>. Enter the volume in {declared}.
     </span>
   );
+}
+
+// Selecting a different cell moves the draft into THAT cell's declared unit,
+// converting a volume already typed so the quantity is not reinterpreted.
+function selectCellForDraft(draft, opt, value, declaredCellUnit) {
+  const cellIndex =
+    opt && typeof opt.cellIndex === "number" ? opt.cellIndex : draft.cellIndex ?? null;
+  const next = {
+    ...draft,
+    cellName: value,
+    cellType: opt?.cellType ?? draft.cellType,
+    cellIndex,
+  };
+  return convertCellDraftUnit(next, declaredCellUnit(cellIndex), draft.unit);
 }
 
 // Extract a Google Drive file ID from any common Drive URL shape so images can
@@ -315,6 +321,7 @@ export default function SLFPortalModals({
   closedCellModalOpen, setClosedCellModalOpen,
   closedCellDraft, setClosedCellDraft,
   editingClosedCellKey, setEditingClosedCellKey,
+  declaredCellUnit = () => "tons",
   haulerDeleteModal, setHaulerDeleteModal,
   haulerDeleteReason, setHaulerDeleteReason,
   haulerDeleteFile, setHaulerDeleteFile,
@@ -3839,6 +3846,8 @@ export default function SLFPortalModals({
             color="linear-gradient(135deg, #1a3353, #2d5f8a)"
             fallback={portalUser?.firstName?.[0]?.toUpperCase()}
             onChange={onProfilePhotoChange}
+            // One camera button on the avatar is the whole control here.
+            cameraOnly
             // A developer viewing this account cannot change its picture
             // (the server refuses it too).
             disabled={isDeveloperContext}
@@ -5275,7 +5284,7 @@ export default function SLFPortalModals({
         okText={editingActiveCellKey != null ? "Update" : "Add"}
         okButtonProps={{ className: "slf-primary-btn" }}
         destroyOnHidden
-        width={420}
+        width={460}
       >
         <Form layout="vertical" requiredMark={false}>
           <Form.Item label="Cell Name" required>
@@ -5288,15 +5297,7 @@ export default function SLFPortalModals({
                   ? baselineCellOptions
                   : activeCellOptions
                 ).find((o) => o.value === value);
-                setActiveCellDraft((d) => ({
-                  ...d,
-                  cellName: value,
-                  cellType: opt?.cellType ?? d.cellType,
-                  cellIndex:
-                    opt && typeof opt.cellIndex === "number"
-                      ? opt.cellIndex
-                      : d.cellIndex ?? null,
-                }));
+                setActiveCellDraft((d) => selectCellForDraft(d, opt, value, declaredCellUnit));
               }}
               options={(() => {
                 const base = baselineCellOptions.length
@@ -5338,36 +5339,25 @@ export default function SLFPortalModals({
             required
             extra={
               <CellEntryUnitHint
-                draftUnit={activeCellDraft.unit}
-                declaredUnit={baselineUnit}
+                declaredUnit={declaredCellUnit(activeCellDraft.cellIndex)}
+                hasCell={typeof activeCellDraft.cellIndex === "number"}
               />
             }
           >
-            <Space.Compact style={{ width: "100%" }}>
-              <InputNumber
-                placeholder="Volume"
-                style={{ width: "100%" }}
-                min={0}
-                step={0.01}
-                value={activeCellDraft.volume}
-                onChange={(v) =>
-                  setActiveCellDraft((d) => ({ ...d, volume: v }))
-                }
-              />
-              <Select
-                value={normalizeUnitLabel(activeCellDraft.unit || baselineUnit || baselineUnit)}
-                // Switching the unit CONVERTS the value instead of just relabelling
-                // it. Previously "100" encoded as m³ became "100 tons" on switch —
-                // a 5× overstatement — because only the label changed.
-                onChange={(unit) =>
-                  setActiveCellDraft((d) => convertCellDraftUnit(d, unit, baselineUnit))
-                }
-                style={{ width: 96 }}
-              >
-                <Option value="m³">m³</Option>
-                <Option value="tons">tons</Option>
-              </Select>
-            </Space.Compact>
+            <InputNumber
+              placeholder="Volume"
+              style={{ width: "100%" }}
+              min={0}
+              step={0.01}
+              value={activeCellDraft.volume}
+              onChange={(v) =>
+                setActiveCellDraft((d) => ({ ...d, volume: v }))
+              }
+              // The unit is the one EMB declared for the cell — not a choice.
+              // Letting operators pick it is what produced cells stored in m³ on
+              // the portal while the admin side declares tons.
+              addonAfter={normalizeUnitLabel(declaredCellUnit(activeCellDraft.cellIndex))}
+            />
           </Form.Item>
         </Form>
       </Modal>
@@ -5385,7 +5375,7 @@ export default function SLFPortalModals({
         okText={editingClosedCellKey != null ? "Update" : "Add"}
         okButtonProps={{ className: "slf-primary-btn" }}
         destroyOnHidden
-        width={420}
+        width={460}
       >
         <Form layout="vertical" requiredMark={false}>
           <Form.Item label="Cell Name" required>
@@ -5395,15 +5385,7 @@ export default function SLFPortalModals({
               value={closedCellDraft.cellName || undefined}
               onChange={(value) => {
                 const opt = baselineCellOptions.find((o) => o.value === value);
-                setClosedCellDraft((d) => ({
-                  ...d,
-                  cellName: value,
-                  cellType: opt?.cellType ?? d.cellType,
-                  cellIndex:
-                    opt && typeof opt.cellIndex === "number"
-                      ? opt.cellIndex
-                      : d.cellIndex ?? null,
-                }));
+                setClosedCellDraft((d) => selectCellForDraft(d, opt, value, declaredCellUnit));
               }}
               options={(() => {
                 const base = baselineCellOptions;
@@ -5441,34 +5423,40 @@ export default function SLFPortalModals({
             required
             extra={
               <CellEntryUnitHint
-                draftUnit={closedCellDraft.unit}
-                declaredUnit={baselineUnit}
+                declaredUnit={declaredCellUnit(closedCellDraft.cellIndex)}
+                hasCell={typeof closedCellDraft.cellIndex === "number"}
               />
             }
           >
-            <Space.Compact style={{ width: "100%" }}>
-              <InputNumber
-                placeholder="Volume"
-                style={{ width: "100%" }}
-                min={0}
-                step={0.01}
-                value={closedCellDraft.volume}
-                onChange={(v) =>
-                  setClosedCellDraft((d) => ({ ...d, volume: v }))
-                }
-              />
-              <Select
-                value={normalizeUnitLabel(closedCellDraft.unit || baselineUnit || baselineUnit)}
-                // Converts the value on unit change — see the active-cell modal.
-                onChange={(unit) =>
-                  setClosedCellDraft((d) => convertCellDraftUnit(d, unit, baselineUnit))
-                }
-                style={{ width: 96 }}
-              >
-                <Option value="m³">m³</Option>
-                <Option value="tons">tons</Option>
-              </Select>
-            </Space.Compact>
+            <InputNumber
+              placeholder="Volume"
+              style={{ width: "100%" }}
+              min={0}
+              step={0.01}
+              value={closedCellDraft.volume}
+              onChange={(v) =>
+                setClosedCellDraft((d) => ({ ...d, volume: v }))
+              }
+              // Locked to the cell's declared unit — see the active-cell modal.
+              addonAfter={normalizeUnitLabel(declaredCellUnit(closedCellDraft.cellIndex))}
+            />
+          </Form.Item>
+          <Form.Item
+            label="Date Closed / Completed / Used"
+            extra={<span style={{ fontSize: 11 }}>When this cell was closed, completed or became fully used.</span>}
+          >
+            <DatePicker
+              style={{ width: "100%" }}
+              format="MMM D, YYYY"
+              value={closedCellDraft.dateClosed ? dayjs(closedCellDraft.dateClosed) : null}
+              disabledDate={(d) => d && d.isAfter(dayjs().endOf("day"))}
+              onChange={(d) =>
+                setClosedCellDraft((prev) => ({
+                  ...prev,
+                  dateClosed: d ? d.startOf("day").toISOString() : null,
+                }))
+              }
+            />
           </Form.Item>
         </Form>
       </Modal>

@@ -10,7 +10,12 @@ const {
   streamDriveFile,
   extractDriveFileId,
   getDriveFileMeta,
+  ensureDriveSubfolder,
 } = require("../utils/googleDrive");
+
+// Named upload destinations (subfolders of GDRIVE_DOCS_FOLDER_ID). Whitelisted so
+// a caller can never create arbitrary folders.
+const MOV_FOLDERS = { "baseline-mov": "Baseline MOV" };
 const cache = require("../utils/serverCache");
 const { MEDIA_META_PREFIX } = require("../utils/cacheKeys");
 const {
@@ -320,11 +325,20 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
       }
     } else {
       try {
+        // Baseline cell MOV (Means of Verification): kept together in one
+        // "Baseline MOV" subfolder of the documents folder — images included —
+        // so EMB can find every facility's evidence in one place.
+        const targetFolder = MOV_FOLDERS[String(req.body?.folder || "")];
+        const overrideFolderId =
+          targetFolder && process.env.GDRIVE_DOCS_FOLDER_ID
+            ? await ensureDriveSubfolder(process.env.GDRIVE_DOCS_FOLDER_ID, targetFolder)
+            : undefined;
         const driveResult = await uploadFilePathToDrive(
           req.file.path,
           req.file.mimetype,
           req.file.originalname,
-          isImage
+          overrideFolderId ? false : isImage,
+          overrideFolderId,
         );
         fileId = driveResult.fileId;
         viewUrl = driveResult.viewUrl;

@@ -30,8 +30,10 @@ const requestCategory = (type = "") => {
   return "other";
 };
 
-// Stable key used to gather every record that belongs to the same conversation
-// (the original request + its approval/rejection + admin replies).
+// Stable key used to gather the records that CAN belong to the same conversation
+// (the original request + its approval/rejection + admin replies). For baseline
+// requests this is the whole facility — see conversationFor, which then cuts it
+// down to the one request being viewed.
 const threadKey = (record = {}) => {
   const category = requestCategory(record.type);
   const meta = record.meta || {};
@@ -52,6 +54,72 @@ const threadKey = (record = {}) => {
 // The type a row is SHOWN as (a baseline rejection is logged under the request
 // type; the server marks it with displayType).
 const rowType = (record = {}) => record.displayType || record.type || "";
+
+// A row the OPERATOR raised. Uses the displayed type: an admin's baseline
+// rejection is stored under the request type but displayed as a rejection.
+const isRequestRow = (record = {}) => {
+  if (record.meta?.action === "rejected") return false;
+  const t = rowType(record);
+  return /_request$/.test(t) || t === "support_ticket";
+};
+
+/**
+ * The conversation for ONE request.
+ *
+ * Baseline requests share a facility-wide key, so the old modal showed every
+ * baseline request and approval the facility ever had (hundreds of rows) as if
+ * they were one conversation. Cut the facility's records into segments, each
+ * starting at a request, and return the segment the viewed record sits in: the
+ * request plus the answers that followed it, up to the next request.
+ */
+const conversationFor = (viewing, all = []) => {
+  if (!viewing) return [];
+  const related = all
+    .filter((r) => threadKey(r) === threadKey(viewing))
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  if (requestCategory(viewing.type) !== "baseline") return related;
+  const segments = [];
+  related.forEach((row) => {
+    if (isRequestRow(row) || !segments.length) segments.push([row]);
+    else segments[segments.length - 1].push(row);
+  });
+  return segments.find((seg) => seg.some((r) => r._id === viewing._id)) || [viewing];
+};
+
+/**
+ * The operator's own reason / statement for a request, wherever it was stored:
+ * the edit or baseline reason, a ticket's message or subject.
+ */
+const reasonOf = (record = {}) => {
+  const meta = record.meta || {};
+  if (meta.reason) return String(meta.reason);
+  if (meta.message) return String(meta.message);
+  if (meta.subject) return String(meta.subject);
+  if (record.type === "support_ticket") {
+    // "Support ticket TKT-00049 created: Needed to edit Baseline Data"
+    const m = /created:\s*(.+)$/i.exec(record.description || "");
+    if (m) return m[1];
+  }
+  return "";
+};
+
+/**
+ * The description WITHOUT the reason repeated inside it. Edit requests are
+ * logged as "Portal user requested edit for SLF-…: <reason>", which put the same
+ * paragraph in the table twice once the reason got its own column.
+ */
+const summaryOf = (record = {}) => {
+  const description = String(record.description || "").trim();
+  const reason = reasonOf(record).trim();
+  if (reason && description.includes(reason)) {
+    const stripped = description.replace(reason, "").replace(/[:\s–-]+$/, "").trim();
+    return stripped || description;
+  }
+  return description;
+};
+
+const fromRequester = (entry = {}) =>
+  isRequestRow(entry) && !/approved|rejected|reply/.test(rowType(entry));
 
 // The status of a row, as the admin side labels it. Resolved by the server from
 // the admin's actual answer to this request (server/utils/requestStatus.js);
@@ -100,35 +168,32 @@ export default function RequestsPanel({
   const category = viewing ? requestCategory(viewing.type) : "other";
   const meta = viewing?.meta || {};
 
-  // Conversation thread: every record that shares this request's thread key,
-  // oldest first. Reuses the already-loaded list — no extra API call.
-  const thread = viewing
-    ? (myRequests || [])
-        .filter((r) => threadKey(r) === threadKey(viewing))
-        .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
-    : [];
+  // Conversation for THIS request only, oldest first. Reuses the already-loaded
+  // list — no extra API call.
+  const thread = conversationFor(viewing, myRequests || []);
+  const viewingReason = viewing ? reasonOf(viewing) : "";
 
   // Type-specific detail rows so a support ticket, a submission edit and a
   // baseline update never share one generic layout.
   const detailItems = (() => {
     if (!viewing) return [];
     const rows = [];
+    // The reason itself is shown in its own block above, not repeated here.
     if (category === "submission") {
+      if (meta.idNo) rows.push({ label: "Record ID No.", value: meta.idNo });
       if (viewing.submissionId)
         rows.push({ label: "Submission ID", value: viewing.submissionId });
-      if (meta.idNo) rows.push({ label: "Record ID No.", value: meta.idNo });
-      if (meta.reason)
-        rows.push({ label: "Reason for Edit", value: meta.reason });
     } else if (category === "baseline") {
       if (meta.slfName) rows.push({ label: "SLF", value: meta.slfName });
-      if (meta.reason) rows.push({ label: "Reason", value: meta.reason });
+      if (Array.isArray(meta.fields) && meta.fields.length)
+        rows.push({ label: "Sections to Update", value: meta.fields.join(", ") });
     } else if (category === "support") {
       if (meta.ticketNo)
         rows.push({ label: "Ticket No.", value: meta.ticketNo });
-      if (meta.subject) rows.push({ label: "Subject", value: meta.subject });
       if (meta.category)
         rows.push({ label: "Category", value: meta.category });
-      if (meta.message) rows.push({ label: "Message", value: meta.message });
+      if (meta.priority)
+        rows.push({ label: "Priority", value: meta.priority });
     }
     if (viewing.companyName)
       rows.push({ label: "Company / SLF", value: viewing.companyName });
@@ -152,7 +217,7 @@ export default function RequestsPanel({
           dataSource={myRequests}
           rowKey={(r) => r._id}
           loading={myRequestsLoading}
-          scroll={{ x: 900 }}
+          scroll={{ x: 980 }}
           pagination={{
             defaultPageSize: 20,
             showSizeChanger: true,
@@ -171,10 +236,11 @@ export default function RequestsPanel({
               render: (v) => (v ? fmtDateTime(v) : "—"),
             },
             {
-              title: "Type",
-              dataIndex: "type",
-              key: "type",
-              width: 190,
+              // Type and description in ONE column: the tag says what kind of
+              // request it is, the line under it says what it was about.
+              title: "Request",
+              key: "request",
+              width: 320,
               filters: Object.entries(REQUEST_TYPE_MAP).map(
                 ([val, { label }]) => ({
                   text: label,
@@ -188,27 +254,30 @@ export default function RequestsPanel({
                   label: t,
                   color: "default",
                 };
-                return <Tag color={cfg.color}>{cfg.label}</Tag>;
+                return (
+                  <div style={{ whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+                    <Tag color={cfg.color} style={{ marginBottom: 4 }}>{cfg.label}</Tag>
+                    <div style={{ fontSize: 12, color: "#434343" }}>{summaryOf(record) || "—"}</div>
+                  </div>
+                );
               },
             },
             {
-              title: "Description",
-              dataIndex: "description",
-              key: "description",
-              width: 320,
-              // Wrap long descriptions instead of letting them stretch the table.
-              render: (text) => (
-                <span
-                  style={{
-                    whiteSpace: "normal",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                    display: "inline-block",
-                  }}
-                >
-                  {text || "—"}
-                </span>
-              ),
+              title: "Reason / Statement",
+              key: "reason",
+              width: 300,
+              render: (_, record) => {
+                const reason = reasonOf(record);
+                if (!reason) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+                return (
+                  <Paragraph
+                    style={{ margin: 0, fontSize: 12, whiteSpace: "normal", overflowWrap: "anywhere" }}
+                    ellipsis={{ rows: 3, tooltip: reason }}
+                  >
+                    {reason}
+                  </Paragraph>
+                );
+              },
             },
             {
               title: "Status",
@@ -275,11 +344,33 @@ export default function RequestsPanel({
             "Request Details"
           )
         }
-        width={620}
-        styles={{ body: { maxHeight: "70vh", overflowY: "auto" } }}
+        width={680}
+        styles={{ body: { maxHeight: "72vh", overflowY: "auto" } }}
       >
         {viewing && (
           <Space direction="vertical" size={14} style={{ width: "100%" }}>
+            {/* What the operator asked for, in their own words — the one thing
+                the reviewer reads first. */}
+            <div
+              style={{
+                background: "#f6f9ff",
+                border: "1px solid #d6e4ff",
+                borderRadius: 8,
+                padding: "10px 12px",
+              }}
+            >
+              <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                {category === "support" ? "Subject / Message" : "Reason / Statement"}
+              </Text>
+              <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                {viewingReason || <Text type="secondary">No reason was given.</Text>}
+              </Paragraph>
+              {summaryOf(viewing) && (
+                <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+                  {summaryOf(viewing)}
+                </Text>
+              )}
+            </div>
             <Descriptions
               size="small"
               column={1}
@@ -321,10 +412,16 @@ export default function RequestsPanel({
             </Descriptions>
 
             <div>
-              <Text strong style={{ display: "block", marginBottom: 6 }}>
+              <Text strong style={{ display: "block", marginBottom: 8 }}>
                 Conversation &amp; History
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
+                  {thread.length} entr{thread.length === 1 ? "y" : "ies"} for this request
+                </Text>
               </Text>
               {thread.length ? (
+                // One entry per message, each in its own bubble: the operator's
+                // side on the right, EMB's answers on the left — instead of one
+                // undivided list.
                 <Timeline
                   items={thread.map((entry) => {
                     const cfg = REQUEST_TYPE_MAP[rowType(entry)] || {
@@ -339,32 +436,51 @@ export default function RequestsPanel({
                         : entry.type.includes("reply")
                           ? "blue"
                           : "gray";
+                    const mine = fromRequester(entry);
+                    const entryReason = reasonOf(entry);
+                    const isViewed = entry._id === viewing._id;
                     return {
+                      key: entry._id,
                       color,
                       children: (
-                        <div>
-                          <Space size={6} wrap>
+                        <div
+                          style={{
+                            background: mine ? "#f0f7ff" : "#f6ffed",
+                            border: `1px solid ${isViewed ? "#1a3353" : mine ? "#d6e4ff" : "#d9f7be"}`,
+                            borderRadius: 8,
+                            padding: "8px 10px",
+                            marginBottom: 2,
+                          }}
+                        >
+                          <Space size={6} wrap style={{ marginBottom: 2 }}>
                             <Tag color={cfg.color} style={{ margin: 0 }}>
                               {cfg.label}
                             </Tag>
+                            <Text strong style={{ fontSize: 11 }}>
+                              {mine ? "You" : "EMB Region III"}
+                            </Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               {fmtDateTime(entry.createdAt)}
                             </Text>
-                            {entry.performedBy && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                · {entry.performedBy}
-                              </Text>
-                            )}
                           </Space>
                           <Paragraph
                             style={{
-                              margin: "4px 0 0",
-                              whiteSpace: "normal",
+                              margin: "2px 0 0",
+                              fontSize: 12.5,
+                              whiteSpace: "pre-wrap",
                               overflowWrap: "anywhere",
                             }}
                           >
-                            {entry.description || "—"}
+                            {summaryOf(entry) || "—"}
                           </Paragraph>
+                          {entryReason && !isViewed && (
+                            <Paragraph
+                              type="secondary"
+                              style={{ margin: "4px 0 0", fontSize: 12, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+                            >
+                              “{entryReason}”
+                            </Paragraph>
+                          )}
                         </div>
                       ),
                     };

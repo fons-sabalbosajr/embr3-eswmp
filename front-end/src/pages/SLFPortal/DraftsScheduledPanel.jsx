@@ -327,7 +327,6 @@ const safeDate = (v, fmt = "MMM D, YYYY h:mm A") => (v ? dayjs(v).format(fmt) : 
 
 export default function DraftsScheduledPanel({
   portalUser,
-  isMobile,
   onSubmitted,
   // Reports how many queued records need the operator's attention, so the sidebar
   // badge follows an action taken HERE without waiting for its own poll. The
@@ -454,7 +453,18 @@ export default function DraftsScheduledPanel({
       // the rows the list just returned.
       const { data } = await api.get(`/portal-queue/${record._id}`, { params: { email } });
       setViewRecord((current) => (current?._id === record._id ? data : current));
-    } catch {
+    } catch (err) {
+      if (err.response?.status === 404) {
+        setViewRecord(null);
+        Swal.fire({
+          icon: "info",
+          title: "This Record Was Already Updated",
+          text: "It was submitted, replaced by a newer save, or deleted. The list has been refreshed.",
+          confirmButtonColor: "#1a3353",
+        });
+        fetchQueue(true);
+        return;
+      }
       Swal.fire("Error", "Could not load this record's data. Please try again.", "error");
     } finally {
       setViewLoading(false);
@@ -583,9 +593,27 @@ export default function DraftsScheduledPanel({
       const { data } = record.payload
         ? { data: record }
         : await api.get(`/portal-queue/${record._id}`, { params: { email } });
+      setViewRecord(null);
       onEditDraft(data);
-    } catch {
-      Swal.fire("Error", "Could not open this draft for editing. Please try again.", "error");
+    } catch (err) {
+      // 404 = the row was already submitted, replaced or deleted (the list was
+      // showing a stale copy). Say so and refresh, instead of a dead-end error.
+      if (err.response?.status === 404) {
+        setViewRecord(null);
+        Swal.fire({
+          icon: "info",
+          title: "This Record Was Already Updated",
+          text: "It was submitted, replaced by a newer save, or deleted. The list has been refreshed — open the current version to edit it.",
+          confirmButtonColor: "#1a3353",
+        });
+        fetchQueue(true);
+        return;
+      }
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Could not open this record for editing. Please try again.",
+        "error",
+      );
     } finally {
       setBusyId(null);
     }
@@ -636,17 +664,20 @@ export default function DraftsScheduledPanel({
         <Tooltip title="View data">
           <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => openRecord(record)} />
         </Tooltip>
-        {/* Drafts only: a scheduled run carries its own time, edited elsewhere. */}
-        {!isScheduled && retryable && onEditDraft && (
-          <Tooltip title="Edit in Data Entry">
+        {/* Drafts AND scheduled runs open in Data Entry. A scheduled run keeps
+            its time there and is re-saved with Schedule (or unscheduled with
+            Save as Draft) — before, it had no edit path at all. */}
+        {retryable && onEditDraft && (
+          <Tooltip title={isScheduled ? "Edit this scheduled submission in Data Entry" : "Edit this draft in Data Entry"}>
             <Button
               size="small"
-              type="text"
               icon={<EditOutlined />}
               style={{ color: "#1a3353" }}
-              disabled={busyId === record._id}
+              loading={busyId === record._id}
               onClick={() => editInDataEntry(record)}
-            />
+            >
+              Edit
+            </Button>
           </Tooltip>
         )}
         {retryable && (
@@ -682,7 +713,7 @@ export default function DraftsScheduledPanel({
     { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Created", dataIndex: "createdAt", key: "createdAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
     { title: "Last Updated", dataIndex: "updatedAt", key: "updatedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
-    { title: "Actions", key: "actions", width: 140, render: (_, r) => commonActions(r) },
+    { title: "Actions", key: "actions", width: 200, render: (_, r) => commonActions(r) },
   ];
 
   const scheduledColumns = [
@@ -713,7 +744,7 @@ export default function DraftsScheduledPanel({
         );
       },
     },
-    { title: "Actions", key: "actions", width: 140, render: (_, r) => commonActions(r, { isScheduled: true }) },
+    { title: "Actions", key: "actions", width: 200, render: (_, r) => commonActions(r, { isScheduled: true }) },
   ];
 
   // ── Export ──────────────────────────────────────────────────────────────────
@@ -842,7 +873,7 @@ export default function DraftsScheduledPanel({
                     rowKey="_id"
                     size="small"
                     pagination={{ pageSize: 10, size: "small", showSizeChanger: true, pageSizeOptions: [10, 25, 50, 100], showTotal: (t) => `${t} record(s)` }}
-                    scroll={{ x: isMobile ? 700 : undefined }}
+                    scroll={{ x: 760 }}
                   />
                 ),
             },
@@ -869,7 +900,7 @@ export default function DraftsScheduledPanel({
                     rowKey="_id"
                     size="small"
                     pagination={{ pageSize: 10, size: "small", showSizeChanger: true, pageSizeOptions: [10, 25, 50, 100], showTotal: (t) => `${t} record(s)` }}
-                    scroll={{ x: isMobile ? 820 : undefined }}
+                    scroll={{ x: 860 }}
                   />
                 ),
             },
@@ -941,7 +972,25 @@ export default function DraftsScheduledPanel({
         }
         open={!!viewRecord}
         onCancel={() => setViewRecord(null)}
-        footer={<Button onClick={() => setViewRecord(null)}>Close</Button>}
+        footer={
+          <Space>
+            {viewRecord &&
+              onEditDraft &&
+              ["draft", "scheduled", "failed"].includes(viewRecord.status) && (
+                <Button
+                  type="primary"
+                  icon={<EditOutlined />}
+                  loading={busyId === viewRecord._id}
+                  disabled={viewLoading}
+                  onClick={() => editInDataEntry(viewRecord)}
+                  style={{ background: "#1a3353" }}
+                >
+                  Edit in Data Entry
+                </Button>
+              )}
+            <Button onClick={() => setViewRecord(null)}>Close</Button>
+          </Space>
+        }
         width={1200}
         style={{ maxWidth: "96vw", top: 24 }}
         classNames={{ body: "slf-slim-scroll" }}

@@ -49,6 +49,7 @@ import {
   FileTextOutlined,
   HistoryOutlined,
   LogoutOutlined,
+  RightOutlined,
   MenuOutlined,
   UserOutlined,
   DatabaseOutlined,
@@ -179,6 +180,7 @@ import {
   normalizeUnit,
   hasBaselinePayload,
   formatEntryVolumeSummary,
+  normalizeBaselineMov,
   isTestAdminNotice,
   normalizeCellStatus,
   isActiveCellStatus,
@@ -221,6 +223,7 @@ import {
 } from "./systemGeneratedUpload";
 import { summarizeBaselineCompleteness } from "./baselineCompleteness";
 import BaselineCompletionModal from "./BaselineCompletionModal";
+import SectionMovButton from "../../components/SectionMovButton";
 import { inheritEntryCell, vehicleNeedsCell } from "./cellPlacement";
 import {
   buildDisposalVeraContext,
@@ -360,6 +363,9 @@ export default function SLFPortal() {
   const [baselineForm] = Form.useForm();
   const [companyForm] = Form.useForm();
   const [haulers, setHaulers] = useState([]);
+  // Means of Verification per baseline SECTION (Active Cells, Closed Cells,
+  // Accredited Haulers), uploaded from each section card's header.
+  const [baselineMov, setBaselineMov] = useState(() => normalizeBaselineMov(null));
   const [haulerDraft, setHaulerDraft] = useState({ ...EMPTY_HAULER });
   const [editingHaulerKey, setEditingHaulerKey] = useState(null);
   const [haulerErrors, setHaulerErrors] = useState({});
@@ -375,6 +381,10 @@ export default function SLFPortal() {
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
+  // When facility details (permits, cells) were last read, and for which SLF —
+  // see the slfInfo fetch effect.
+  const [slfInfoSyncedAt, setSlfInfoSyncedAt] = useState(null);
+  const slfInfoLoadedForRef = useRef(null);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
   // Bumped by the socket handler when something an admin changed affects the
   // client roster. Sits beside the two counters above for the same reason: the
@@ -539,9 +549,44 @@ export default function SLFPortal() {
   const [featureTourOptOut, setFeatureTourOptOut] = useState(false);
   const [featureTourOpen, setFeatureTourOpen] = useState(false);
   const [featureTourCurrent, setFeatureTourCurrent] = useState(0);
-  // Which Baseline sections are expanded. Closed by default, as before — this is
-  // state only so the feature tour can open the panel its steps point at.
-  const [baselineSections, setBaselineSections] = useState([]);
+  // Baseline section cards (active / closed / haulers) the operator has FOLDED.
+  // Empty = every card expanded, which is the default. Remembered PER OPERATOR
+  // (keyed by their email) in this browser, so each person's layout comes back
+  // as they left it; restored/saved in the effects below. A preference only —
+  // if storage is blocked the cards simply start expanded.
+  const [collapsedBaselineCards, setCollapsedBaselineCards] = useState([]);
+  const foldedCardsKey = portalUser?.email
+    ? `slf-portal:folded-baseline-cards:${String(portalUser.email).toLowerCase()}`
+    : "";
+  const foldedCardsRestoredRef = useRef("");
+  useEffect(() => {
+    if (!foldedCardsKey || foldedCardsRestoredRef.current === foldedCardsKey) return;
+    foldedCardsRestoredRef.current = foldedCardsKey;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(foldedCardsKey) || "[]");
+      const valid = Array.isArray(saved)
+        ? saved.filter((k) => ["active", "closed", "haulers"].includes(k))
+        : [];
+      setCollapsedBaselineCards(valid);
+    } catch {
+      setCollapsedBaselineCards([]);
+    }
+  }, [foldedCardsKey]);
+  // Saved at the moment the operator folds/unfolds (not in an effect, which
+  // would run in the same commit as the restore and overwrite it with []).
+  const updateFoldedCards = (compute) => {
+    setCollapsedBaselineCards((prev) => {
+      const next = compute(prev);
+      if (foldedCardsKey) {
+        try {
+          window.localStorage.setItem(foldedCardsKey, JSON.stringify(next));
+        } catch {
+          /* storage unavailable (private mode, blocked) — the fold still works this session */
+        }
+      }
+      return next;
+    });
+  };
   const featureTourAutoOpenedRef = useRef(false);
   // Set the instant the orientation tour claims the screen, so the feature
   // tour's auto-open — a separate effect in the same commit — can see it.
@@ -831,15 +876,15 @@ export default function SLFPortal() {
   const openFeatureTour = useCallback(
     ({ manual = true } = {}) => {
       if (!manual && !featureTourDue) return;
-      // Every step points at something on Data Entry → Baseline → Accredited
-      // Haulers, and that panel's content is not mounted while it is collapsed —
-      // so it is opened first, or every step would anchor to nothing and antd
-      // would render them centred, which reads as a broken tour.
       // The tour starts on Data Entry, on the tab its FIRST step lives on (steps
       // declare it in portalFeatureTour.js); later steps switch tabs as they go.
+      // The tour's steps point into the Accredited Haulers card, so it is
+      // unfolded first if the operator had folded it.
       setActiveMenu("data-entry");
       setActiveTab(PORTAL_FEATURE_TOUR_STEPS[0]?.tab || "baseline");
-      setBaselineSections((prev) => (prev.includes("haulers") ? prev : [...prev, "haulers"]));
+      // Not saved: the tour unfolds it for this run only, the operator's
+      // remembered layout is kept.
+      setCollapsedBaselineCards((prev) => prev.filter((k) => k !== "haulers"));
       setFeatureTourCurrent(0);
       // One frame for the panel to mount its content before antd measures the
       // first target.
@@ -1180,6 +1225,16 @@ export default function SLFPortal() {
   const [wasteReceivedLoading, setWasteReceivedLoading] = useState(false);
 
   const isMobile = !screens.md;
+  // Tablet width (iPad 13" portrait ≈ 1024 px, landscape ≈ 1366 px): wide
+  // enough for the sidebar, too narrow for the expanded one plus full tables.
+  const isTablet = screens.md && !screens.xl;
+
+  // On a tablet, start with the sidebar COLLAPSED (64 px instead of 230 px), so
+  // the content — and every table in it — gets the width back. Only on entering
+  // the tablet range; the operator can still expand it.
+  useEffect(() => {
+    if (isTablet) setCollapsed(true);
+  }, [isTablet]);
 
   // Scope for the portal's small-screen rules (the "Portal responsive layer" in
   // SLFPortal.css).
@@ -1637,6 +1692,26 @@ export default function SLFPortal() {
   // Never hard-code tons/m³ for the current unit — use this instead.
   const slfUnit = resolveFacilityUnit(slfInfo);
 
+  // The unit the ADMIN declared for one cell (SLF form → cellCapacityUnits[i]),
+  // falling back to the facility unit. Baseline cell entries always follow it —
+  // the operator no longer chooses a unit per entry, which is what let the same
+  // cell show m³ on the portal and tons on the admin side. The server applies the
+  // same rule on save (utils/baselineCellEntries.js).
+  const declaredCellUnit = useCallback(
+    (cellIndex) =>
+      Number.isInteger(cellIndex) && cellIndex >= 0
+        ? resolveCellUnit(slfInfo, cellIndex)
+        : slfUnit,
+    [slfInfo, slfUnit],
+  );
+
+  // What a cell's CAPACITY is already committed to, in its fill unit: Waste in
+  // Cell (baseline + approved) plus volume still pending review. Every portal
+  // capacity gate reads this, not cellFillValues alone — pending volume left the
+  // Waste in Cell figure (occupancy calc v6) but must still hold its space.
+  const reservedCellFill = (index) =>
+    Number(slfInfo?.cellFillValues?.[index] || 0) + Number(slfInfo?.cellFillPendingValues?.[index] || 0);
+
   const baselineCalcUnit = baselineUnit || slfUnit;
   const hasCellVolumeEntries = activeCellEntries.length > 0 || closedCellEntries.length > 0;
   const sumBaselineEntryVolume = useCallback(
@@ -1791,7 +1866,11 @@ export default function SLFPortal() {
       const capUnit = resolveCellUnit(slfInfo, index, "capacity");
       const fillUnit = resolveCellUnit(slfInfo, index, "fill");
       const capacityM3 = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, "m³") ?? 0;
-      const fillM3 = convertVolume(slfInfo?.cellFillValues?.[index], fillUnit, "m³") ?? 0;
+      // Capacity gate: Waste in Cell (baseline + approved) PLUS volume still
+      // pending review. Pending is not in the cell yet, but it is coming — leaving
+      // it out would let several pending loads each pass this check and overfill
+      // the cell once approved.
+      const fillM3 = convertVolume(reservedCellFill(index), fillUnit, "m³") ?? 0;
 
       const acceptance = getCellAcceptance({
         status,
@@ -2400,7 +2479,12 @@ export default function SLFPortal() {
   useEffect(() => {
     if (!activeSlfId) return;
     const ac = new AbortController();
-    setSlfInfoLoading(true);
+    // A RE-read of the facility already on screen (socket push, reconnect, tab
+    // focus, the Dashboard's periodic sync) refreshes in place; only a first load
+    // or a facility switch shows the loading skeleton. Otherwise every live
+    // update would blank the Dashboard cards for a moment.
+    const isReread = slfInfoLoadedForRef.current === activeSlfId;
+    if (!isReread) setSlfInfoLoading(true);
     const nameParam = activeSlfName
       ? `?slfName=${encodeURIComponent(activeSlfName)}`
       : "";
@@ -2413,6 +2497,8 @@ export default function SLFPortal() {
     )
       .then(({ data }) => {
         setSlfInfo(data);
+        slfInfoLoadedForRef.current = activeSlfId;
+        setSlfInfoSyncedAt(Date.now());
         setLeachateDetails(
           (data.leachatePondDetails || []).map((p, i) => ({ ...p, _key: i })),
         );
@@ -2428,6 +2514,9 @@ export default function SLFPortal() {
       })
       .catch((err) => {
         if (ac.signal.aborted) return;
+        // A failed background re-read keeps what is on screen; only a failed
+        // first load is worth interrupting the operator for.
+        if (isReread) return;
         showError({
           type: "error",
           title: "Could Not Load SLF Facility",
@@ -2441,6 +2530,8 @@ export default function SLFPortal() {
   }, [activeSlfId, activeSlfName, slfInfoRefresh]);
 
   const activeSlfInfoReadyForBaseline = !activeSlfId || !!slfInfo;
+  // Stable so the memoized Dashboard is not re-rendered by a new function each time.
+  const refreshSlfInfoNow = useCallback(() => setSlfInfoRefresh((n) => n + 1), []);
 
   // Fetch existing baseline when user is loaded (with retry)
   useEffect(() => {
@@ -2464,31 +2555,43 @@ export default function SLFPortal() {
         // Recorded BEFORE the payload check: this is the facility's figure and it
         // must be held even when the rest of the baseline is thin, because it is
         // what every later fallback reads.
+        // STRICT UNITS: every baseline figure is shown (and re-saved) in the unit
+        // the ADMIN declared for this facility — the same unit the SLF Table, the
+        // Dashboard and the reports use. A record saved under another unit is
+        // CONVERTED here, never relabelled.
+        const declaredUnit = slfUnit;
+        const recordUnit = data?.baselineUnit || data?.totalVolumeAcceptedUnit || declaredUnit;
+        const toDeclared = (value, fromUnit) => {
+          if (value === null || value === undefined || value === "") return value;
+          const converted = convertVolume(value, fromUnit || recordUnit, declaredUnit);
+          return converted === null ? value : Math.round(converted * 1000) / 1000;
+        };
         setBaselineTotalVolume(
-          data?.totalVolumeAccepted == null ? null : Number(data.totalVolumeAccepted),
+          data?.totalVolumeAccepted == null
+            ? null
+            : Number(toDeclared(data.totalVolumeAccepted, data.totalVolumeAcceptedUnit)),
         );
 
         if (hasBaselinePayload(data)) {
-          const unit =
-            data.baselineUnit || data.totalVolumeAcceptedUnit || slfUnit;
+          const unit = declaredUnit;
           setBaselineUnit(unit);
           setAcceptsHazardousWaste(data.acceptsHazardousWaste || false);
           baselineForm.setFieldsValue({
             baselineUnit: unit,
-            totalVolumeAccepted: data.totalVolumeAccepted,
-            totalVolumeAcceptedUnit: data.totalVolumeAcceptedUnit || unit,
-            activeCellResidualVolume: data.activeCellResidualVolume,
-            activeCellResidualUnit: data.activeCellResidualUnit || unit,
-            activeCellInertVolume: data.activeCellInertVolume,
-            activeCellInertUnit: data.activeCellInertUnit || unit,
-            activeCellHazardousVolume: data.activeCellHazardousVolume,
-            activeCellHazardousUnit: data.activeCellHazardousUnit || unit,
-            closedCellResidualVolume: data.closedCellResidualVolume,
-            closedCellResidualUnit: data.closedCellResidualUnit || unit,
-            closedCellInertVolume: data.closedCellInertVolume,
-            closedCellInertUnit: data.closedCellInertUnit || unit,
-            closedCellHazardousVolume: data.closedCellHazardousVolume,
-            closedCellHazardousUnit: data.closedCellHazardousUnit || unit,
+            totalVolumeAccepted: toDeclared(data.totalVolumeAccepted, data.totalVolumeAcceptedUnit),
+            totalVolumeAcceptedUnit: unit,
+            activeCellResidualVolume: toDeclared(data.activeCellResidualVolume, data.activeCellResidualUnit),
+            activeCellResidualUnit: unit,
+            activeCellInertVolume: toDeclared(data.activeCellInertVolume, data.activeCellInertUnit),
+            activeCellInertUnit: unit,
+            activeCellHazardousVolume: toDeclared(data.activeCellHazardousVolume, data.activeCellHazardousUnit),
+            activeCellHazardousUnit: unit,
+            closedCellResidualVolume: toDeclared(data.closedCellResidualVolume, data.closedCellResidualUnit),
+            closedCellResidualUnit: unit,
+            closedCellInertVolume: toDeclared(data.closedCellInertVolume, data.closedCellInertUnit),
+            closedCellInertUnit: unit,
+            closedCellHazardousVolume: toDeclared(data.closedCellHazardousVolume, data.closedCellHazardousUnit),
+            closedCellHazardousUnit: unit,
             acceptsHazardousWaste: data.acceptsHazardousWaste || false,
           });
           // Every field falls back to what the form already holds.
@@ -2600,6 +2703,7 @@ export default function SLFPortal() {
               .catch(() => {});
           }
           setHaulers(mergeHaulersByName(data.accreditedHaulers || [], unit));
+          setBaselineMov(normalizeBaselineMov(data.baselineMov));
           // Load activeCellEntries from saved data (or migrate from flat fields)
           if (data.activeCellEntries?.length) {
             setActiveCellEntries(
@@ -2670,6 +2774,7 @@ export default function SLFPortal() {
           setActiveTab("disposal");
         } else {
           setHaulers([]);
+          setBaselineMov(normalizeBaselineMov(null));
           setActiveCellEntries([]);
           setClosedCellEntries([]);
         }
@@ -3020,8 +3125,36 @@ export default function SLFPortal() {
       }
     };
     sock.on("data-refresh", onFacilityRefresh);
-    return () => sock.off("data-refresh", onFacilityRefresh);
+    // Pushes sent while the socket was down (laptop asleep, mobile network
+    // switch) are lost, which left permits/cells showing whatever was read
+    // before. Re-read facility details whenever the connection comes back.
+    const onReconnect = () => setSlfInfoRefresh((n) => n + 1);
+    sock.io?.on?.("reconnect", onReconnect);
+    return () => {
+      sock.off("data-refresh", onFacilityRefresh);
+      sock.io?.off?.("reconnect", onReconnect);
+    };
   }, [portalUser?.email, fetchSubmissions]);
+
+  // While the Dashboard is open, keep EMB-maintained facility details (permits,
+  // cell configuration) current even if a socket push never arrives: re-read when
+  // the tab regains focus and once a minute while it is visible. Re-reads are
+  // silent (see the slfInfo effect), so nothing flickers.
+  useEffect(() => {
+    if (activeMenu !== "overview" || !activeSlfId) return undefined;
+    const SYNC_MS = 60 * 1000;
+    const bump = () => {
+      if (document.visibilityState === "visible") setSlfInfoRefresh((n) => n + 1);
+    };
+    const timer = setInterval(bump, SYNC_MS);
+    window.addEventListener("focus", bump);
+    document.addEventListener("visibilitychange", bump);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", bump);
+      document.removeEventListener("visibilitychange", bump);
+    };
+  }, [activeMenu, activeSlfId]);
 
   // ── My Requests fetch ──
   // Requests panel data.
@@ -3670,7 +3803,7 @@ export default function SLFPortal() {
   // number under the wrong unit; the volume is converted so the figure the user sees
   // — and re-saves — is truthful in the declared unit.
   const openCellEntryForEdit = (row, { setDraft, setEditingKey, setOpen }) => {
-    const declared = normalizeUnit(baselineUnit || slfUnit);
+    const declared = normalizeUnit(declaredCellUnit(row.cellIndex));
     const stored = normalizeUnit(row.unit || declared);
     const converted =
       stored === declared ? row.volume : convertVolume(row.volume, stored, declared);
@@ -3691,81 +3824,72 @@ export default function SLFPortal() {
       // writing a guessed one; the hint in the modal flags the mismatch.
       volume: converted === null ? row.volume : Math.round(converted * 100) / 100,
       unit: declared,
+      dateClosed: row.dateClosed || null,
+      movAttachments: Array.isArray(row.movAttachments) ? row.movAttachments : [],
     });
     setOpen(true);
   };
 
-  // ── Active Cell Entry helpers ──
-  const handleSaveActiveCellEntry = () => {
-    if (
-      !activeCellDraft.cellName ||
-      !activeCellDraft.wasteType ||
-      activeCellDraft.volume == null
-    ) {
-      return;
-    }
-    if (editingActiveCellKey != null) {
-      setActiveCellEntries((prev) =>
-        prev.map((e) =>
-          e.key === editingActiveCellKey
-            ? {
-                ...activeCellDraft,
-                unit: normalizeUnit(
-                  activeCellDraft.unit || baselineUnit || slfUnit,
-                ),
-                key: editingActiveCellKey,
-              }
-            : e,
-        ),
-      );
-    } else {
-      setActiveCellEntries((prev) => [
-        ...prev,
-        {
-          ...activeCellDraft,
-          unit: normalizeUnit(activeCellDraft.unit || baselineUnit || slfUnit),
-          key: Date.now(),
-        },
-      ]);
-    }
-    setActiveCellModalOpen(false);
+  // Put a draft into the unit the admin declared for its cell, converting the
+  // number when the draft was typed under another unit (e.g. the cell was changed
+  // after the volume was entered). Unconvertible → keep the number as typed.
+  const toDeclaredCellUnit = (draft) => {
+    const declared = normalizeUnit(declaredCellUnit(draft.cellIndex));
+    const from = normalizeUnit(draft.unit || declared);
+    if (from === declared) return { ...draft, unit: declared };
+    const converted = convertVolume(draft.volume, from, declared);
+    return {
+      ...draft,
+      unit: declared,
+      volume: converted === null ? draft.volume : Math.round(converted * 1000) / 1000,
+    };
   };
 
-  // ── Closed Cell Entry helpers ──
-  const handleSaveClosedCellEntry = () => {
-    if (
-      !closedCellDraft.cellName ||
-      !closedCellDraft.wasteType ||
-      closedCellDraft.volume == null
-    ) {
+  // Shared add/update for both cell lists.
+  const saveCellEntryDraft = (draft, editingKey, setEntries, setOpen, { closed = false } = {}) => {
+    if (!draft.cellName || !draft.wasteType || draft.volume == null) {
+      Swal.fire(
+        "Incomplete entry",
+        "Select a cell, a waste type and enter the volume before saving.",
+        "warning",
+      );
       return;
     }
-    if (editingClosedCellKey != null) {
-      setClosedCellEntries((prev) =>
-        prev.map((e) =>
-          e.key === editingClosedCellKey
-            ? {
-                ...closedCellDraft,
-                unit: normalizeUnit(
-                  closedCellDraft.unit || baselineUnit || slfUnit,
-                ),
-                key: editingClosedCellKey,
-              }
-            : e,
-        ),
+    const normalized = toDeclaredCellUnit(draft);
+    const entry = {
+      ...normalized,
+      ...(closed ? { dateClosed: normalized.dateClosed || null } : {}),
+      movAttachments: Array.isArray(normalized.movAttachments) ? normalized.movAttachments : [],
+    };
+    if (!closed) delete entry.dateClosed;
+    if (editingKey != null) {
+      setEntries((prev) =>
+        prev.map((e) => (e.key === editingKey ? { ...entry, key: editingKey } : e)),
       );
     } else {
-      setClosedCellEntries((prev) => [
-        ...prev,
-        {
-          ...closedCellDraft,
-          unit: normalizeUnit(closedCellDraft.unit || baselineUnit || slfUnit),
-          key: Date.now(),
-        },
-      ]);
+      setEntries((prev) => [...prev, { ...entry, key: Date.now() }]);
     }
-    setClosedCellModalOpen(false);
+    setOpen(false);
   };
+
+  // ── Active Cell Entry helpers ──
+  const handleSaveActiveCellEntry = () =>
+    saveCellEntryDraft(
+      activeCellDraft,
+      editingActiveCellKey,
+      setActiveCellEntries,
+      setActiveCellModalOpen,
+    );
+
+  // ── Closed Cell Entry helpers ──
+  const handleSaveClosedCellEntry = () =>
+    saveCellEntryDraft(
+      closedCellDraft,
+      editingClosedCellKey,
+      setClosedCellEntries,
+      setClosedCellModalOpen,
+      { closed: true },
+    );
 
   // ── Hauler Client helpers ──
   const handleSaveClient = () => {
@@ -4329,6 +4453,7 @@ export default function SLFPortal() {
           baselineUnit: baselineUnit || slfUnit,
           totalVolumeAccepted: resolvedTotalVolumeAccepted,
           totalVolumeAcceptedUnit: baselineUnit || slfUnit,
+          baselineMov,
           activeCellResidualVolume,
           activeCellResidualUnit: baselineUnit || slfUnit,
           activeCellInertVolume,
@@ -6057,52 +6182,6 @@ export default function SLFPortal() {
     };
   };
 
-  // ── Baseline unit change handler ──
-  const handleBaselineUnitChange = (unit) => {
-    setBaselineUnit(unit);
-    baselineForm.setFieldsValue({
-      baselineUnit: unit,
-      totalVolumeAcceptedUnit: unit,
-      activeCellResidualUnit: unit,
-      activeCellInertUnit: unit,
-      activeCellHazardousUnit: unit,
-      closedCellResidualUnit: unit,
-      closedCellInertUnit: unit,
-      closedCellHazardousUnit: unit,
-    });
-    // Propagate unit to truck draft, existing trucks, and hauler vehicles
-    setTruckDraft((prev) => ({
-      ...prev,
-      truckCapacityUnit: unit,
-      actualVolumeUnit: unit,
-      vehicles: (prev.vehicles || []).map((v) => ({
-        ...v,
-        capacityUnit: unit,
-      })),
-    }));
-    setTrucks((prev) =>
-      prev.map((t) => ({
-        ...t,
-        truckCapacityUnit: unit,
-        actualVolumeUnit: unit,
-        vehicles: (t.vehicles || []).map((v) => ({ ...v, capacityUnit: unit })),
-      })),
-    );
-    setHaulers((prev) =>
-      prev.map((h) => ({
-        ...h,
-        vehicles: (h.vehicles || []).map((v) => ({ ...v, capacityUnit: unit })),
-      })),
-    );
-    setActiveCellDraft((prev) => ({ ...prev, unit }));
-    setClosedCellDraft((prev) => ({ ...prev, unit }));
-    // Cell entries ALREADY added kept their old unit, so after switching the unit
-    // the baseline mixed m³ and tons rows under one declared unit — a 5× error in
-    // whichever rows were left behind. Re-stamp them with the selected unit, which
-    // is what the declared-unit control means.
-    setActiveCellEntries((prev) => prev.map((e) => ({ ...e, unit })));
-    setClosedCellEntries((prev) => prev.map((e) => ({ ...e, unit })));
-  };
 
   // ── Edit reverted entry ──
   const [editingRevertedId, setEditingRevertedId] = useState(null);
@@ -6111,6 +6190,11 @@ export default function SLFPortal() {
   // data is loaded into Data Entry. Save as Draft updates THAT record, and a
   // successful Review & Submit removes it from the queue.
   const [editingDraft, setEditingDraft] = useState(null);
+  // Drafts & Scheduled caches its list for a few minutes. Every queue write made
+  // from Data Entry must drop that cache, or the panel keeps showing a draft that
+  // was already submitted/replaced — and its Edit button then fails with "Could
+  // not open this draft" because the record is gone. Same key as the panel's.
+  const invalidateQueueCache = () => invalidateCache(`portal-queue-${portalUser?.email || ""}`);
 
   // The history LIST is lean (no trucks / haulers / baseline blobs — see
   // portalAuth PORTAL_SUBMISSION_LIST_FIELDS), so Edit & Resubmit pulls the FULL
@@ -6347,8 +6431,14 @@ export default function SLFPortal() {
     setEditingTruckKey(null);
     setEditingDraft({
       id: record._id,
+      type: record.type === "scheduled" ? "scheduled" : "draft",
       label: payload.dateOfDisposal ? dayjs(payload.dateOfDisposal).format("MMM D, YYYY") : "undated",
     });
+    // A scheduled run keeps its time as the default when it is rescheduled.
+    if (record.type === "scheduled" && record.scheduledAt) {
+      const when = dayjs(record.scheduledAt);
+      setScheduleAt(when.isAfter(dayjs()) ? when : null);
+    }
     setSubmitted(false);
     setActiveMenu("data-entry");
     setActiveTab("disposal");
@@ -6365,6 +6455,20 @@ export default function SLFPortal() {
           `This draft corrects reverted entry <b>${plain(record.resubmitOfIdNo) || "—"}</b>.` +
           (record?.failureReason ? `<br/><br/><b>Why it was not submitted:</b> ${plain(record.failureReason)}` : "") +
           "<br/><br/>Use <b>Review &amp; Submit</b> to resubmit it, or <b>Save as Draft</b> to keep working later.",
+        confirmButtonColor: "#1a3353",
+      });
+      return;
+    }
+    if (record.type === "scheduled") {
+      Swal.fire({
+        icon: "info",
+        title: "Editing Scheduled Submission",
+        html:
+          (record?.failureReason
+            ? `<b>Why it was not submitted:</b> ${plain(record.failureReason)}<br/><br/>`
+            : "") +
+          `Scheduled for <b>${record.scheduledAt ? dayjs(record.scheduledAt).format("MMM D, YYYY h:mm A") : "—"}</b>. ` +
+          "Make your changes, then use <b>Review &amp; Submit → Schedule</b> to keep it scheduled, <b>Save as Draft</b> to unschedule it, or submit it now.",
         confirmButtonColor: "#1a3353",
       });
       return;
@@ -6517,7 +6621,10 @@ export default function SLFPortal() {
       // Resubmitted from a saved correction: that draft is now in Submission
       // History, so it leaves Drafts & Scheduled (same as a submitted draft).
       if (editingDraft?.id) {
-        api.delete(`/portal-queue/${editingDraft.id}`).catch(() => {});
+        api
+          .delete(`/portal-queue/${editingDraft.id}`)
+          .catch(() => {})
+          .finally(invalidateQueueCache);
         setEditingDraft(null);
       }
       Swal.fire({
@@ -7003,8 +7110,9 @@ export default function SLFPortal() {
       const capUnit = normalizeUnit(
         slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || slfUnit,
       );
+      // Includes pending-review volume — see reservedCellFill.
       const currentFill = convertVolume(
-        Number(slfInfo?.cellFillValues?.[idx] || 0),
+        reservedCellFill(idx),
         slfInfo?.cellFillUnits?.[idx] || capUnit,
         capUnit,
       );
@@ -7271,7 +7379,10 @@ export default function SLFPortal() {
       // way the old queue record is superseded. Best effort: a failure here
       // leaves a stale draft, never a lost submission.
       if (editingDraft) {
-        api.delete(`/portal-queue/${editingDraft.id}`).catch(() => {});
+        api
+          .delete(`/portal-queue/${editingDraft.id}`)
+          .catch(() => {})
+          .finally(invalidateQueueCache);
         setEditingDraft(null);
       }
       // Item #2: the backend saved this as a DRAFT (HTTP 202) because the assigned
@@ -7444,7 +7555,12 @@ export default function SLFPortal() {
             slfGenerator: activeSlfId || null,
             ...correctionLink(),
           });
+      invalidateQueueCache();
       setReviewModalOpen(false);
+      // A scheduled run saved as a draft is now an ordinary draft.
+      if (editingDraft?.type === "scheduled") {
+        setEditingDraft((current) => (current ? { ...current, type: "draft" } : current));
+      }
       if (editingRevertedId) {
         Swal.fire({
           icon: "success",
@@ -7502,15 +7618,31 @@ export default function SLFPortal() {
       // `scheduledAt` is sent as an absolute ISO instant (UTC), so the server's
       // "must be in the future" check and the worker's `scheduledAt <= now` sweep
       // compare the same instant regardless of the browser's timezone.
-      await api.post("/portal-queue", {
-        type: "scheduled",
-        payload: entry,
-        scheduledAt: scheduleAt.toISOString(),
-        clientRequestId: newClientRequestId(),
-        slfName: activeSlfName,
-        slfGenerator: activeSlfId || null,
-        ...correctionLink(),
-      });
+      // Editing a draft or a scheduled run opened from Drafts & Scheduled: update
+      // THAT record (now scheduled at the chosen time) instead of filing a copy
+      // and leaving the original behind.
+      if (editingDraft?.id) {
+        await api.put(`/portal-queue/${editingDraft.id}`, {
+          type: "scheduled",
+          payload: entry,
+          scheduledAt: scheduleAt.toISOString(),
+          slfName: activeSlfName,
+          slfGenerator: activeSlfId || null,
+          ...correctionLink(),
+        });
+        setEditingDraft(null);
+      } else {
+        await api.post("/portal-queue", {
+          type: "scheduled",
+          payload: entry,
+          scheduledAt: scheduleAt.toISOString(),
+          clientRequestId: newClientRequestId(),
+          slfName: activeSlfName,
+          slfGenerator: activeSlfId || null,
+          ...correctionLink(),
+        });
+      }
+      invalidateQueueCache();
       setScheduleModalOpen(false);
       setScheduleAt(null);
       setReviewModalOpen(false);
@@ -8064,6 +8196,8 @@ export default function SLFPortal() {
       disabled: true,
     },
     { type: "divider" },
+    // The profile picture is changed from the camera button on the avatar in
+    // View Profile (ProfilePhotoEditor, cameraOnly).
     { key: "profile", icon: <UserOutlined />, label: "View Profile" },
     { key: "logout", icon: <LogoutOutlined />, label: "Logout", danger: true },
   ];
@@ -8073,10 +8207,15 @@ export default function SLFPortal() {
     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", border: "1px solid #91caff", borderRadius: 8, background: "#e6f4ff", maxWidth: "100%" }}>
       <DatabaseOutlined style={{ color: "#1677ff" }} />
       {!isMobile && <Text strong style={{ fontSize: 12, color: "#003eb3", whiteSpace: "nowrap" }}>Unit of Measurement</Text>}
-      <Select size="small" value={baselineUnit || slfUnit} onChange={handleBaselineUnitChange} disabled={baselineSaved} placeholder="Unit" style={{ width: isMobile ? 104 : 150 }}>
-        <Option value="m³">m³</Option>
-        <Option value="tons">tons</Option>
-      </Select>
+      {/* READ-ONLY. The unit is declared by EMB on the SLF record and is the
+          same on every admin and portal screen. Operators could switch it here,
+          which is how one facility came to show m³ on the portal and tons on the
+          admin side. Ask EMB to change it if it is wrong. */}
+      <Tooltip title="Declared by EMB Region III for this SLF. All figures in the portal and admin use this unit.">
+        <Tag color="blue" style={{ margin: 0, fontWeight: 600 }}>
+          {slfUnit}
+        </Tag>
+      </Tooltip>
     </div>
   );
 
@@ -8411,19 +8550,13 @@ export default function SLFPortal() {
                                 Unit of Measurement
                               </Text>
                               <Text type="secondary" style={{ fontSize: 10 }}>
-                                Applies to all portal volume fields
+                                Declared by EMB Region III — the same unit on every admin and portal screen
                               </Text>
                             </div>
-                            <Select
-                              value={baselineUnit || slfUnit}
-                              onChange={handleBaselineUnitChange}
-                              disabled={baselineSaved}
-                              placeholder="Select unit of measurement"
-                              style={{ width: 170 }}
-                            >
-                              <Option value="m³">m³ (cubic meters)</Option>
-                              <Option value="tons">tons</Option>
-                            </Select>
+                            {/* Read-only: see renderUnitMeasurementControl. */}
+                            <Tag color="blue" style={{ margin: 0, fontSize: 13, padding: "2px 10px", fontWeight: 600 }}>
+                              {slfUnit === "m³" ? "m³ (cubic meters)" : slfUnit}
+                            </Tag>
                           </div>
 
                           {/* ── Volume of Waste Accepted ── */}
@@ -8523,21 +8656,16 @@ export default function SLFPortal() {
                             </div>
                           </div>
 
-                          <Collapse
-                            bordered={false}
-                            // Controlled so the feature tour can open the
-                            // Accredited Haulers panel it points at. Left closed
-                            // by default exactly as before; nothing else changes
-                            // the user's own expand/collapse behaviour.
-                            activeKey={baselineSections}
-                            onChange={setBaselineSections}
-                            style={{
-                              background: "transparent",
-                              marginBottom: 14,
-                            }}
-                            items={[
+                          {/* Active Cells, Closed Cells and Accredited Haulers as
+                              always-open CARDS (they were collapsed dropdowns that
+                              hid the data). Each card's title carries its actions on
+                              the right — Add Entry and the section's Upload MOV. */}
+                          {[
                               {
                                 key: "active",
+                                movKey: "activeCells",
+                                movTitle: "Active Cells",
+                                accent: "#52c41a",
                                 label: (
                                   <Space>
                                     <CheckCircleOutlined
@@ -8572,9 +8700,11 @@ export default function SLFPortal() {
                                       setEditingActiveCellKey(null);
                                       setActiveCellDraft({
                                         cellName: "",
+                                        cellIndex: null,
                                         wasteType: "Residual",
                                         volume: null,
-                                        unit: baselineUnit || slfUnit,
+                                        unit: slfUnit,
+                                        movAttachments: [],
                                       });
                                       setActiveCellModalOpen(true);
                                     }}
@@ -8667,7 +8797,7 @@ export default function SLFPortal() {
                                             style={{ color: "#52c41a" }}
                                           >
                                             {r.volume != null
-                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || slfUnit)}`
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || declaredCellUnit(r.cellIndex))}`
                                               : "—"}
                                           </Text>
                                         ),
@@ -8713,6 +8843,9 @@ export default function SLFPortal() {
                               },
                               {
                                 key: "closed",
+                                movKey: "closedCells",
+                                movTitle: "Closed Cells",
+                                accent: "#722ed1",
                                 label: (
                                   <Space>
                                     <CloseCircleOutlined
@@ -8747,9 +8880,12 @@ export default function SLFPortal() {
                                       setEditingClosedCellKey(null);
                                       setClosedCellDraft({
                                         cellName: "",
+                                        cellIndex: null,
                                         wasteType: "Residual",
                                         volume: null,
-                                        unit: baselineUnit || slfUnit,
+                                        unit: slfUnit,
+                                        dateClosed: null,
+                                        movAttachments: [],
                                       });
                                       setClosedCellModalOpen(true);
                                     }}
@@ -8842,10 +8978,24 @@ export default function SLFPortal() {
                                             style={{ color: "#722ed1" }}
                                           >
                                             {r.volume != null
-                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || slfUnit)}`
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || declaredCellUnit(r.cellIndex))}`
                                               : "—"}
                                           </Text>
                                         ),
+                                      },
+                                      {
+                                        title: "Date Closed",
+                                        dataIndex: "dateClosed",
+                                        key: "dateClosed",
+                                        width: 120,
+                                        render: (v) =>
+                                          v ? (
+                                            dayjs(v).format("MMM D, YYYY")
+                                          ) : (
+                                            <Text type="secondary" style={{ fontSize: 12 }}>
+                                              Not set
+                                            </Text>
+                                          ),
                                       },
                                       !baselineSaved && {
                                         title: "",
@@ -8888,6 +9038,9 @@ export default function SLFPortal() {
                               },
                               {
                                 key: "haulers",
+                                movKey: "haulers",
+                                movTitle: "Accredited Haulers",
+                                accent: "#d4b106",
                                 label: (
                                   <Space>
                                     <TeamOutlined
@@ -9000,8 +9153,88 @@ export default function SLFPortal() {
                                   </div>
                                 ),
                               },
-                            ]}
-                          />
+                          ].map((section) => {
+                            const folded = collapsedBaselineCards.includes(section.key);
+                            const toggle = () =>
+                              updateFoldedCards((prev) =>
+                                prev.includes(section.key)
+                                  ? prev.filter((k) => k !== section.key)
+                                  : [...prev, section.key],
+                              );
+                            return (
+                            <Card
+                              key={section.key}
+                              id={`slf-baseline-${section.key}`}
+                              size="small"
+                              className={`slf-baseline-section-card${folded ? " is-folded" : ""}`}
+                              title={
+                                // The whole title folds / unfolds the card; the
+                                // actions on the right stay usable either way.
+                                <div
+                                  role="button"
+                                  tabIndex={0}
+                                  aria-expanded={!folded}
+                                  aria-controls={`slf-baseline-${section.key}-body`}
+                                  onClick={toggle}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      toggle();
+                                    }
+                                  }}
+                                  style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none" }}
+                                >
+                                  <RightOutlined
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#8c8c8c",
+                                      transition: "transform 0.2s",
+                                      transform: folded ? "rotate(0deg)" : "rotate(90deg)",
+                                    }}
+                                  />
+                                  {section.label}
+                                </div>
+                              }
+                              extra={
+                                <Space size={8} wrap style={{ justifyContent: "flex-end" }}>
+                                  {section.extra}
+                                  <SectionMovButton
+                                    title={section.movTitle}
+                                    attachments={baselineMov[section.movKey]}
+                                    editable={!baselineSaved}
+                                    uploaderEmail={portalUser?.email}
+                                    onChange={(updater) =>
+                                      setBaselineMov((prev) => ({
+                                        ...prev,
+                                        [section.movKey]:
+                                          typeof updater === "function" ? updater(prev[section.movKey]) : updater,
+                                      }))
+                                    }
+                                  />
+                                </Space>
+                              }
+                              style={{
+                                marginBottom: 14,
+                                borderRadius: 10,
+                                borderLeft: `4px solid ${section.accent}`,
+                              }}
+                              styles={{
+                                header: {
+                                  flexWrap: "wrap",
+                                  gap: 8,
+                                  padding: "8px 12px",
+                                  ...(folded ? { borderBottom: "none" } : {}),
+                                },
+                                // Folded = hidden, not unmounted: the feature tour
+                                // anchors into these cards, and the tables keep
+                                // their page / sort state across a fold.
+                                body: folded ? { display: "none" } : { padding: 12 },
+                              }}
+                            >
+                              <div id={`slf-baseline-${section.key}-body`}>{section.children}</div>
+                            </Card>
+                            );
+                          })}
 
                           {/* ── Save Baseline Update Button (visible when admin approved editing) ── */}
                           {!baselineSaved && (
@@ -9367,7 +9600,9 @@ export default function SLFPortal() {
 
       <Layout
         style={{
-          marginLeft: isMobile ? 0 : collapsed ? 64 : 220,
+          // Matches the Sider's own widths (230 / 64) — 220 left the expanded
+          // sidebar overlapping the first 10 px of every page.
+          marginLeft: isMobile ? 0 : collapsed ? 64 : 230,
           transition: "margin-left 0.2s",
           // Item #1: full-height flex column so the footer sticks to the bottom of
           // the viewport on short pages, while long pages scroll normally. No
@@ -9744,6 +9979,11 @@ export default function SLFPortal() {
               slfInfoLoading={slfInfoLoading}
               haulers={haulers}
               activeSlfName={activeSlfName}
+              // The ADMIN-declared facility unit, so the Dashboard reads in
+              // exactly the unit EMB's SLF Table shows.
+              declaredUnit={slfUnit}
+              slfInfoSyncedAt={slfInfoSyncedAt}
+              onRefreshSlfInfo={refreshSlfInfoNow}
               onCreateSubmission={goToDataEntry}
               onViewSubmissions={goToHistory}
               onOrganizeCells={handleOrganizeCells}
@@ -9995,9 +10235,11 @@ export default function SLFPortal() {
                   const fillUnit = resolveCellUnit(slfInfo, idx, "fill");
                   const capacity = convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, capUnit) ?? 0;
                   const fill = convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, capUnit) ?? 0;
+                  // Full = in the cell + pending review (see reservedCellFill).
+                  const reserved = convertVolume(reservedCellFill(idx), fillUnit, capUnit) ?? fill;
 
                   const pct = capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null;
-                  const isFull = capacity > 0 && fill >= capacity;
+                  const isFull = capacity > 0 && reserved >= capacity;
                   return {
                     idx,
                     label: resolveCellName(slfInfo, idx),
@@ -10963,6 +11205,7 @@ export default function SLFPortal() {
           setClosedCellDraft={setClosedCellDraft}
           editingClosedCellKey={editingClosedCellKey}
           setEditingClosedCellKey={setEditingClosedCellKey}
+          declaredCellUnit={declaredCellUnit}
           haulerDeleteModal={haulerDeleteModal}
           setHaulerDeleteModal={setHaulerDeleteModal}
           haulerDeleteReason={haulerDeleteReason}

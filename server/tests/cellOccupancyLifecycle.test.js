@@ -58,20 +58,30 @@ const truck = (volume, cellIndex) => ({
 });
 const entry = (id, status, trucks) => ({ _id: id, status, baselineUnit: "m³", trucks });
 
-test("multiple entries into the SAME cell aggregate, they do not overwrite", () => {
+test("multiple APPROVED entries into the SAME cell aggregate, they do not overwrite", () => {
   const occ = computeCellOccupancy(facility, [
     entry("a", "acknowledged", [truck(10, 0)]),
     entry("b", "acknowledged", [truck(15, 0)]),
-    entry("c", "pending", [truck(20, 0)]),
+    entry("c", "acknowledged", [truck(20, 0)]),
   ]);
   assert.equal(Math.round(occ.cellFillValues[0]), 45, "10 + 15 + 20");
   assert.equal(Math.round(occ.cellFillValues[1] || 0), 0, "the other cell is untouched");
 });
 
+test("Waste in Cell = baseline + APPROVED; pending is reserved against capacity, not in the cell", () => {
+  const occ = computeCellOccupancy(facility, [
+    entry("a", "acknowledged", [truck(10, 0)]),
+    entry("c", "pending", [truck(20, 0)]),
+  ]);
+  assert.equal(Math.round(occ.cellFillValues[0]), 10, "only the approved load");
+  assert.equal(Math.round(occ.cellFillPendingValues[0]), 20, "the pending load is held separately");
+  assert.equal(Math.round(occ.totalVolume), 10, "nor is pending part of the received total");
+});
+
 test("a reverted submission releases its volume", () => {
   const before = computeCellOccupancy(facility, [
     entry("a", "acknowledged", [truck(10, 0)]),
-    entry("b", "pending", [truck(25, 0)]),
+    entry("b", "acknowledged", [truck(25, 0)]),
   ]);
   const after = computeCellOccupancy(facility, [
     entry("a", "acknowledged", [truck(10, 0)]),
@@ -79,16 +89,23 @@ test("a reverted submission releases its volume", () => {
   ]);
   assert.equal(Math.round(before.cellFillValues[0]), 35);
   assert.equal(Math.round(after.cellFillValues[0]), 10, "the reverted volume must leave the cell");
+  assert.equal(Math.round(after.cellFillPendingValues[0]), 0, "…and holds no capacity either");
 });
 
 test("revert → correct → resubmit counts the CORRECTED volume once, never X + Y", () => {
   // Submitted 25 into Cell 1, reverted, corrected to 40 and moved to Cell 2.
   const resubmitted = computeCellOccupancy(facility, [
     entry("a", "acknowledged", [truck(10, 0)]),
-    entry("b", "pending", [truck(40, 1)]), // same record, updated in place
+    entry("b", "pending", [truck(40, 1)]), // same record, updated in place, awaiting review
   ]);
   assert.equal(Math.round(resubmitted.cellFillValues[0]), 10, "the old placement is gone");
-  assert.equal(Math.round(resubmitted.cellFillValues[1]), 40, "only the corrected volume");
+  assert.equal(Math.round(resubmitted.cellFillValues[1]), 0, "not in the cell until approved");
+  assert.equal(Math.round(resubmitted.cellFillPendingValues[1]), 40, "but its capacity is reserved");
+  const approved = computeCellOccupancy(facility, [
+    entry("a", "acknowledged", [truck(10, 0)]),
+    entry("b", "acknowledged", [truck(40, 1)]),
+  ]);
+  assert.equal(Math.round(approved.cellFillValues[1]), 40, "only the corrected volume, once approved");
 });
 
 test("the calculation is a RECOMPUTE — running it twice changes nothing", () => {
