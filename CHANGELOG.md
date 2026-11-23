@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-11-23
+
+### Changed — Waste in Cell formula (occupancy calculation v6)
+- **Waste in Cell = baseline + APPROVED submissions.** Pending volume is no
+  longer in the figure, but is kept per cell (`cellFillPendingValues`) and still
+  counted by every capacity gate (portal and server), so pending loads cannot
+  overfill a cell. Reverted / rejected submissions never count.
+- **Admin-typed Waste in Cell no longer replaces the formula.** It hid the
+  baseline and every approval (Porac read 1,310,353 / 683,202 m³ against a larger
+  baseline). The Edit modal shows Waste in Cell read-only with its breakdown;
+  old declarations stay on the record for audit only.
+- **Closed-cell baselines are placed in their cells** (they were never counted);
+  baseline rows bind by their stored `cellIndex`, not by parsing the name.
+- The calculation version bump makes the startup sweep recompute every facility.
+
+### Changed — Units are the same everywhere
+- One declared-unit rule for server, admin and portal: Volume Capacity unit →
+  cell capacity unit → received unit. The recompute no longer re-declares a
+  facility from the first truck's unit.
+- **Fixed**: the admin Edit save stamped one unit on every cell without
+  converting (2,052 m³ would have been saved as 2,052 t); figures are now
+  converted into the declared unit when the form loads.
+- Baseline cell entries follow the unit the admin declared for each cell, on
+  save and on read; the portal's unit pickers are read-only.
+  `scripts/normalizeBaselineCellUnits.js` merges entries already stored in another
+  unit (dry run by default, `--apply` to write).
+- The portal disposal report is in the facility's declared unit (Limay: m³).
+
+### Added — SLF Portal
+- Baseline: Active / Closed Cells and Accredited Haulers are collapsible cards
+  (each operator's choice remembered) with **Upload MOV** per section (Google
+  Drive › documents › "Baseline MOV"); closed cells record **Date Closed**.
+- Report: per-day breakdown, month / 1st–15th / 16th–end / custom period
+  filters, scrolls inside the window; permits from the admin's permit lists.
+- Drafts & Scheduled: drafts AND scheduled runs can be edited; the list no
+  longer shows stale rows (whose Edit failed with "Could not open this draft").
+- My Requests: Request (type + description) and Reason / Statement columns; the
+  conversation shows only that request's thread, one entry per message.
+- Submission History: Company / Type and Status / Remarks merged columns.
+- Dashboard: permits with DP type, recorded status and expired flag; re-reads on
+  reconnect, focus and every minute; **Hazwaste Generator ID** now shown (it was
+  never sent to the portal).
+- Profile picture: camera button on the My Profile avatar.
+
+### Changed — Admin
+- Cell Infrastructure Overview gauges are coloured by cell STATUS (Used/Completed,
+  Closed, Reserved, Under Construction) and by fullness for active cells, with a
+  matching legend; a non-receiving cell holding waste is flagged.
+- SLF View modal: formula labels, pending-review note, capacity falls back to the
+  sum of cell capacities when Volume Capacity is blank.
+
+### Changed — Whole app
+- One thin (6px) scrollbar design; fixed-height tables show a scrollbar only
+  when the rows overflow.
+- Pinch-zoom / Chrome zoom work on phones and tablets (`overflow-x: clip`).
+- iPad 13": sidebar starts collapsed, tables scroll sideways instead of
+  squeezing their columns, card headers and tab bars wrap.
+
 ## [1.8.0] — 2026-11-19
 
 ### Added — Planning Unit access (view-only, until Dec 31, 2026)
