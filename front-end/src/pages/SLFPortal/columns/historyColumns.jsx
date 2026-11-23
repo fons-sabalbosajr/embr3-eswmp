@@ -216,7 +216,9 @@ export function makeHistoryColumns({
         title: "Company / Type",
         key: "companyAddr",
         responsive: FROM_LG,
-        width: 230,
+        // A little wider than before: this one column now carries the name, the
+        // type and the address.
+        width: 250,
         filters: [
           { text: "LGU", value: "LGU" },
           { text: "Private", value: "Private" },
@@ -225,32 +227,73 @@ export function makeHistoryColumns({
           record.isGroup
             ? (record.children || []).some((c) => c.companyType === value)
             : record.companyType === value,
-        render: (_, r) => (
-          <div style={{ minWidth: 0 }}>
-            <Space size={6} align="start" style={{ maxWidth: "100%" }}>
-              {r.companyType && (
-                <Tag
-                  color={r.companyType === "LGU" ? "blue" : "green"}
-                  style={{ marginInlineEnd: 0, fontSize: 10.5, lineHeight: "17px" }}
+        // Two lines that always stay INSIDE the column (its width is a share of
+        // the table — see fitColumns). The tag and name used to sit in an antd
+        // Space, which does not shrink, so a 50–66 character name ran out of the
+        // cell into the next column.
+        //   1. company name — bold, wrapped, at most 2 lines, full name on hover
+        //   2. type tag + address — one line, clipped with "…", full on hover
+        render: (_, r) => {
+          const name = r.lguCompanyName || "—";
+          return (
+            <div style={{ minWidth: 0, width: "100%" }}>
+              <Tooltip title={name.length > 40 ? name : undefined} placement="topLeft">
+                <div
+                  style={{
+                    fontWeight: 600,
+                    fontSize: 12.5,
+                    lineHeight: 1.3,
+                    color: "#1a3353",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                    overflowWrap: "anywhere",
+                  }}
                 >
-                  {r.companyType}
-                </Tag>
+                  {name}
+                </div>
+              </Tooltip>
+              {(r.companyType || r.address) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, minWidth: 0 }}>
+                  {r.companyType && (
+                    <Tag
+                      color={r.companyType === "LGU" ? "blue" : "green"}
+                      style={{
+                        flex: "0 0 auto",
+                        marginInlineEnd: 0,
+                        fontSize: 10.5,
+                        lineHeight: "16px",
+                        padding: "0 6px",
+                        whiteSpace: "nowrap",
+                        height: "auto",
+                      }}
+                    >
+                      {r.companyType}
+                    </Tag>
+                  )}
+                  {r.address && (
+                    <Tooltip title={r.address} placement="topLeft">
+                      <span
+                        style={{
+                          flex: "1 1 auto",
+                          minWidth: 0,
+                          fontSize: 11,
+                          color: "#8c8c8c",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {r.address}
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
               )}
-              <Text strong style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
-                {r.lguCompanyName || "—"}
-              </Text>
-            </Space>
-            {r.address && (
-              <Text
-                type="secondary"
-                style={{ display: "block", fontSize: 11, marginTop: 2 }}
-                ellipsis={{ tooltip: r.address }}
-              >
-                {r.address}
-              </Text>
-            )}
-          </div>
-        ),
+            </div>
+          );
+        },
       },
       {
         title: "Entries",
