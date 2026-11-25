@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test submissions. The version bump makes the startup sweep recompute every
   facility.
 
+### Added — announcement
+- `seeds/seedPortalUpdatesNov2026c.js` — the portal announcement for the 1.10
+  release (25 Nov – 9 Dec 2026), published 2026-11-25. Previews by default;
+  `--apply` publishes it. No email is sent.
+
 ### Dependencies
 - Server: `nodemailer` 9 → 10.6.1; `nodemon`'s `minimatch` overridden to ^11.0.9.
 
