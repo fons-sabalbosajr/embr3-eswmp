@@ -8,6 +8,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-11-25
+
+### Added — SLF Portal (the six improvements in `Proposed_SLF_Portal_Improvements.pptx`)
+- **Autosave to Drafts**: Data Entry saves itself to Drafts & Scheduled after a
+  pause in typing (no click). The server stamps `autosavedAt`, the list shows
+  **Last Saved**, and a failed autosave waits 30 s before retrying. Baseline
+  edits are never autosaved; leaving with unsaved baseline changes asks first.
+- **My Documents** menu: every MOV, letter and attachment the SLF submitted,
+  filtered by type, cell or Submission ID; tick several and download one .zip
+  (`/api/portal-documents`, by document id, up to 100 files / 300 MB).
+- **Backlog upload**: one file can cover up to one month back. It is split into
+  one submission per disposal date (each its own ID); dates older than a month
+  or in the future are refused, in the preview and on the server.
+- **Tons → m³**: a load weighed in the other unit is converted with the system
+  factor (m³ = tons ÷ 0.5) before submitting; the weighed value is kept on the
+  record (`enteredVolume` / `enteredVolumeUnit`) and the server recomputes it.
+- **EMB-corrected data flows back**: when EMB verifies or corrects a client (or
+  renames a hauler) the SLF's baseline roster is updated, the change is logged,
+  the portal user is notified, and the client shows **Verified by EMB**.
+- **Smart name matching**: punctuation, capitals and spacing are ignored when
+  comparing hauler / client names and addresses; a changed letter or word asks
+  "Did you mean …?". Portal and server share one test fixture.
+
+### Changed — SLF Portal
+- `SLFPortal/index.jsx` split from 11,912 to 1,485 lines: 21 hooks in
+  `SLFPortal/hooks/` plus extracted components (`DataEntryTab`,
+  `CellOrganizerModal`, `PortalHeader`, …). Behaviour unchanged — the first
+  render is byte-identical. Source-level tests read the combined source through
+  `__tests__/portalSource.js` (and `server/tests/helpers/portalSource.js`).
+- **Modals fit the screen** at every size: height capped to the viewport,
+  header and footer fixed, only the body scrolls; tables inside a modal scroll
+  in their own area with the header row pinned.
+- **SLF Overview › Permits & Clearances**: tiles fill the card (1 column, 2 × 2,
+  or 4 across by the card's width — never 3 + 1) and their statuses line up.
+
+### Changed — Admin
+- **Portal Submissions › Submissions** detail redesigned to match the portal's
+  Submission History detail (`SubmissionDetailView.jsx`): one row per waste
+  entry, gauges for the cells the submission used, haulers, revert banner; keeps
+  company / address, each load's clients and truck capacity, and the
+  transaction history. Total Volume now counts every vehicle's load in its own
+  unit. The "SLF Facility Operations" and "Baseline Information" sections were
+  removed (per-cell gauges replace the facility-wide one).
+- **Disposal Calendar**: no horizontal scrollbar — the tables fit beside the
+  calendar. **Daily Submission Details** is wider (up to 1,280 px) and its Waste
+  Breakdown fits without scrolling.
+
+### Fixed — Cell capacities read the same everywhere (occupancy calculation v7)
+- One per-cell rule — capacity unit, fill converted into it, a whole-number %
+  (100 only when full), remaining — in `server/utils/cellCapacity.js` and
+  `front-end/src/utils/cellCapacity.js`, used by every admin and portal screen,
+  the submit capacity gate, the portal report and VERA.
+- A cell with no unit of its own was read as m³ by the capacity gate, the portal
+  report and VERA, and as tons by the screens — so the gate could refuse a load
+  the screen showed room for.
+- VERA's cell % and the admin dashboard's cell table compared fill and capacity
+  without converting units (the table also labelled every capacity "m³"); Cell
+  Infrastructure summed m³ and ton cells together.
+- The stored figures (portal, capacity gate) now count the same submissions as
+  the admin views: hidden years are included, and a test facility counts its own
+  test submissions. The version bump makes the startup sweep recompute every
+  facility.
+
+### Dependencies
+- Server: `nodemailer` 9 → 10.6.1; `nodemon`'s `minimatch` overridden to ^11.0.9.
+
+### Tests
+- `pptxProposedImprovements` (portal and server): the deck checked slide by slide.
+- `cellCapacityUniform`: the server and browser cell rules give identical answers,
+  and every reader uses them.
+
 ## [1.9.1] — 2026-11-23
 
 ### Fixed
