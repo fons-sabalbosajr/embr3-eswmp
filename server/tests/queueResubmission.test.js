@@ -13,6 +13,7 @@
  * Run: node --test tests/queueResubmission.test.js
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -117,15 +118,12 @@ test("both queue paths go through the shared helper; drafts never merge with cor
 });
 
 test("the portal sends the link when a correction is drafted or scheduled", () => {
-  const portal = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const portal = portalJsxSource();
   assert.match(portal, /const correctionLink = \(\) => \(editingRevertedId \? \{ resubmitOf: editingRevertedId \} : \{\}\)/);
   assert.equal(
     (portal.match(/\.\.\.correctionLink\(\)/g) || []).length,
-    4,
-    "draft create, draft update, schedule create and schedule update (editing a scheduled run)",
+    5,
+    "draft create, draft update, schedule create, schedule update (editing a scheduled run) and draft autosave",
   );
   // Reopening a saved correction puts Data Entry back in resubmit mode.
   assert.match(portal, /setEditingRevertedId\(correctionOf\)/);

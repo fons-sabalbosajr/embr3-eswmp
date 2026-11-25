@@ -32,7 +32,7 @@ import {
   UserOutlined,
   WarningFilled,
 } from "@ant-design/icons";
-import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
+import GaugeMeter from "../../components/GaugeMeter";
 import CellGaugeLegend from "./slf-monitoring/CellGaugeLegend";
 import { withSizeChanger } from "../../utils/tablePagination";
 import {
@@ -45,7 +45,8 @@ import {
   CELL_STATUS_OPTIONS,
 } from "../../utils/cellVisuals";
 import api from "../../api";
-import { convertVolume } from "../../utils/volumeUnits";
+import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
+import { cellPercent } from "../../utils/cellCapacity";
 import { compareProvinceNames } from "../../utils/provinceSort";
 import { getSocket } from "../../utils/socket";
 
@@ -72,15 +73,11 @@ function deriveAddress(facility) {
     .join(", ");
 }
 
-// The declared unit for an SLF — never fabricated.
+// The declared unit for an SLF — the ONE rule the portal and every admin view
+// use (utils/volumeUnits.js → resolveFacilityUnit). This used to prefer the
+// recompute's wasteReceivedUnit, so a facility could read in a different unit here.
 function deriveUnit(facility) {
-  return (
-    facility?.wasteReceivedUnit ||
-    (facility?.cellCapacityUnits || []).find(Boolean) ||
-    (facility?.cellFillUnits || []).find(Boolean) ||
-    facility?.baselineUnit ||
-    ""
-  );
+  return resolveFacilityUnit(facility);
 }
 
 // Derive the real cells from the facility's existing cell-infra arrays. Deleted
@@ -97,11 +94,9 @@ function deriveCells(facility, occupancy = null) {
   if (!facility) return [];
   const caps = facility.cellCapacities || [];
   const fills = facility.cellFillValues || [];
-  const fillUnits = facility.cellFillUnits || [];
   const types = facility.cellTypes || [];
   const statuses = facility.cellStatuses || [];
   const names = facility.cellNames || [];
-  const capUnits = facility.cellCapacityUnits || [];
   const rollupCells = occupancy?.cells || [];
   const rollupByIndex = new Map(rollupCells.map((c) => [c.index, c]));
   const n = Math.max(
@@ -118,7 +113,8 @@ function deriveCells(facility, occupancy = null) {
     if (isNonExistentCell(status)) continue; // deleted cell — not shown/counted
     const capacity = Number(caps[i]);
     const cap = Number.isFinite(capacity) ? capacity : null;
-    const unit = capUnits[i] || deriveUnit(facility) || "m³";
+    // THE cell rule's capacity unit (utils/cellCapacity.js).
+    const unit = resolveCellUnit(facility, i, "capacity");
     const rollup = rollupByIndex.get(i);
     // The fill and the capacity can be declared in DIFFERENT units — the fill
     // resolves to whatever the portal reported in, the capacity to whatever the
@@ -126,7 +122,7 @@ function deriveCells(facility, occupancy = null) {
     // the conversion factor; convert into the capacity's unit first.
     const usedRaw = rollup
       ? convertVolume(rollup.used, rollup.unit, unit)
-      : convertVolume(Number(fills[i]) || 0, fillUnits[i] || unit, unit);
+      : convertVolume(Number(fills[i]) || 0, resolveCellUnit(facility, i, "fill"), unit);
     const used = Number.isFinite(usedRaw) ? usedRaw : 0;
     const baselineUsed = rollup
       ? Number(convertVolume(rollup.baselineUsed, rollup.unit, unit) || 0)
@@ -137,7 +133,8 @@ function deriveCells(facility, occupancy = null) {
     const type = types[i] || "Residual";
     const typeConfig = getCellTypeConfig(type);
     const statusConfig = getCellStatusConfig(status);
-    const percent = computeGaugePercent({ usedCapacity: used, totalCapacity: cap });
+    // THE cell % (utils/cellCapacity.js) — the same whole number the portal shows.
+    const percent = cellPercent(used, cap);
     cells.push({
       index: i,
       name: names[i] || `Cell ${i + 1}`, // project fallback convention
@@ -179,14 +176,18 @@ function deriveCells(facility, occupancy = null) {
 }
 
 // Aggregate utilization across a subset of cells (used for Total Cell Utilization).
-function aggregate(cells) {
+// Each cell is in its OWN capacity unit, so every figure is converted into the
+// facility unit before summing — adding m³ cells to ton cells as-is overstated
+// or understated the total by the conversion factor.
+function aggregate(cells, unit) {
   let usedSum = 0;
   let capSum = 0;
   let hasCap = false;
   cells.forEach((c) => {
-    usedSum += c.used || 0;
+    const target = unit || c.unit;
+    usedSum += convertVolume(c.used || 0, c.unit, target) ?? 0;
     if (c.capacity != null && c.capacity > 0) {
-      capSum += c.capacity;
+      capSum += convertVolume(c.capacity, c.unit, target) ?? 0;
       hasCap = true;
     }
   });
@@ -194,7 +195,7 @@ function aggregate(cells) {
     usedSum,
     capSum,
     count: cells.length,
-    percent: hasCap ? computeGaugePercent({ usedCapacity: usedSum, totalCapacity: capSum }) : null,
+    percent: hasCap ? cellPercent(usedSum, capSum) : null,
   };
 }
 
@@ -520,7 +521,7 @@ export default function CellInfraOverview({
         return {
           ...o,
           cells,
-          totalAgg: aggregate(cells),
+          totalAgg: aggregate(cells, deriveUnit(o.facility)),
           unit: deriveUnit(o.facility),
           address: deriveAddress(o.facility),
           operators: operatorsByFacility.get(o.key) || [],

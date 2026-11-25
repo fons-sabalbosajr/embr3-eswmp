@@ -133,6 +133,13 @@ function sanitizeBaselineEntryExtras(entries, { closed = false, actor = "" } = {
       if (mov === undefined) delete next.movAttachments;
       else next.movAttachments = mov;
     }
+    // The operator's own name for the cell: plain text, bounded, and dropped
+    // when it only repeats the admin's name.
+    if ("cellLabel" in next) {
+      const label = String(next.cellLabel ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (!label || label.toLowerCase() === String(next.cellName || "").trim().toLowerCase()) delete next.cellLabel;
+      else next.cellLabel = label;
+    }
     return next;
   });
 }

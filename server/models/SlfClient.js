@@ -131,6 +131,16 @@ const slfClientSchema = new mongoose.Schema(
 
     notes: { type: String, trim: true, default: "" },
 
+    // EMB Region III verified this client's details (or corrected them). Written
+    // by an admin edit / Verify in SLF Clients; `values` are the exact roster
+    // values verified (utils/clientCorrection.js#verifiedValues). The portal shows
+    // "Verified by EMB" only while its baseline copy still equals these values.
+    embVerification: {
+      verifiedAt: { type: Date, default: null },
+      verifiedBy: { type: String, trim: true, default: "" },
+      values: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    },
+
     // Marks demo/test records created via Dummy Data tooling so they can be filtered
     // out of real reporting — mirrors the other SLF models.
     isDummy: { type: Boolean, default: false, index: true },

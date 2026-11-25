@@ -6,9 +6,12 @@ import {
   ContainerOutlined,
   DatabaseOutlined,
   DownOutlined,
+  EditOutlined,
+  ExclamationCircleOutlined,
   EyeOutlined,
   FileTextOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
   PieChartOutlined,
   RobotOutlined,
   SaveOutlined,
@@ -16,13 +19,14 @@ import {
   TeamOutlined,
 } from "@ant-design/icons";
 import {
-  normalizeUnit,
   normalizeCellStatus,
   isActiveCellStatus,
   isCompletedCellStatus,
   isUnavailableCellStatus,
 } from "./helpers";
-import { convertVolume } from "../../utils/volumeUnits";
+import { convertVolume, resolveFacilityUnit } from "../../utils/volumeUnits";
+import { cellCapacityRow, cellPercent } from "../../utils/cellCapacity";
+import { isHazardousCellType } from "../../utils/cellVisuals";
 
 const { Text } = Typography;
 
@@ -41,6 +45,50 @@ function currentPermitLabel(list, legacyNo, legacyValidity) {
       : "";
   const more = rows.length > 1 ? ` +${rows.length - 1} more` : "";
   return `${permitNo}${suffix}${more}`;
+}
+
+// Autosave state, shown on the facility card's dark header beside Save as Draft.
+// Nothing shows until the entry has something in it ("idle").
+function AutosaveIndicator({ status, savedAt, isMobile }) {
+  if (!status || status === "idle") return null;
+  const time = savedAt
+    ? savedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    : "";
+  const view = {
+    pending: { icon: <EditOutlined />, text: isMobile ? "Unsaved" : "Unsaved changes", tip: "Your changes will be saved to Drafts in a few seconds." },
+    saving: { icon: <LoadingOutlined />, text: isMobile ? "Saving…" : "Saving draft…", tip: "Saving your entry to Drafts & Scheduled." },
+    saved: {
+      icon: <CheckCircleOutlined />,
+      text: isMobile ? `Saved ${time}` : `Draft saved · ${time}`,
+      tip: "Changes are saved automatically to Drafts & Scheduled. Open the draft there any time to finish and submit it.",
+    },
+    error: {
+      icon: <ExclamationCircleOutlined />,
+      text: isMobile ? "Not saved" : "Autosave failed",
+      tip: "Your latest changes could not be saved automatically. Check your connection, or use Save as Draft. Autosave will try again.",
+    },
+  }[status];
+  if (!view) return null;
+  return (
+    <Tooltip title={view.tip}>
+      <span
+        role="status"
+        aria-live="polite"
+        className={`slf-autosave-indicator slf-autosave-${status}`}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: status === "error" ? "#ffd8bf" : "rgba(255,255,255,0.85)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {view.icon}
+        {view.text}
+      </span>
+    </Tooltip>
+  );
 }
 
 // ── Assigned SLF capacity dashboard ──
@@ -68,6 +116,10 @@ export default function AssignedSlfDashboard({
   handleReviewOpen,
   handleSaveDraft,
   savingDraft = false,
+  // Draft autosave (useDraftAutosave): "idle" | "pending" | "saving" | "saved" |
+  // "error", and when the last autosave landed.
+  autosaveStatus = "idle",
+  autosavedAt = null,
   handleOpenWasteReceived,
   // The stale reverted entry that is blocking NEW submissions ({ _id, idNo }),
   // and the handler that opens it in Edit & Resubmit. Lets the blocker list
@@ -80,6 +132,9 @@ export default function AssignedSlfDashboard({
   // handler that leaves it for a fresh entry.
   editingDraftLabel = null,
   onStopEditingDraft,
+  // { days, from, to, outOfWindow } when the transport entries span several
+  // disposal dates — a backlog, submitted as one submission per date.
+  backlogSummary = null,
 }) {
   // #5: Review & Submit is disabled until every submission requirement is met.
   const submitDisabled = submitBlockers.length > 0;
@@ -155,6 +210,7 @@ export default function AssignedSlfDashboard({
               }
               extra={
                 <Space size={8} wrap>
+                <AutosaveIndicator status={autosaveStatus} savedAt={autosavedAt} isMobile={isMobile} />
                 {/* Save as Draft sits beside Review & Submit and is deliberately
                     NOT tied to `submitDisabled`: a draft exists precisely to hold
                     incomplete work, so it stays available while the submission
@@ -280,18 +336,13 @@ export default function AssignedSlfDashboard({
                 </div>
               ) : slfInfo ? (
                 (() => {
-                  const dashboardUnit = normalizeUnit(
-                    slfInfo.volumeCapacityUnit ||
-                      slfInfo.cellCapacityUnits?.find(Boolean) ||
-                      slfInfo.cellFillUnits?.find(Boolean) ||
-                      baselineUnit ||
-                      "m³",
-                  );
+                  // The facility's declared unit by the one rule every admin and
+                  // portal screen uses (it used to default to m³ here, tons
+                  // everywhere else).
+                  const dashboardUnit = resolveFacilityUnit(slfInfo);
                   const cellCaps = slfInfo.cellCapacities || [];
                   const cellStatuses = slfInfo.cellStatuses || [];
                   const cellFillValues = slfInfo.cellFillValues || [];
-                  const cellFillUnits = slfInfo.cellFillUnits || [];
-                  const cellCapacityUnits = slfInfo.cellCapacityUnits || [];
                   const cells = Math.max(
                     Number(slfInfo.numberOfCell || 0),
                     cellCaps.length,
@@ -303,31 +354,10 @@ export default function AssignedSlfDashboard({
                     { length: cells },
                     (_, index) => {
                       const status = normalizeCellStatus(cellStatuses[index]);
-                      const capacityUnit = normalizeUnit(
-                        cellCapacityUnits[index] ||
-                          slfInfo.volumeCapacityUnit ||
-                          dashboardUnit,
-                      );
-                      const fillUnit = normalizeUnit(
-                        cellFillUnits[index] ||
-                          slfInfo.wasteReceivedUnit ||
-                          capacityUnit,
-                      );
-                      const capacity = Number(cellCaps[index] || 0);
-                      const used = convertVolume(
-                        cellFillValues[index] || 0,
-                        fillUnit,
-                        capacityUnit,
-                      );
-                      const pct =
-                        capacity > 0
-                          ? Math.min(
-                              Math.round(
-                                (Math.min(used, capacity) / capacity) * 100,
-                              ),
-                              100,
-                            )
-                          : 0;
+                      // THE cell rule (utils/cellCapacity.js): the same capacity,
+                      // Waste in Cell, % and remaining the admin side shows.
+                      const cellRow = cellCapacityRow(slfInfo, index);
+                      const { capacity, capacityUnit, fillUnit, used } = cellRow;
                       return {
                         index,
                         status,
@@ -336,9 +366,8 @@ export default function AssignedSlfDashboard({
                         capacityUnit,
                         fillUnit,
                         used,
-                        pct,
-                        remaining:
-                          capacity > 0 ? Math.max(0, capacity - used) : 0,
+                        pct: cellRow.pct ?? 0,
+                        remaining: cellRow.remaining ?? 0,
                         isActive: isActiveCellStatus(status),
                         isCompleted: isCompletedCellStatus(status),
                         isUnavailable: isUnavailableCellStatus(status),
@@ -377,15 +406,7 @@ export default function AssignedSlfDashboard({
                       slfInfo.wasteReceivedUnit || dashboardUnit,
                       dashboardUnit,
                     );
-                  const pct =
-                    capacity > 0
-                      ? Math.min(
-                          Math.round(
-                            (Math.min(waste, capacity) / capacity) * 100,
-                          ),
-                          100,
-                        )
-                      : 0;
+                  const pct = cellPercent(waste, capacity) ?? 0;
                   const operationalCells = adminCellRows.filter(
                     (row) => row.isActive,
                   ).length;
@@ -912,7 +933,9 @@ export default function AssignedSlfDashboard({
                                   const isClosed = row.isCompleted;
                                   const isInactive =
                                     row.isCompleted || row.isUnavailable;
-                                  const isHaz = cellT === "Treated Haz Waste";
+                                  // Any hazardous cell type (current or legacy
+                                  // spelling) is drawn in the hazardous red.
+                                  const isHaz = isHazardousCellType(cellT);
                                   const cellFillUnit = row.capacityUnit;
                                   const cellFill = row.used;
                                   const cellPct = row.pct;
@@ -1436,8 +1459,8 @@ export default function AssignedSlfDashboard({
           style={{ marginTop: 12 }}
           message={
             <Text style={{ fontSize: 12.5 }}>
-              You are editing your draft for <Text strong>{editingDraftLabel}</Text>.{" "}
-              <Text strong>Save as Draft</Text> updates it; <Text strong>Review &amp; Submit</Text>{" "}
+              You are editing your draft for <Text strong>{editingDraftLabel}</Text>. Changes are
+              saved to it automatically; <Text strong>Review &amp; Submit</Text>{" "}
               submits it and removes it from Drafts &amp; Scheduled.
             </Text>
           }
@@ -1447,6 +1470,23 @@ export default function AssignedSlfDashboard({
                 Start a new entry
               </Button>
             ) : null
+          }
+        />
+      )}
+      {backlogSummary && (
+        <Alert
+          type={backlogSummary.outOfWindow.length ? "warning" : "info"}
+          showIcon
+          style={{ marginTop: 12 }}
+          message={
+            <Text style={{ fontSize: 12.5 }}>
+              <Text strong>Backlog: {backlogSummary.days.length} disposal dates</Text> (
+              {new Date(`${backlogSummary.from}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} –{" "}
+              {new Date(`${backlogSummary.to}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+              ). Each date is submitted as its own submission with its own ID No.
+              {backlogSummary.outOfWindow.length > 0 &&
+                ` ${backlogSummary.outOfWindow.length} date(s) are outside the accepted window (up to one month back, no future dates).`}
+            </Text>
           }
         />
       )}

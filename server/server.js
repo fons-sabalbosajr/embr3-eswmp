@@ -455,6 +455,8 @@ app.use("/api/messages", messageRoutes);
 app.use("/api/dummy-data", require("./routes/dummyData"));
 app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
+// My Documents: every file a portal user submitted, and a .zip of the chosen ones.
+app.use("/api/portal-documents", portalReadLimiter, require("./routes/portalDocuments"));
 app.use("/api/portal-messages", require("./routes/portalMessages"));
 app.use("/api/dev-portal", require("./routes/devPortal"));
 // Planning Unit Access (view-only portal entry). The password and PIN steps share

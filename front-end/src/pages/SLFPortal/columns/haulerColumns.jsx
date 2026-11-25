@@ -1,5 +1,6 @@
 import { DeleteOutlined, EditOutlined, TeamOutlined } from "@ant-design/icons";
 import { Button, Space, Tag, Tooltip } from "antd";
+import EmbVerifiedMark from "../EmbVerifiedMark";
 
 // Everything decidable about the filters lives in haulerFilters.js so it can be
 // tested — this file holds JSX and is unreachable from the `node --test` suite.
@@ -162,6 +163,7 @@ export function makeHaulerColumns({
             return (
               <div key={i} style={{ fontSize: 12, lineHeight: "18px" }}>
                 {name}
+                <EmbVerifiedMark client={c} compact />
               </div>
             );
           });

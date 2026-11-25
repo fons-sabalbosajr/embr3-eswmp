@@ -26,7 +26,8 @@ import {
 } from "recharts";
 import dayjs from "dayjs";
 import api from "../../api";
-import { tonsFromMetricPair, convertVolume } from "../../utils/volumeUnits";
+import { tonsFromMetricPair } from "../../utils/volumeUnits";
+import { cellCapacityRow, cellPercent } from "../../utils/cellCapacity";
 import { facilityTally, fromOccupancyCell } from "./slf-monitoring/cellTally";
 // The ONE place that decides which announcement is current — the same resolver
 // the announcements admin screen uses, so the report cannot call a different one
@@ -392,9 +393,9 @@ export default function SlfSubmissionReport({
     if (occCell) return Number(occCell.capacity) > 0 && Number(occCell.used) >= Number(occCell.capacity);
     const cap = Number(fac?.cellCapacities?.[i] || 0);
     if (cap <= 0) return false;
-    const capUnit = fac?.cellCapacityUnits?.[i] || fac?.volumeCapacityUnit || "tons";
-    const fill = convertVolume(Number(fac?.cellFillValues?.[i] || 0), fac?.cellFillUnits?.[i] || fac?.wasteReceivedUnit || capUnit, capUnit);
-    return Number.isFinite(Number(fill)) && Number(fill) >= cap;
+    // THE cell rule (utils/cellCapacity.js) for units and the fill conversion.
+    const row = cellCapacityRow(fac, i);
+    return row.capacity > 0 && row.used >= row.capacity;
   };
 
   // ONE announcement, selected once and read by both the on-screen report and the
@@ -704,7 +705,9 @@ export default function SlfSubmissionReport({
             inCells: t.inCells,
             unplaced: t.unplaced,
             capacity,
-            pct: capacity > 0 ? Math.min(100, (t.inCells / capacity) * 100) : null,
+            // THE cell % (utils/cellCapacity.js) — the same whole number shown on
+            // the cell gauges and in the portal.
+            pct: cellPercent(t.inCells, capacity),
             declaredCells: t.declaredCells,
             submissions: Number(occ.submissionCount || 0),
           };
@@ -933,7 +936,7 @@ export default function SlfSubmissionReport({
           tr([
             r.declaredCells ? `${r.slf} *` : r.slf, r.unit, fmtVol(r.baseline), fmtVol(r.submitted),
             fmtVol(r.inCells), r.unplaced > 0 ? fmtVol(r.unplaced) : "—",
-            r.capacity > 0 ? fmtVol(r.capacity) : "—", r.pct != null ? `${r.pct.toFixed(1)}%` : "—",
+            r.capacity > 0 ? fmtVol(r.capacity) : "—", r.pct != null ? `${r.pct}%` : "—",
           ]),
         ),
       );
@@ -1424,7 +1427,7 @@ export default function SlfSubmissionReport({
                   { title: th(<CloudUploadOutlined />, "Portal Submissions"), dataIndex: "submitted", align: "right", width: "15%", render: (v, r) => <Text strong style={{ color: "#2f54eb", fontSize: "inherit" }}>+{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> },
                   { title: th(<DatabaseOutlined />, "Waste in Cells"), dataIndex: "inCells", align: "right", width: "15%", render: (v, r) => <Text strong style={{ fontSize: "inherit" }}>{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> },
                   { title: th(<ClockCircleOutlined />, "Awaiting Placement"), dataIndex: "unplaced", align: "right", width: "16%", render: (v, r) => (v > 0 ? <Text style={{ color: "#d46b08", fontSize: "inherit" }}>{Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} {r.unit}</Text> : "—") },
-                  { title: th(<PieChartOutlined />, "% Used"), dataIndex: "pct", align: "center", width: "13%", render: (v) => (v == null ? "—" : <Tag color={v >= 90 ? "red" : v >= 70 ? "orange" : "green"}>{v.toFixed(1)}%</Tag>) },
+                  { title: th(<PieChartOutlined />, "% Used"), dataIndex: "pct", align: "center", width: "13%", render: (v) => (v == null ? "—" : <Tag color={v >= 90 ? "red" : v >= 70 ? "orange" : "green"}>{v}%</Tag>) },
                 ]}
               />
               <Text type="secondary" style={{ fontSize: 10, display: "block", marginTop: 4 }}>

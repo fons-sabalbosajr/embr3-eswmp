@@ -4,6 +4,13 @@ import { Badge, Button, Checkbox, Col, Collapse, DatePicker, Form, Pagination, R
 
 const { Text } = Typography;
 
+// Last millisecond of today, in the operator's own calendar.
+const endOfToday = () => {
+  const d = new Date();
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+};
+
 // "Waste Generator Information" pane of the Data Entry tabs: the disposal form,
 // the truck/transport table with its paging and selection, and bulk cell
 // assignment.
@@ -62,11 +69,23 @@ export default function WasteGeneratorPane({
               required: isRequired("dateOfDisposal", true),
               message: "Required",
             },
+            // A disposal cannot have happened yet — catches a date typed in
+            // as well as one picked (the calendar already greys them out).
+            {
+              validator: (_, value) =>
+                value && value.valueOf() > endOfToday()
+                  ? Promise.reject(new Error("The Date of Disposal cannot be in the future."))
+                  : Promise.resolve(),
+            },
           ]}
         >
           <DatePicker
             format="MM/DD/YYYY"
             style={{ width: "100%" }}
+            // Future dates are disabled so a slip of the mouse cannot record a
+            // disposal that has not happened.
+            disabledDate={(day) => Boolean(day) && day.valueOf() > endOfToday()}
+            showToday
           />
         </Form.Item>
       </Col>

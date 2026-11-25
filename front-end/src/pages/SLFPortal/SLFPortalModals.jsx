@@ -14,7 +14,7 @@ import {
 const { Option } = Select;
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
+  CloseCircleOutlined, CloseOutlined, ContainerOutlined, CustomerServiceOutlined, DatabaseOutlined, DeleteOutlined,
   DownloadOutlined, EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
   PlusOutlined, ProfileOutlined, SaveOutlined, SendOutlined,
@@ -35,10 +35,16 @@ import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { convertVolume } from "../../utils/volumeUnits";
+import EnteredVolumeField from "./EnteredVolumeField";
+import EmbVerifiedMark from "./EmbVerifiedMark";
+import CellLabelField from "./CellLabelField";
+import WeighedVolumeNote from "../../components/WeighedVolumeNote";
+import { submissionCellUsage } from "./submissionCellUsage";
+import { describeConversion } from "./enteredVolume";
 // The app's ONE waste-category colour system — the same map the cell gauges and
 // the admin tables read, so a load is the same colour wherever it is shown.
-import { getCellTypeConfig } from "../../utils/cellVisuals";
-import { WASTE_CATEGORY_ENUM } from "../../utils/wasteCategories";
+import { getCellStatusConfig, getCellTypeConfig } from "../../utils/cellVisuals";
+import { WASTE_CATEGORY_ENUM, wasteTypeTagColor } from "../../utils/wasteCategories";
 import {
   buildSubmissionWasteEntries,
   formatWasteEntryTotals,
@@ -248,6 +254,9 @@ const getSupportPriorityColor = (priority) =>
 export default function SLFPortalModals({
   // Form instances
   entryForm, baselineForm, companyForm, supportForm,
+  // Backlog: { days: [{ day, trucks, volume }], from, to } when the transport
+  // entries span several disposal dates (one submission per date); else null.
+  backlogSummary = null,
   // State
   haulerModalOpen, setHaulerModalOpen,
   haulerDraft, setHaulerDraft,
@@ -307,6 +316,7 @@ export default function SLFPortalModals({
   // Resolving a client mismatch: the first points the FILE at the stored spelling,
   // the second changes the client ON THE HAULER (a baseline draft edit).
   onUseStoredClient = () => {},
+  onUseStoredHauler = () => {},
   onApplyClientFixToHauler = () => {},
   uploadMissingColumns,
   setUploadPreviewData,
@@ -554,7 +564,6 @@ export default function SLFPortalModals({
         .map((hauler) => [hauler.haulerName.trim().toLowerCase(), hauler]),
     ).values(),
   );
-  const messageUnreadCount = portalNotificationCounts.messages || 0;
   const supportUnreadCount = portalNotificationCounts.support || 0;
   const supportTicketColumns = [
     {
@@ -1142,7 +1151,12 @@ export default function SLFPortalModals({
                         title: "Client Name",
                         dataIndex: "clientName",
                         key: "clientName",
-                        render: (v) => v || "—",
+                        render: (v, row) => (
+                          <span>
+                            {v || "—"}
+                            <EmbVerifiedMark client={row} />
+                          </span>
+                        ),
                       },
                       {
                         title: "Type",
@@ -1758,7 +1772,10 @@ export default function SLFPortalModals({
                           truckErrors?.vehicles?.[vi]?.actualVolume ? "error" : ""
                         }
                         value={veh.actualVolume}
-                        onChange={(val) => patchVehicle({ actualVolume: val })}
+                        // Typing the volume directly replaces any conversion.
+                        onChange={(val) =>
+                          patchVehicle({ actualVolume: val, enteredVolume: undefined, enteredVolumeUnit: undefined })
+                        }
                       />
                     </Form.Item>
                   </Col>
@@ -1774,6 +1791,15 @@ export default function SLFPortalModals({
                         <Option value="m³">m³</Option>
                       </Select>
                     </Form.Item>
+                  </Col>
+                  {/* Tons → m³ (or m³ → tons): the weight as weighed, converted
+                      into the declared unit, with the original kept. */}
+                  <Col xs={24} style={{ marginBottom: 6 }}>
+                    <EnteredVolumeField
+                      vehicle={veh}
+                      slfUnit={baselineUnit || "m³"}
+                      onPatch={patchVehicle}
+                    />
                   </Col>
                   <Col xs={24}>
                     <Form.Item
@@ -1876,7 +1902,7 @@ export default function SLFPortalModals({
                       )}
                       {veh.cellType && (
                         <Tag
-                          color={vehIsHaz ? "volcano" : "geekblue"}
+                          color={vehIsHaz ? "red" : "geekblue"}
                           style={{ marginTop: 6, fontSize: 11 }}
                         >
                           {veh.cellType} Cell
@@ -2240,18 +2266,13 @@ export default function SLFPortalModals({
         footer={null}
         width={1100}
         destroyOnHidden
+        className="slf-detail-modal"
         styles={{ body: { padding: 0 } }}
+        // A white ✕ on the dark header banner, inside its own dark disc so it stays
+        // readable over antd's light hover background (which made it vanish).
         closeIcon={
-          <span
-            style={{
-              color: "#fff",
-              fontSize: 18,
-              fontWeight: 700,
-              position: "relative",
-              zIndex: 1,
-            }}
-          >
-            ✕
+          <span className="slf-detail-modal-close" aria-label="Close">
+            <CloseOutlined />
           </span>
         }
       >
@@ -2271,51 +2292,6 @@ export default function SLFPortalModals({
             const totalVolumeSummary = formatWasteEntryTotals(
               wasteEntries,
               d.totalVolumeAcceptedUnit || baselineUnit,
-            );
-            const sectionTitle = (icon, text) => (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  marginBottom: 16,
-                }}
-              >
-                <span style={{ fontSize: 15, color: "#1a3353" }}>{icon}</span>
-                <Text
-                  strong
-                  style={{ fontSize: 14, color: "#1a3353", letterSpacing: 0.3 }}
-                >
-                  {text}
-                </Text>
-              </div>
-            );
-            const fieldRow = (label, value, opts = {}) => (
-              <Col
-                xs={opts.span === 2 ? 24 : 12}
-                sm={opts.span === 2 ? 24 : 12}
-                key={label}
-              >
-                <div style={{ marginBottom: 14 }}>
-                  <Text
-                    type="secondary"
-                    style={{
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      display: "block",
-                      marginBottom: 2,
-                    }}
-                  >
-                    {label}
-                  </Text>
-                  <div
-                    style={{ fontSize: 13, fontWeight: 600, color: "#262626" }}
-                  >
-                    {value || "—"}
-                  </div>
-                </div>
-              </Col>
             );
             return (
               <div>
@@ -2524,322 +2500,117 @@ export default function SLFPortalModals({
                     style={{ background: "transparent" }}
                     items={[
                       {
-                        key: "company",
-                        label: (
-                          <Text strong style={{ fontSize: 13 }}>
-                            <EnvironmentOutlined
-                              style={{ color: "#1a3353", marginRight: 6 }}
-                            />
-                            Company & Disposal Information
-                          </Text>
-                        ),
-                        children: (
-                          <Row gutter={16}>
-                            {fieldRow("Company / LGU Name", d.lguCompanyName)}
-                            {fieldRow(
-                              "Company Type",
-                              <Tag
-                                color={
-                                  d.companyType === "LGU" ? "blue" : "green"
-                                }
-                                variant="filled"
-                              >
-                                {d.companyType}
-                              </Tag>,
-                            )}
-                            {fieldRow("Address", d.address, { span: 2 })}
-                            {fieldRow(
-                              "Date of Disposal",
-                              d.dateOfDisposal
-                                ? dayjs(d.dateOfDisposal).format("MMMM D, YYYY")
-                                : null,
-                            )}
-                            {fieldRow(
-                              "Submission ID",
-                              <Text
-                                copyable
-                                style={{
-                                  fontSize: 12,
-                                  fontFamily: "monospace",
-                                }}
-                              >
-                                {d.submissionId || "—"}
-                              </Text>,
-                            )}
-                          </Row>
-                        ),
-                      },
-                      {
-                        key: "baseline",
-                        label: (
-                          <Text strong style={{ fontSize: 13 }}>
-                            <DatabaseOutlined
-                              style={{ color: "#1a3353", marginRight: 6 }}
-                            />
-                            Baseline Data
-                          </Text>
-                        ),
-                        children: (
-                          <Row gutter={16}>
-                            {fieldRow(
-                              "Total Volume Accepted",
-                              d.totalVolumeAccepted != null
-                                ? `${d.totalVolumeAccepted.toLocaleString()} ${(d.totalVolumeAcceptedUnit || baselineUnit).replace("m3", "m³")}`
-                                : null,
-                            )}
-                            {fieldRow(
-                              "Active Cell — Residual",
-                              d.activeCellResidualVolume != null
-                                ? `${d.activeCellResidualVolume.toLocaleString()} ${(d.activeCellResidualUnit || baselineUnit).replace("m3", "m³")}`
-                                : null,
-                            )}
-                            {fieldRow(
-                              "Active Cell — Inert",
-                              d.activeCellInertVolume != null
-                                ? `${d.activeCellInertVolume.toLocaleString()} ${(d.activeCellInertUnit || baselineUnit).replace("m3", "m³")}`
-                                : null,
-                            )}
-                            {d.acceptsHazardousWaste &&
-                              fieldRow(
-                                "Active Cell — Hazardous",
-                                d.activeCellHazardousVolume != null
-                                  ? `${d.activeCellHazardousVolume.toLocaleString()} ${(d.activeCellHazardousUnit || baselineUnit).replace("m3", "m³")}`
-                                  : null,
-                              )}
-                            {fieldRow(
-                              "Closed Cell — Residual",
-                              d.closedCellResidualVolume != null
-                                ? `${d.closedCellResidualVolume.toLocaleString()} ${(d.closedCellResidualUnit || baselineUnit).replace("m3", "m³")}`
-                                : null,
-                            )}
-                            {fieldRow(
-                              "Closed Cell — Inert",
-                              d.closedCellInertVolume != null
-                                ? `${d.closedCellInertVolume.toLocaleString()} ${(d.closedCellInertUnit || baselineUnit).replace("m3", "m³")}`
-                                : null,
-                            )}
-                            {d.acceptsHazardousWaste &&
-                              fieldRow(
-                                "Closed Cell — Hazardous",
-                                d.closedCellHazardousVolume != null
-                                  ? `${d.closedCellHazardousVolume.toLocaleString()} ${(d.closedCellHazardousUnit || baselineUnit).replace("m3", "m³")}`
-                                  : null,
-                              )}
-                          </Row>
-                        ),
-                      },
-                      {
+                        // The cells THIS submission's waste went into, each with
+                        // its own capacity gauge from the facility record. The old
+                        // section showed one facility-wide figure read from a field
+                        // the submission record does not carry (always 0%), plus
+                        // Company and Baseline sections that described the SLF
+                        // rather than the submission — removed.
                         key: "operations",
                         label: (
                           <Text strong style={{ fontSize: 13 }}>
                             <PieChartOutlined
                               style={{ color: "#13c2c2", marginRight: 6 }}
                             />
-                            Cell Capacity
+                            Cell Capacity — cells used by this submission
                           </Text>
                         ),
                         children: (() => {
-                          const fac = d.slfGenerator || {};
-                          const facilityCapacity = fac.volumeCapacity || 0;
-                          const baselineVol = d.totalVolumeAccepted || 0;
-                          const truckVol = (d.trucks || []).reduce(
-                            (s, t) => s + (t.actualVolume || 0),
-                            0,
+                          // The loaded facility record is the SELECTED SLF. A user
+                          // assigned to several must not see another SLF's cells.
+                          const subFacilityId = String(d.slfGenerator?._id || d.slfGenerator || "");
+                          const otherFacility =
+                            slfInfo?._id && subFacilityId && subFacilityId !== String(slfInfo._id);
+                          if (otherFacility) {
+                            return (
+                              <Text type="secondary">
+                                This submission is for {d.slfName || "another SLF"}. Select that SLF to see its cell capacity.
+                              </Text>
+                            );
+                          }
+                          const { cells, unplaced } = submissionCellUsage(
+                            wasteEntries,
+                            slfInfo,
+                            baselineUnit,
                           );
-                          const filledVol = baselineVol + truckVol;
-                          const pct =
-                            facilityCapacity > 0
-                              ? Math.min(
-                                  Math.round(
-                                    (filledVol / facilityCapacity) * 100,
-                                  ),
-                                  100,
-                                )
-                              : 0;
+                          const fmt = (n) =>
+                            Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+                          if (!cells.length && !unplaced.entries) {
+                            return <Text type="secondary">No waste entries in this submission.</Text>;
+                          }
                           return (
                             <div>
-                              <Row gutter={16}>
-                                {fieldRow(
-                                  "Current Cell Volume",
-                                  d.currentCellVolume != null
-                                    ? `${d.currentCellVolume.toLocaleString()} ${(d.currentCellVolumeUnit || baselineUnit).replace("m3", "m³")}`
-                                    : null,
-                                )}
-                                {fieldRow(
-                                  "Cell Status",
-                                  <Tag
-                                    color={
-                                      d.cellStatus === "Closed"
-                                        ? "red"
-                                        : "green"
-                                    }
-                                    variant="filled"
-                                  >
-                                    {d.cellStatus || "Active"}
-                                  </Tag>,
-                                )}
-                                {fieldRow(
-                                  "Number of Cells",
-                                  fac.numberOfCell || "—",
-                                )}
-                                {fieldRow(
-                                  "Facility Capacity",
-                                  facilityCapacity > 0
-                                    ? `${facilityCapacity.toLocaleString()} m³`
-                                    : "—",
-                                )}
+                              {!slfInfo && (
+                                <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+                                  Facility cell data is still loading.
+                                </Text>
+                              )}
+                              <Row gutter={[12, 12]}>
+                                {cells.map((cell) => {
+                                  const color = cell.pct >= 90 ? "#ff4d4f" : cell.pct >= 70 ? "#faad14" : "#52c41a";
+                                  const status = getCellStatusConfig(cell.status);
+                                  const type = getCellTypeConfig(cell.type);
+                                  return (
+                                    <Col xs={24} sm={12} md={8} key={cell.index}>
+                                      <div
+                                        style={{
+                                          border: "1px solid #f0f0f0",
+                                          borderRadius: 8,
+                                          padding: "10px 12px",
+                                          display: "flex",
+                                          gap: 12,
+                                          alignItems: "center",
+                                          height: "100%",
+                                        }}
+                                      >
+                                        <Progress
+                                          type="dashboard"
+                                          percent={cell.pct}
+                                          size={84}
+                                          strokeColor={color}
+                                          format={() => (
+                                            <div style={{ lineHeight: 1.2 }}>
+                                              <div style={{ fontSize: 15, fontWeight: 700, color }}>{cell.pct}%</div>
+                                              <div style={{ fontSize: 9.5, color: "#8c8c8c" }}>filled</div>
+                                            </div>
+                                          )}
+                                        />
+                                        <div style={{ minWidth: 0, flex: 1 }}>
+                                          <Text strong style={{ fontSize: 13, display: "block", wordBreak: "break-word" }}>
+                                            {cell.name}
+                                          </Text>
+                                          <Space size={4} wrap style={{ margin: "2px 0 4px" }}>
+                                            <Tag color={status.tag} style={{ marginInlineEnd: 0, fontSize: 10.5 }}>{status.label}</Tag>
+                                            <Tag color={type.tag} style={{ marginInlineEnd: 0, fontSize: 10.5 }}>{type.label}</Tag>
+                                          </Space>
+                                          <div style={{ fontSize: 11.5, color: "#595959", lineHeight: 1.5 }}>
+                                            <div>
+                                              This submission: <Text strong style={{ fontSize: 11.5 }}>{fmt(cell.submissionVolume)} {cell.capacityUnit}</Text>
+                                              {" "}({cell.entries} entr{cell.entries === 1 ? "y" : "ies"})
+                                            </div>
+                                            <div>
+                                              {cell.capacity > 0
+                                                ? `${fmt(cell.used)} of ${fmt(cell.capacity)} ${cell.capacityUnit} used · ${fmt(cell.remaining)} left`
+                                                : "No capacity set by EMB for this cell"}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </Col>
+                                  );
+                                })}
                               </Row>
-                              <Divider style={{ margin: "4px 0 16px" }} />
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 24,
-                                }}
-                              >
-                                <Progress
-                                  type="dashboard"
-                                  percent={pct}
-                                  size={110}
-                                  strokeColor={
-                                    pct >= 90
-                                      ? "#ff4d4f"
-                                      : pct >= 70
-                                        ? "#faad14"
-                                        : "#52c41a"
-                                  }
-                                  format={() => (
-                                    <div
-                                      style={{
-                                        textAlign: "center",
-                                        lineHeight: 1.3,
-                                      }}
-                                    >
-                                      <div
-                                        style={{
-                                          fontSize: 18,
-                                          fontWeight: 700,
-                                          color:
-                                            pct >= 90
-                                              ? "#ff4d4f"
-                                              : pct >= 70
-                                                ? "#faad14"
-                                                : "#52c41a",
-                                        }}
-                                      >
-                                        {pct}%
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: 10,
-                                          color: "#8c8c8c",
-                                        }}
-                                      >
-                                        filled
-                                      </div>
-                                    </div>
-                                  )}
+                              {unplaced.entries > 0 && (
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  style={{ marginTop: 12 }}
+                                  message={`${unplaced.entries} waste entr${unplaced.entries === 1 ? "y is" : "ies are"} not placed in a cell (${unplaced.volumes.join(", ")}).`}
                                 />
-                                <div style={{ flex: 1 }}>
-                                  <Text
-                                    strong
-                                    style={{
-                                      fontSize: 13,
-                                      display: "block",
-                                      marginBottom: 8,
-                                    }}
-                                  >
-                                    Cell Capacity Usage
-                                  </Text>
-                                  <Row gutter={8}>
-                                    <Col xs={12}>
-                                      <Text
-                                        type="secondary"
-                                        style={{ fontSize: 11 }}
-                                      >
-                                        Baseline Volume
-                                      </Text>
-                                      <div>
-                                        <Text style={{ fontSize: 13 }}>
-                                          {baselineVol > 0
-                                            ? `${baselineVol.toLocaleString()} ${(d.totalVolumeAcceptedUnit || baselineUnit).replace("m3", "m³")}`
-                                            : "0"}
-                                        </Text>
-                                      </div>
-                                    </Col>
-                                    <Col xs={12}>
-                                      <Text
-                                        type="secondary"
-                                        style={{ fontSize: 11 }}
-                                      >
-                                        Transport & Disposal
-                                      </Text>
-                                      <div>
-                                        <Text style={{ fontSize: 13 }}>
-                                          {truckVol > 0
-                                            ? `${truckVol.toLocaleString()} tons`
-                                            : "0"}
-                                        </Text>
-                                      </div>
-                                    </Col>
-                                    <Col xs={12}>
-                                      <Text
-                                        type="secondary"
-                                        style={{
-                                          fontSize: 11,
-                                          marginTop: 8,
-                                          display: "block",
-                                        }}
-                                      >
-                                        Total Filled
-                                      </Text>
-                                      <div>
-                                        <Text
-                                          strong
-                                          style={{
-                                            fontSize: 14,
-                                            color: "#1a3353",
-                                          }}
-                                        >
-                                          {filledVol > 0
-                                            ? filledVol.toLocaleString()
-                                            : "0"}
-                                        </Text>
-                                      </div>
-                                    </Col>
-                                    <Col xs={12}>
-                                      <Text
-                                        type="secondary"
-                                        style={{
-                                          fontSize: 11,
-                                          marginTop: 8,
-                                          display: "block",
-                                        }}
-                                      >
-                                        Remaining
-                                      </Text>
-                                      <div>
-                                        <Text
-                                          strong
-                                          style={{
-                                            fontSize: 14,
-                                            color:
-                                              facilityCapacity - filledVol <= 0
-                                                ? "#ff4d4f"
-                                                : "#52c41a",
-                                          }}
-                                        >
-                                          {facilityCapacity > 0
-                                            ? (
-                                                facilityCapacity - filledVol
-                                              ).toLocaleString()
-                                            : "No capacity set"}
-                                        </Text>
-                                      </div>
-                                    </Col>
-                                  </Row>
-                                </div>
-                              </div>
+                              )}
+                              <Text type="secondary" style={{ display: "block", fontSize: 11, marginTop: 8 }}>
+                                Gauges show each cell&apos;s current fill from the facility record EMB Region III maintains.
+                              </Text>
                             </div>
                           );
                         })(),
@@ -3011,7 +2782,9 @@ export default function SLFPortalModals({
                                 {
                                   title: "#",
                                   key: "idx",
-                                  width: 34,
+                                  // Percentages of the modal width (the table is
+                                  // laid out fixed at 100% — see .slf-detail-fit).
+                                  width: "4%",
                                   render: (_, __, i) => (
                                     <Text type="secondary">{i + 1}</Text>
                                   ),
@@ -3019,7 +2792,7 @@ export default function SLFPortalModals({
                                 {
                                   title: "Date",
                                   key: "date",
-                                  width: 92,
+                                  width: "10%",
                                   render: (_, e) =>
                                     e.date
                                       ? dayjs(e.date).format("MMM D, YYYY")
@@ -3029,31 +2802,33 @@ export default function SLFPortalModals({
                                   title: "Ticket No.",
                                   dataIndex: "ticketNo",
                                   key: "ticket",
+                                  width: "12%",
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Hauler",
                                   dataIndex: "hauler",
                                   key: "hauler",
+                                  width: "15%",
                                   render: (v) => <Text strong>{v || "—"}</Text>,
                                 },
                                 {
                                   title: "Plate No.",
                                   dataIndex: "plateNumber",
                                   key: "plate",
-                                  width: 90,
+                                  width: "10%",
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Waste Type",
                                   dataIndex: "wasteType",
                                   key: "waste",
-                                  width: 104,
+                                  width: "11%",
                                   render: (v) =>
                                     v ? (
                                       <Tag
                                         color={
-                                          v === "Residual" ? "blue" : "volcano"
+                                          wasteTypeTagColor(v, "blue")
                                         }
                                         variant="filled"
                                       >
@@ -3067,14 +2842,17 @@ export default function SLFPortalModals({
                                   title: "Volume",
                                   key: "vol",
                                   align: "right",
-                                  width: 78,
+                                  width: "8%",
                                   render: (_, e) =>
                                     e.volume != null ? (
-                                      <Text strong style={{ color: "#52c41a" }}>
-                                        {e.volume.toLocaleString(undefined, {
-                                          maximumFractionDigits: 2,
-                                        })}
-                                      </Text>
+                                      <div>
+                                        <Text strong style={{ color: "#52c41a" }}>
+                                          {e.volume.toLocaleString(undefined, {
+                                            maximumFractionDigits: 2,
+                                          })}
+                                        </Text>
+                                        <div><WeighedVolumeNote entry={e} /></div>
+                                      </div>
                                     ) : (
                                       "—"
                                     ),
@@ -3085,14 +2863,14 @@ export default function SLFPortalModals({
                                   title: "Unit",
                                   dataIndex: "unit",
                                   key: "unit",
-                                  width: 52,
+                                  width: "6%",
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Cell",
                                   dataIndex: "cell",
                                   key: "cell",
-                                  width: 96,
+                                  width: "11%",
                                   render: (v) =>
                                     v || (
                                       <Text type="secondary">Unplaced</Text>
@@ -3104,7 +2882,7 @@ export default function SLFPortalModals({
                                   // Bounded + tooltipped, like the admin-side copy:
                                   // an unbounded joined list of codes overflowed
                                   // the column and the modal.
-                                  width: 112,
+                                  width: "13%",
                                   render: (_, e) => {
                                     const codes = (e.hazWasteCodes || []).filter(Boolean);
                                     if (!codes.length) return <Text type="secondary">—</Text>;
@@ -3266,7 +3044,7 @@ export default function SLFPortalModals({
               key: "cellType",
               width: 120,
               render: (v) => (
-                <Tag color={/haz/i.test(v || "") ? "volcano" : "geekblue"}>{v || "Residual"}</Tag>
+                <Tag color={wasteTypeTagColor(v, "geekblue")}>{v || "Residual"}</Tag>
               ),
             },
             {
@@ -3489,10 +3267,12 @@ export default function SLFPortalModals({
                 <Row gutter={[12, 8]}>
                   {[
                     {
-                      label: "Date of Disposal",
-                      value: entryForm.getFieldValue("dateOfDisposal")
-                        ? dayjs(entryForm.getFieldValue("dateOfDisposal")).format("MM/DD/YYYY")
-                        : "—",
+                      label: backlogSummary ? "Disposal Dates (backlog)" : "Date of Disposal",
+                      value: backlogSummary
+                        ? `${dayjs(backlogSummary.from).format("MM/DD/YYYY")} – ${dayjs(backlogSummary.to).format("MM/DD/YYYY")} · ${backlogSummary.days.length} days`
+                        : entryForm.getFieldValue("dateOfDisposal")
+                          ? dayjs(entryForm.getFieldValue("dateOfDisposal")).format("MM/DD/YYYY")
+                          : "—",
                     },
                     { label: "LGU/Company Name", value: companyForm.getFieldValue("lguCompanyName") },
                     {
@@ -3508,6 +3288,40 @@ export default function SLFPortalModals({
                       <Input value={value || "—"} readOnly style={{ background: "#fafafa", cursor: "default", color: "#222" }} />
                     </Col>
                   ))}
+                  {backlogSummary && (
+                    <Col span={24}>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginTop: 4 }}
+                        message={
+                          <Text style={{ fontSize: 12.5 }}>
+                            This backlog will be submitted as <Text strong>{backlogSummary.days.length} separate submissions</Text>,
+                            one per disposal date, each with its own ID No.
+                          </Text>
+                        }
+                        description={
+                          <Table
+                            size="small"
+                            rowKey="day"
+                            pagination={backlogSummary.days.length > 8 ? { pageSize: 8, size: "small" } : false}
+                            dataSource={backlogSummary.days}
+                            columns={[
+                              { title: "Disposal Date", dataIndex: "day", render: (d) => dayjs(d).format("MMM D, YYYY") },
+                              { title: "Entries", dataIndex: "trucks", width: 90 },
+                              {
+                                title: "Volume",
+                                dataIndex: "volume",
+                                width: 140,
+                                render: (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+                              },
+                            ]}
+                            style={{ marginTop: 8 }}
+                          />
+                        }
+                      />
+                    </Col>
+                  )}
                 </Row>
               ),
             },
@@ -3697,6 +3511,12 @@ export default function SLFPortalModals({
                       t.actualVolume != null
                         ? `${t.actualVolume} ${unitOf(t.actualVolumeUnit)}`
                         : "—",
+                    // Weighed in another unit: "12.5 tons → 25 m³" per vehicle.
+                    converted: (vehs.length ? vehs : [t])
+                      .map((v) => describeConversion(v, baselineUnit))
+                      .filter(Boolean)
+                      .join("; "),
+                    disposalDate: t.disposalDate ? dayjs(t.disposalDate).format("MMM D, YYYY") : "—",
                     wasteType: t.wasteType || "—",
                     cell,
                     hazCode: Array.isArray(t.hazWasteCode)
@@ -3732,18 +3552,39 @@ export default function SLFPortalModals({
                     scroll={{ x: "max-content", y: rows.length > 8 ? 360 : undefined }}
                     columns={[
                       { title: "#", dataIndex: "no", width: 44, fixed: "left", render: (v) => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      ...(backlogSummary
+                        ? [{ title: "Disposal Date", dataIndex: "disposalDate", width: 120, render: textCell }]
+                        : []),
                       { title: "Ticket No.", dataIndex: "ticket", width: 130, render: textCell },
                       { title: "Hauler", dataIndex: "hauler", width: 160, render: textCell },
                       { title: "Plate No.", dataIndex: "plate", width: 130, render: textCell },
                       { title: "Capacity", dataIndex: "capacity", width: 120, align: "right", render: textCell },
-                      { title: "Volume", dataIndex: "volume", width: 120, align: "right", render: textCell },
+                      {
+                        title: "Will be saved as",
+                        dataIndex: "volume",
+                        width: 150,
+                        align: "right",
+                        render: (value, r) =>
+                          r.converted ? (
+                            <Tooltip title={`Converted from the weight entered: ${r.converted}. The original value is kept with the record.`}>
+                              <Space direction="vertical" size={0} style={{ alignItems: "flex-end" }}>
+                                <Text strong style={{ fontSize: 12 }}>{value}</Text>
+                                <Tag color="gold" style={{ marginInlineEnd: 0, fontSize: 10.5 }}>
+                                  from {r.converted.split("→")[0].trim()}
+                                </Tag>
+                              </Space>
+                            </Tooltip>
+                          ) : (
+                            textCell(value)
+                          ),
+                      },
                       {
                         title: "Waste Type",
                         dataIndex: "wasteType",
                         width: 150,
                         render: (value) => (
                           <Tag
-                            color={/haz/i.test(value) ? "volcano" : "green"}
+                            color={wasteTypeTagColor(value, "green")}
                             style={{ fontSize: 11, marginInlineEnd: 0 }}
                           >
                             {value}
@@ -3971,26 +3812,29 @@ export default function SLFPortalModals({
         />
       </Modal>
 
-      {/* ── Admin Messages Floating Button ──
-          Styling lives in SLFPortal.css (.slf-msg-fab) rather than inline, so the
-          breakpoints can collapse it to a circle the way the VERA launcher does.
-          Inline styles would have won over any media query. */}
+      {/* ── Support Ticket Floating Button ──
+          Replaced the Messages button: raising a ticket is the action operators
+          need one tap away. Messages from admin stay in the header (and in the
+          notification bell). Styling lives in SLFPortal.css (.slf-msg-fab) rather
+          than inline, so the breakpoints can collapse it to a circle the way the
+          VERA launcher does. Inline styles would have won over any media query. */}
       <Button
         type="primary"
         className="slf-msg-fab"
-        icon={<MessageOutlined />}
+        icon={<CustomerServiceOutlined />}
         // The label is dropped on a phone, so the accessible name has to come from
         // somewhere else or the control becomes an unlabelled icon.
-        aria-label="Messages from admin"
+        aria-label="Support tickets"
         onClick={() => {
-          setMessageDrawerOpen(true);
+          setSupportDrawerOpen(true);
+          setSupportTab("my-tickets");
           if (supportTickets.length === 0) fetchSupportTickets();
-          markPortalNotificationsRead("messages");
+          markPortalNotificationsRead("support");
         }}
       >
-        <span className="slf-msg-fab-label">Messages</span>
-        {messageUnreadCount > 0 && (
-          <Badge className="slf-msg-fab-badge" count={messageUnreadCount} size="small" />
+        <span className="slf-msg-fab-label">Support Ticket</span>
+        {supportUnreadCount > 0 && (
+          <Badge className="slf-msg-fab-badge" count={supportUnreadCount} size="small" />
         )}
       </Button>
 
@@ -4838,11 +4682,33 @@ export default function SLFPortalModals({
                         re-upload this same file:
                       </div>
                       <ul style={{ margin: 0, paddingLeft: 18, maxHeight: 150, overflowY: "auto" }}>
-                        {uploadAlignmentSummary.needsEncoding.slice(0, 10).map((item) => (
-                          <li key={item.label} style={{ marginBottom: 2 }}>
-                            <Text strong>{item.label}</Text> — {item.rows} trip(s) in this file
-                          </li>
-                        ))}
+                        {uploadAlignmentSummary.needsEncoding.slice(0, 10).map((item) => {
+                          const suggestion = item.haulerSuggestions?.[0];
+                          return (
+                            <li key={item.label} style={{ marginBottom: 4 }}>
+                              <Text strong>{item.label}</Text> — {item.rows} trip(s) in this file
+                              {/* A hauler spelled close to an accredited one: offer
+                                  it. Applied only when the operator clicks. */}
+                              {suggestion && (
+                                <div style={{ marginTop: 2 }}>
+                                  <Text type="secondary">Did you mean </Text>
+                                  <Text code>{suggestion.name}</Text>
+                                  <Text type="secondary">? </Text>
+                                  <Tooltip title={`${suggestion.reason} Rewrites the Hauler of these ${item.rows} row(s) in this file. Your baseline is not changed.`}>
+                                    <Button
+                                      size="small"
+                                      type="link"
+                                      style={{ padding: 0, height: "auto" }}
+                                      onClick={() => onUseStoredHauler(item, suggestion.name)}
+                                    >
+                                      Use this hauler
+                                    </Button>
+                                  </Tooltip>
+                                </div>
+                              )}
+                            </li>
+                          );
+                        })}
                         {uploadAlignmentSummary.needsEncoding.length > 10 && (
                           <li>
                             +{uploadAlignmentSummary.needsEncoding.length - 10} more — VERA&apos;s
@@ -5319,6 +5185,11 @@ export default function SLFPortalModals({
               notFoundContent="No cells configured in the cell infrastructure"
             />
           </Form.Item>
+          <CellLabelField
+            value={activeCellDraft.cellLabel}
+            adminName={activeCellDraft.cellName}
+            onChange={(cellLabel) => setActiveCellDraft((d) => ({ ...d, cellLabel }))}
+          />
           <Form.Item label="Waste Type" required>
             <Select
               value={activeCellDraft.wasteType}
@@ -5403,6 +5274,11 @@ export default function SLFPortalModals({
               notFoundContent="No cells configured in the cell infrastructure"
             />
           </Form.Item>
+          <CellLabelField
+            value={closedCellDraft.cellLabel}
+            adminName={closedCellDraft.cellName}
+            onChange={(cellLabel) => setClosedCellDraft((d) => ({ ...d, cellLabel }))}
+          />
           <Form.Item label="Waste Type" required>
             <Select
               value={closedCellDraft.wasteType}

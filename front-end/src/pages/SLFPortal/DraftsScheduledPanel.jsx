@@ -13,6 +13,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { exportToExcel } from "../../utils/exportExcel";
+import { wasteTypeTagColor } from "../../utils/wasteCategories";
 
 const QUEUE_CACHE_TTL = 3 * 60 * 1000;
 
@@ -213,7 +214,7 @@ function QueueRecordDetails({ record }) {
                     <Text type="secondary">{DASH}</Text>
                   ) : (
                     <Tag
-                      color={/haz/i.test(v) ? "volcano" : "green"}
+                      color={wasteTypeTagColor(v, "green")}
                       variant="filled"
                       style={{ margin: 0, display: "inline-block", maxWidth: "100%", ...WRAP_CELL }}
                     >
@@ -712,7 +713,25 @@ export default function DraftsScheduledPanel({
     { title: "Facility", dataIndex: "slfName", key: "slfName", render: renderFacilityCell },
     { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Created", dataIndex: "createdAt", key: "createdAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
-    { title: "Last Updated", dataIndex: "updatedAt", key: "updatedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
+    {
+      title: "Last Saved",
+      dataIndex: "updatedAt",
+      key: "updatedAt",
+      width: 170,
+      // `autosavedAt` is set only while the LATEST save was an autosave; a manual
+      // Save as Draft clears it.
+      render: (v, r) => (
+        <Space direction="vertical" size={0}>
+          <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text>
+          {r.autosavedAt && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 4 }} />
+              Autosaved
+            </Text>
+          )}
+        </Space>
+      ),
+    },
     { title: "Actions", key: "actions", width: 200, render: (_, r) => commonActions(r) },
   ];
 
@@ -865,7 +884,7 @@ export default function DraftsScheduledPanel({
                 `${failedDrafts} draft(s) failed to submit — open to see why, then retry.`,
               ),
               children: drafts.length === 0
-                ? emptyState("No saved drafts yet. Use \u201CSave as Draft\u201D on the review screen.")
+                ? emptyState("No saved drafts yet. Entries in Data Entry are saved here automatically as you type, or use \u201CSave as Draft\u201D.")
                 : (
                   <Table
                     dataSource={drafts}

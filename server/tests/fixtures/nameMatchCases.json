@@ -1,0 +1,21 @@
+{
+  "_note": "Shared by server/tests/nameMatch.test.js and front-end/src/pages/SLFPortal/__tests__/nameMatch.test.js so the portal's and the server's name comparison can never drift apart.",
+  "same": [
+    ["Northgate Sample Logistics, Inc", "Northgate Sample Logistics Inc."],
+    ["NORTHWIND SAMPLE HAULERS", "Northwind Sample Haulers"],
+    ["Brgy.  Poblacion,Villa Muestra", "Brgy. Poblacion, Villa Muestra"],
+    ["Brgy.Poblacion", "Brgy Poblacion"],
+    ["Kitang-I", "Kitang, I"],
+    ["J.P. Rizal St.", "JP Rizal St"],
+    ["  Villa   Muestra  ", "villa muestra"],
+    ["Zambales - Iba", "Zambales Iba"]
+  ],
+  "different": [
+    ["Northwest Sample Haulers", "Northwind Sample Haulers"],
+    ["Villa Muesta", "Villa Muestra"],
+    ["Copperleaf Transport", "Copperleaf Demo Transport"],
+    ["Barangay 1", "Barangay 2"],
+    ["Phase 1.2", "Phase 12"],
+    ["Poblacion Villa", "Villa Poblacion"]
+  ]
+}

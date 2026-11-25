@@ -20,6 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { portalSource } from "./portalSource.js";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
@@ -139,7 +140,7 @@ test("the new entries stay in portal scope", () => {
 });
 
 // ── The wiring, read off the portal ─────────────────────────────────────────
-const portal = fs.readFileSync(path.join(here, "..", "index.jsx"), "utf8");
+const portal = portalSource();
 
 test("the tour is due when the user has not seen THIS release", () => {
   assert.match(

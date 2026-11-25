@@ -30,6 +30,7 @@
 
 const { ACTIVE_VOLUME_STATUSES } = require("./cellOccupancy");
 const { TON_PER_M3, M3, TONS, resolveFacilityUnit } = require("./volumeUnits");
+const { cellCapacityRow } = require("./cellCapacity");
 const { isHazardousWasteType } = require("./wasteCategories");
 
 const num = (value) => {
@@ -343,10 +344,13 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
       // occupancy recompute in `cellFillUnits`, which need not match the
       // capacity's unit; reading the fill through `cellCapacityUnits` misstated
       // "Used" by the conversion factor whenever the two differed.
-      const capacityUnit = facility.cellCapacityUnits?.[i] || "m³";
-      const fillUnit = facility.cellFillUnits?.[i] || capacityUnit;
-      const capacity = toTons(num(facility.cellCapacities?.[i]), capacityUnit);
-      const fill = toTons(num(facility.cellFillValues?.[i]), fillUnit);
+      //
+      // Units and the % follow the ONE cell rule (utils/cellCapacity.js), so this
+      // table reads exactly what the admin and portal screens show. A cell with
+      // no unit of its own used to be read as m³ here and as tons on screen.
+      const row = cellCapacityRow(facility, i, { unit: "tons" });
+      const capacity = row.capacity;
+      const fill = row.used;
       cells.push({
         // Same label rule as resolveCellLabel, so a cell is named identically in
         // this table and in Disposal by Cell.
@@ -359,7 +363,7 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
         remaining: Number(Math.max(0, capacity - fill).toFixed(2)),
         // A ratio of two figures in the SAME unit, so it is unchanged by the
         // conversion — computed from the normalised pair for exactly that reason.
-        utilization: capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null,
+        utilization: row.pct,
       });
     }
   }

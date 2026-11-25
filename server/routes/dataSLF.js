@@ -77,6 +77,10 @@ const {
   sanitizeBaselineMov,
 } = require("../utils/baselineCellEntries");
 const { todayRange } = require("../utils/appTime");
+const { expandBacklogEntries, formatDay } = require("../utils/backlogEntries");
+const { applyEnteredVolumesToTruck } = require("../utils/enteredVolume");
+const { annotateVerifiedClients } = require("../utils/clientCorrection");
+const { comparableText } = require("../utils/nameMatch");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
   validateWasteGeneration,
@@ -93,7 +97,9 @@ const {
   convertVolume: convertVolumeStrict,
   TON_PER_M3,
   toM3Expr,
+  resolveCellUnit,
 } = require("../utils/volumeUnits");
+const { cellPercent } = require("../utils/cellCapacity");
 const {
   normalizeWasteType: normalizeWasteCategory,
   isHazardousWasteType,
@@ -286,7 +292,7 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
       // after it and therefore add on top. Without them in the projection the
       // override was invisible to computeCellOccupancy and the next submission
       // wiped it.
-      `${OVERRIDE_FACILITY_FIELDS} wasteReceivedUnit volumeCapacityUnit`,
+      `${OVERRIDE_FACILITY_FIELDS} wasteReceivedUnit volumeCapacityUnit isDummy`,
     )
     .lean();
   if (!facility) return null;
@@ -298,11 +304,21 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
   );
   if (cellCount <= 0) return null;
 
+  // The SAME submissions the admin rollups count (GET /cell-occupancy and the
+  // Cell Waste Placement overview), so the persisted figures the portal and the
+  // capacity gate read equal the admin's:
+  //   • every year — hiding a year from the record views does not take its waste
+  //     out of the cell. Without includeHiddenYears the year-visibility filter
+  //     dropped it here only, so with "hide historical records" on the portal's
+  //     cells read emptier than the admin's and the gate under-counted;
+  //   • a test (dummy) facility counts its own test submissions; a real facility
+  //     never counts test data.
   const entries = await DataSLF.find({
     slfGenerator: facility._id,
     deletedAt: null,
-    isDummy: { $ne: true },
+    ...(facility.isDummy ? {} : { isDummy: { $ne: true } }),
   })
+    .setOptions({ includeHiddenYears: true })
     // `dateOfDisposal` is what the pre-baseline rule compares against.
     .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
     .sort({ createdAt: -1 })
@@ -1755,7 +1771,10 @@ function sanitizeTrucksForSave(trucks, fallbackUnit, errors) {
         return cv;
       });
     }
-    return cleaned;
+    // A volume weighed in another unit (tons at an m³ SLF) is re-converted
+    // here from the value as entered — the stored figure never depends on the
+    // client's arithmetic. See utils/enteredVolume.js.
+    return applyEnteredVolumesToTruck(cleaned);
   });
 }
 
@@ -1878,21 +1897,9 @@ function sanitizeClient(client) {
 // MUST stay behaviourally identical to normalizeComparableText in
 // front-end/src/pages/SLFPortal/uploadHelpers.js — the upload preview uses that one
 // to tell the operator what THIS check will decide. Drift between them is the bug.
-const normalizeRelationshipText = (value) =>
-  String(value ?? "")
-    .normalize("NFKC")
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
-    .replace(/[\u2018\u2019\u02BC]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/[\u2010-\u2015]/g, "-")
-    // Comma, semicolon and dash all fold to a single space (see the front-end
-    // counterpart): word content and word ORDER still decide identity.
-    .replace(/[,;-]+/g, " ")
-    .replace(/\s*\/\s*/g, "/")
-    .replace(/\s+/g, " ")
-    .replace(/[.\s]+$/g, "")
-    .trim()
-    .toLowerCase();
+// The rule itself lives in utils/nameMatch.js (periods, commas, case and spacing
+// are formatting; letters and words are identity).
+const normalizeRelationshipText = comparableText;
 const clientRelationshipValues = (client) => {
   if (typeof client === "string") return [client];
   if (!client || typeof client !== "object") return [];
@@ -2669,7 +2676,18 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
   await timeStage("unresolved-revert", () => assertNoUnresolvedRevert(submittedBy));
   await timeStage("organize-cells", () => assertNoUnorganizedPortalSubmissions(submittedBy));
   const submitterIsDummy = Boolean(portalAccount?.isDummy);
-  const items = Array.isArray(entries) ? entries : entries ? [entries] : [];
+  const received = Array.isArray(entries) ? entries : entries ? [entries] : [];
+  // Backlog upload: an entry whose trucks span several disposal dates becomes one
+  // entry PER DATE (each its own record and ID No.), and every date must sit in
+  // the one-month backlog window. See utils/backlogEntries.js.
+  const backlog = expandBacklogEntries(received);
+  if (backlog.errors.length) {
+    const error = new Error(backlog.errors.join(" "));
+    error.statusCode = 400;
+    error.code = "BACKLOG_WINDOW";
+    throw error;
+  }
+  const items = backlog.items;
   if (items.length === 0) {
     const error = new Error("No submission data was provided.");
     error.statusCode = 400;
@@ -2684,7 +2702,12 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
     const errs = [];
     const cleaned = sanitizeSubmissionEntry(item, errs);
     if (errs.length) {
-      validationErrors.push(`${items.length > 1 ? `Entry ${idx + 1}: ` : ""}${errs.join(" ")}`);
+      // A backlog day is named by its date — "Entry 14" means nothing to an
+      // operator who uploaded one file.
+      const label = items.length > 1
+        ? backlog.backlogDays ? `${formatDay(String(item?.dateOfDisposal || ""))}: ` : `Entry ${idx + 1}: `
+        : "";
+      validationErrors.push(`${label}${errs.join(" ")}`);
     }
     return cleaned;
   });
@@ -2817,6 +2840,9 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
   const genCache = new Map();
   const facilityDummyCache = new Map();
   const facilityCellCache = new Map(); // genId -> facility cell arrays (lean)
+  // m³ already accepted into each cell by earlier loads of this same request
+  // ("genId|cellIndex" → m³), so the capacity gate sees their sum.
+  const committedCellM3 = new Map();
   const saved = [];
   for (const item of sanitizedItems) {
     let genId = item.slfGenerator || null;
@@ -2911,15 +2937,27 @@ async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = nu
               row?.cellIndex ?? (row === truck ? truck?.cellIndex : undefined);
             const vol = Number(row?.actualVolume || 0);
             if (ci === null || ci === undefined || ci === "" || !(vol > 0)) return;
+            const rowUnit = row?.actualVolumeUnit || item?.baselineUnit || "m³";
+            // Every load in THIS request headed for the same cell counts
+            // against it together: a backlog of thirty days, or several trucks
+            // in one day, used to be checked one by one against the same
+            // starting fill and could jointly overfill the cell.
+            const cellKey = `${key}|${Number(ci)}`;
+            const committedM3 = committedCellM3.get(cellKey) || 0;
+            const committedInUnit = convertVolumeStrict(committedM3, "m³", rowUnit) || 0;
             const acc = evaluateFacilityCellAcceptance(
               facCells,
               ci,
-              vol,
-              row?.actualVolumeUnit || item?.baselineUnit || "m³",
+              vol + committedInUnit,
+              rowUnit,
             );
             if (!acc.ok) {
               const name = facCells?.cellNames?.[Number(ci)] || `Cell ${Number(ci) + 1}`;
-              cellIssues.push(`Truck ${ti + 1} · ${name}: ${acc.reason}`);
+              const together = committedM3 > 0 ? " (counting the other loads for this cell in this submission)" : "";
+              const day = backlog.backlogDays ? `${formatDay(String(item?.dateOfDisposal || ""))} · ` : "";
+              cellIssues.push(`${day}Truck ${ti + 1} · ${name}: ${acc.reason}${together}`);
+            } else {
+              committedCellM3.set(cellKey, committedM3 + (convertVolumeStrict(vol, rowUnit, "m³") || 0));
             }
           });
         });
@@ -3616,7 +3654,9 @@ router.get("/baseline/:slfName", async (req, res) => {
         closedCells: [],
         haulers: [],
       },
-      accreditedHaulers: haulerDoc?.accreditedHaulers || [],
+      // Clients EMB verified are marked `embVerified` — computed here from the
+      // SlfClient verification, never stored on the roster (clientCorrection.js).
+      accreditedHaulers: await annotateVerifiedClients(haulerDoc?.accreditedHaulers || []),
       baselineUpdateApproved,
       baselineUpdateRequested,
       savedAt: latest.updatedAt || latest.createdAt,
@@ -5929,6 +5969,8 @@ const DISPOSAL_ACTIVITY_TRUCK_FIELDS = [
   "trucks.vehicles.wasteType",
   "trucks.vehicles.actualVolume",
   "trucks.vehicles.actualVolumeUnit",
+  "trucks.vehicles.enteredVolume",
+  "trucks.vehicles.enteredVolumeUnit",
   "trucks.vehicles.cellIndex",
   "trucks.vehicles.cellName",
   "trucks.vehicles.cellType",
@@ -6354,7 +6396,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         (includeTrucks
           ? " trucks"
           : " trucks.cellName trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
-            " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit" +
+            " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.enteredVolume trucks.vehicles.enteredVolumeUnit" +
             REMARK_FORMAT_FIELDS);
       const entryDocs = idOrder.length
         ? await DataSLF.find({ _id: { $in: idOrder } })
@@ -6483,7 +6525,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
             (includeTrucks
               ? " trucks"
               : " trucks.cellName trucks.cellIndex trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
-                " trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit" +
+                " trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.enteredVolume trucks.vehicles.enteredVolumeUnit" +
                 REMARK_FORMAT_FIELDS),
         );
       }
@@ -6616,9 +6658,11 @@ const cellPlacementOverviewKey = (req) =>
 function buildOccupancyCells(facility, occupancy, idsByCell = new Map()) {
   const unit = occupancy.unit;
   return occupancy.rows.map((row) => {
+    // The cell's capacity unit by the ONE cell rule (utils/cellCapacity.js) —
+    // not the occupancy unit — when the cell declares none of its own.
     const converted = convertVolumeStrict(
       Number(facility.cellCapacities?.[row.index] || 0),
-      facility.cellCapacityUnits?.[row.index] || unit,
+      resolveCellUnit(facility, row.index, "capacity"),
       unit,
     );
     const capacity = Number.isFinite(Number(converted)) ? Number(converted) : 0;
@@ -6649,7 +6693,9 @@ function buildOccupancyCells(facility, occupancy, idsByCell = new Map()) {
       postOverrideSubmitted: row.overridden ? row.postOverrideSubmitted : undefined,
       overriddenAt: row.overridden ? row.overriddenAt || null : undefined,
       unconvertible: row.unconvertible || 0,
-      pct: capacity > 0 ? Math.min(100, (row.total / capacity) * 100) : null,
+      // Whole-number %, 100 only when full — the same cellPercent every admin
+      // and portal screen shows (utils/cellCapacity.js).
+      pct: cellPercent(row.total, capacity),
       remaining: capacity > 0 ? Math.max(0, capacity - row.total) : null,
       submissionIds,
       submissionCount: submissionIds.length,
@@ -10546,7 +10592,7 @@ async function resolveWasteSummaryHaulers(match) {
 const WASTE_SUMMARY_SUBMISSION_SELECT =
   "companyType companyRegion companyProvince companyMunicipality lguCompanyName dateOfDisposal baselineUnit " +
   "trucks.actualVolume trucks.actualVolumeUnit trucks.selectedClients trucks.lguCompanyName trucks.companyType " +
-  "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.selectedClients " +
+  "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.enteredVolume trucks.vehicles.enteredVolumeUnit trucks.vehicles.selectedClients " +
   "trucks.vehicles.lguCompanyName trucks.vehicles.companyType";
 
 // Portal: Get waste received breakdown by baseline clients and submitted client selections.

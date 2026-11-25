@@ -24,6 +24,7 @@
  * Run: npm test  (from server/)
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const path = require("node:path");
@@ -511,10 +512,7 @@ test("re-saving a draft updates it in place and clears a stale failure", () => {
 });
 
 test("the portal says which of the two just happened", () => {
-  const portal = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const portal = portalJsxSource();
   assert.match(portal, /updatedExisting \? "Draft Updated" : "Saved as Draft"/);
 });
 
@@ -669,10 +667,7 @@ test("the VERA rule that had a switch but no enforcement now has both", () => {
   );
   // …and the launcher goes with it, rather than offering a button that can only
   // ever answer "not permitted".
-  const portal = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const portal = portalJsxSource();
   assert.match(portal, /portalUser\?\.portalAccess\?\.canViewVera !== false && \(/);
 });
 

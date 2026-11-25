@@ -17,13 +17,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { portalSource } from "./portalSource.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WASTE_CATEGORY_ENUM } from "../../../utils/wasteCategories.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const portal = fs.readFileSync(path.join(here, "..", "index.jsx"), "utf8");
+const portal = portalSource();
 const modals = fs.readFileSync(path.join(here, "..", "SLFPortalModals.jsx"), "utf8");
 
 // The truck branch of the column builder, from `if (effectiveType === "truck") {`
@@ -122,8 +123,8 @@ test("the disposal upload's unit gets the picker, not a text box", () => {
 test("waste type uses the app's shared category colours, not its own", () => {
   // One colour system across the portal, the cell gauges and the admin tables:
   // a hardcoded palette here is how they drift apart.
-  assert.match(modals, /import \{ getCellTypeConfig \} from "\.\.\/\.\.\/utils\/cellVisuals"/);
-  assert.match(modals, /import \{ WASTE_CATEGORY_ENUM \} from "\.\.\/\.\.\/utils\/wasteCategories"/);
+  assert.match(modals, /import \{[^}]*\bgetCellTypeConfig\b[^}]*\} from "\.\.\/\.\.\/utils\/cellVisuals"/);
+  assert.match(modals, /import \{[^}]*\bWASTE_CATEGORY_ENUM\b[^}]*\} from "\.\.\/\.\.\/utils\/wasteCategories"/);
   assert.match(
     modals,
     /WASTE_CATEGORY_ENUM\.map\(\(type\) => \(\{[\s\S]*?color=\{getCellTypeConfig\(type\)\.tag\}/,

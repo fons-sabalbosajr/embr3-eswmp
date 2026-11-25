@@ -57,6 +57,38 @@ async function findDuplicate({ name, type, excludeId }) {
 }
 
 // Sanitize the incoming body to the known fields only.
+// ── EMB corrections → portal baselines (utils/clientCorrection.js) ──
+// Fields the portal's hauler roster also holds; changing one is a correction.
+const CORRECTION_FIELDS = ["name", "type", "address", "province", "municipalityCity", "region", "hauler"];
+
+function stampEmbVerification(record, req) {
+  const { verifiedValues } = require("../utils/clientCorrection");
+  record.embVerification = {
+    verifiedAt: new Date(),
+    verifiedBy: actor(req),
+    values: verifiedValues(record),
+  };
+}
+
+// The admin's edit is already saved; a failure to propagate it must not turn the
+// save into an error. It is logged and reported back so the admin can retry
+// with Verify.
+async function syncCorrectionSafely(record, before, req) {
+  try {
+    const { syncClientCorrection } = require("../utils/clientCorrection");
+    const out = await syncClientCorrection({ client: record.toObject ? record.toObject() : record, before, actor: actor(req), req });
+    return { ok: true, recordsUpdated: out.recordsUpdated, portalUsers: out.portalUsers.length };
+  } catch (error) {
+    writeLog("error", "slf-client.emb_correction_sync_failed", {
+      message: `Could not write the EMB correction of "${record.name}" to the SLF baselines: ${error.message}`,
+      user: actor(req),
+      ip: req.ip,
+      meta: { clientId: String(record._id) },
+    });
+    return { ok: false, message: "Saved, but the portal baselines could not be updated. Use Verify to retry." };
+  }
+}
+
 function pickBody(body = {}) {
   const out = {};
   [
@@ -1008,7 +1040,11 @@ router.post("/issues/:id/apply-suggestion", requirePermission(PERM, "edit"), asy
     if (municipalityCity) client.municipalityCity = municipalityCity;
     client.regionClass = "within-region-3";
     client.updatedBy = actor(req);
+    // An approved fix is an EMB correction: verified, and written back to the
+    // SLF baselines so the portal shows the corrected province.
+    stampEmbVerification(client, req);
     await client.save();
+    await syncCorrectionSafely(client, { name: client.name, hauler: client.hauler }, req);
 
     issue.status = "resolved";
     issue.resolvedAt = new Date();
@@ -1322,17 +1358,43 @@ router.put("/:id", requirePermission(PERM, "edit"), async (req, res) => {
 
     const locationChanged = ["province", "region", "municipalityCity", "address", "location", "name", "type"]
       .some((k) => body[k] !== undefined && body[k] !== record[k]);
+    // An EMB edit to what the PORTAL holds (name, type, address, hauler) is a
+    // correction: it is verified and written back to the SLF baselines below.
+    const portalDataChanged = CORRECTION_FIELDS.some((k) => body[k] !== undefined && String(body[k] ?? "") !== String(record[k] ?? ""));
+    const before = { name: record.name, hauler: record.hauler };
     Object.assign(record, body);
     if (locationChanged || record.regionClass === "unclassified") {
       await applyRegionClass(record);
     }
     syncSingleRelationship(record);
     record.updatedBy = actor(req);
+    if (portalDataChanged) stampEmbVerification(record, req);
     await record.save();
-    res.json(record);
+    const sync = portalDataChanged ? await syncCorrectionSafely(record, before, req) : null;
+    res.json(sync ? { ...record.toObject(), embSync: sync } : record);
     clearRelMapCache();
     refreshAdmin(req, "slf-clients");
     writeLog("info", "slf-clients.update", { message: `SLF client updated: ${record.name}`, req });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Verify (no changes): EMB confirms the client's details are true and correct ──
+// Stamps the verification and pushes the verified values into the SLF baselines
+// (filling any blank detail there), so the portal shows "Verified by EMB".
+router.post("/:id/verify", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Client not found" });
+    const record = await SlfClient.findOne({ _id: req.params.id, deletedAt: null });
+    if (!record) return res.status(404).json({ message: "Client not found" });
+    stampEmbVerification(record, req);
+    record.updatedBy = actor(req);
+    await record.save();
+    const sync = await syncCorrectionSafely(record, { name: record.name, hauler: record.hauler }, req);
+    res.json({ ...record.toObject(), embSync: sync });
+    clearRelMapCache();
+    refreshAdmin(req, "slf-clients");
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

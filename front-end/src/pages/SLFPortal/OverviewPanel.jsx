@@ -31,6 +31,7 @@ import {
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { resolveFacilityUnit, normalizeUnit, convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
+import { cellCapacityRow } from "../../utils/cellCapacity";
 import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 import {
   getCellStatusConfig,
@@ -894,19 +895,11 @@ function OverviewPanel({
     const submissionClosed = slfInfo?.cellSubmissionAllowed?.[idx] === false;
     const statusConfig = getCellStatusConfig(stored);
     const typeConfig = getCellTypeConfig(slfInfo?.cellTypes?.[idx]);
-    const capUnit = resolveCellUnit(slfInfo, idx, "capacity");
-    const fillUnit = resolveCellUnit(slfInfo, idx, "fill");
-    // Shown in the dashboard's ONE unit (the operator's declared unit). Converted,
-    // never relabelled, so the percentage is unchanged; a pair that cannot be
-    // converted stays in the cell's own unit rather than showing a wrong number.
-    const viewUnit = normalizeUnit(baselineUnit) || capUnit;
-    const capInView = convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, viewUnit);
-    const fillInView = convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, viewUnit);
-    const convertible = capInView !== null && fillInView !== null;
-    const unit = convertible ? viewUnit : capUnit;
-    const capacity = convertible ? capInView : convertVolume(slfInfo?.cellCapacities?.[idx], capUnit, capUnit) ?? 0;
-    const fill = convertible ? fillInView : convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, capUnit) ?? 0;
-    const pct = capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null;
+    // THE cell rule (utils/cellCapacity.js), shown in the dashboard's ONE unit
+    // (the operator's declared unit) — the same figures the admin side shows.
+    const cellRow = cellCapacityRow(slfInfo, idx, { unit: baselineUnit });
+    const { unit, capacity, pct } = cellRow;
+    const fill = cellRow.used;
     const statusLabel = String(stored || statusConfig?.label || "").toLowerCase();
     // Band precedence: what the admin declared about the cell first, then how
     // full it actually is. Each band owns a distinct colour (see BAND_META), so
@@ -1114,16 +1107,55 @@ function OverviewPanel({
             style={{ borderRadius: 8 }}
             bodyStyle={{ padding: 12 }}
           >
-            {/* Five across on desktop, degrading to 4/3/2 — see .eswmp-grid-5.
-                Dropping the old 900px min-width removes the horizontal scroll
-                and lets the cards use the full width available. */}
-            <div className="eswmp-grid-5">
+            {/* Two sub-cards: the facility itself on the left, its permits and
+                clearances on the right (stacked below lg). Each lays its tiles
+                out in an auto-filling grid, so they use the width they get. */}
+            <Row gutter={[12, 12]}>
+              <Col xs={24} lg={9}>
+                <Card
+                  type="inner"
+                  size="small"
+                  title={<Text strong style={{ fontSize: 13 }}>Facility Details</Text>}
+                  style={{ borderRadius: 8, height: "100%" }}
+                  styles={{ body: { padding: 10 } }}
+                >
+            <div className="slf-overview-tiles">
               {[
                 ["Facility", activeSlfName],
                 ["Status", slfInfo?.statusOfSLF || slfInfo?.operationalStatus || slfInfo?.status],
-                ["Municipality", facilityMunicipality],
-                ["Province", slfInfo?.province],
-                ["Region", slfInfo?.region || slfInfo?.regionName || "Region III"],
+                // One tile for the address — three tiles of one place each took
+                // half the row.
+                [
+                  "Municipality · Province · Region",
+                  [
+                    facilityMunicipality,
+                    slfInfo?.province,
+                    slfInfo?.region || slfInfo?.regionName || "Region III",
+                  ]
+                    .map((part) => String(part || "").trim())
+                    .filter(Boolean)
+                    .join(", "),
+                ],
+              ].map(([label, value]) => (
+                <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
+                  <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
+                </div>
+              ))}
+            </div>
+                </Card>
+              </Col>
+              <Col xs={24} lg={15}>
+                <Card
+                  type="inner"
+                  size="small"
+                  title={<Text strong style={{ fontSize: 13 }}>Permits &amp; Clearances</Text>}
+                  className="slf-permit-card"
+                  style={{ borderRadius: 8, height: "100%" }}
+                  styles={{ body: { padding: 10 } }}
+                >
+            <div className="slf-overview-tiles slf-permit-tiles">
+              {[
                 ["ECC", slfInfo?.eccNo],
                 // Haz has no status badge of its own, so "hiding the status"
                 // here means not presenting "None" / "On going application…" as
@@ -1137,13 +1169,13 @@ function OverviewPanel({
                     : slfInfo?.hazwasteGenerationId,
                 ],
               ].map(([label, value]) => (
-                <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
+                <div key={label} className="slf-permit-tile" style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
                 </div>
               ))}
               {permitCards.map(({ label, status, references }) => (
-                <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
+                <div key={label} className="slf-permit-tile" style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
                   {status.notRequired ? (
                     // ONE neutral line, whether the marking was recorded in the
@@ -1208,11 +1240,16 @@ function OverviewPanel({
                       facility, so no status is shown for it at all — only the
                       recorded information. */}
                   {!status.hideStatus && (
-                    <Tag color={status.color} style={{ marginTop: 4, marginInlineEnd: 0 }}>{status.label}</Tag>
+                    // Pinned to the foot of the tile, so the statuses of tiles in one
+                    // row line up however many references each lists.
+                    <Tag color={status.color} style={{ marginTop: "auto", marginInlineEnd: 0, alignSelf: "flex-start" }}>{status.label}</Tag>
                   )}
                 </div>
               ))}
             </div>
+                </Card>
+              </Col>
+            </Row>
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6} className="eswmp-col-5">

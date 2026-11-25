@@ -1081,7 +1081,7 @@
     padding-bottom: 0;
   }
 
-  .slf-upload-modal .ant-modal-content {
+  .slf-upload-modal .ant-modal-container {
     border-radius: 0;
   }
 
@@ -1875,37 +1875,8 @@ body.slf-portal-active .ant-table-wrapper .ant-table-body {
   }
 }
 
-/* ── Submission Details modal tables (Submission History) ──
-   Fit the modal width: the tables use tableLayout="fixed", so the columns share
-   the available width, and long values (ticket numbers, hauler names, client
-   lists, addresses) wrap instead of pushing the table wider than the modal.
-   One step smaller type keeps a wrapped row compact. */
-.slf-detail-fit.ant-table-wrapper .ant-table,
-.slf-detail-fit .ant-table {
-  font-size: 12px;
-}
-.slf-detail-fit .ant-table-thead > tr > th,
-.slf-detail-fit .ant-table-tbody > tr > td {
-  padding: 6px 8px !important;
-  white-space: normal !important;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  vertical-align: top;
-  line-height: 1.35;
-}
-.slf-detail-fit .ant-table-thead > tr > th {
-  font-size: 11.5px;
-  font-weight: 600;
-}
-.slf-detail-fit .ant-tag {
-  font-size: 11px;
-  line-height: 18px;
-  white-space: normal;
-  margin-inline-end: 0;
-}
-.slf-detail-fit .ant-typography {
-  font-size: inherit !important;
-}
+/* The Submission Details modal styles (.slf-detail-modal, .slf-detail-fit) live
+   in index.css: the admin Portal Submissions detail modal uses the same design. */
 
 /* ══════════════════════════════════════════════════════════════════════════════
    TABLET LAYER — iPad 13" (≈1024 px portrait, ≈1366 px landscape) and similar.
@@ -1999,4 +1970,142 @@ body.slf-portal-active .ant-table-wrapper .ant-table-body {
   body.slf-portal-active .eswmp-grid-5 {
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   }
+}
+
+/* ── SLF Overview sub-cards (Facility Details / Permits & Clearances) ──
+   Tiles fill the sub-card's width: as many ~170px columns as fit, so the
+   narrower Facility Details card holds two or three and Permits more. */
+/* `auto-fit`, not `auto-fill`: auto-fill keeps empty column tracks, so a short
+   row of tiles left a blank slot at the end of a wide card. auto-fit collapses
+   those tracks and the tiles stretch across the whole row. `min(100%, …)` lets
+   a tile shrink below the minimum on a very narrow screen instead of
+   overflowing the card. */
+.slf-overview-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  gap: 8px;
+}
+@media (max-width: 575px) {
+  .slf-overview-tiles {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  }
+}
+
+/* ── Permits & Clearances: tiles use the whole card ─────────────────────────
+   Four tiles (ECC, Hazardous Waste Generator ID, Permit to Operate, Discharge
+   Permit). The column count follows the CARD's width, not the window's — the
+   card is full width on a tablet but shares the row with Facility Information
+   on a desktop — so it is a container query: one column when narrow, a 2 × 2
+   block, then all four across. Never 3 + 1, which strands one tile on a row of
+   its own. The card stretches to the height of Facility Information beside it,
+   and the rows share that height evenly instead of leaving a blank band below
+   the tiles. */
+.slf-permit-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.slf-permit-card > .ant-card-body {
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.slf-overview-tiles.slf-permit-tiles {
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: 1fr;
+}
+
+@container (min-width: 360px) {
+  .slf-overview-tiles.slf-permit-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 760px) {
+  .slf-overview-tiles.slf-permit-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.slf-permit-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* ── Every portal modal fits the screen it opens on ─────────────────────────
+   Operators reported modals taller than their screen with no way to reach the
+   bottom — the confirm button, the last rows of a table. antd sizes a modal to
+   its content and offsets it 100px from the top, so on a laptop a long form or
+   table simply ran off the screen.
+
+   Now, at every screen size, the modal box is capped to the viewport height
+   (`dvh`, so mobile browser toolbars are accounted for) and laid out as a
+   column: the header and footer stay put and ONLY the body scrolls. The close
+   button and the primary action are therefore always on screen.
+
+   antd 6 renders the box as `.ant-modal-container` (there is no
+   `.ant-modal-content` any more). Inline `top` values some modals set still
+   win, and they are all smaller than this gap. */
+body.slf-portal-active {
+  --slf-modal-gap: clamp(8px, 4vh, 40px);
+}
+
+@media (min-width: 768px) {
+  body.slf-portal-active .ant-modal {
+    top: var(--slf-modal-gap);
+    padding-bottom: var(--slf-modal-gap);
+  }
+
+  body.slf-portal-active .ant-modal-wrap.ant-modal-centered .ant-modal {
+    top: 0;
+    padding-bottom: 0;
+  }
+}
+
+body.slf-portal-active .ant-modal-container {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 2 * var(--slf-modal-gap));
+  max-height: calc(100dvh - 2 * var(--slf-modal-gap));
+}
+
+body.slf-portal-active .ant-modal-header,
+body.slf-portal-active .ant-modal-footer {
+  flex: none;
+}
+
+body.slf-portal-active .ant-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ── Tables inside a modal scroll inside their own box ──────────────────────
+   A long table used to stretch the modal, and a wide one pushed past its right
+   edge. Each table now gets its own scroll area — both directions — capped to
+   a share of the screen, with the column headers pinned while the rows move.
+   `!important` because the table sets `overflow-y: hidden` inline whenever it
+   has a horizontal scroll. Tables that declare their own `scroll.y` scroll in
+   `.ant-table-body` instead and keep the height they chose. */
+body.slf-portal-active .ant-modal-body .ant-table-content {
+  overflow: auto !important;
+  max-height: clamp(220px, 58vh, 640px);
+}
+
+body.slf-portal-active .ant-modal-body .ant-table-content > table > .ant-table-thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+/* A pinned (fixed) column's header sits above both the scrolling rows and the
+   other headers sliding under it. */
+body.slf-portal-active .ant-modal-body .ant-table-content > table > .ant-table-thead > tr > th.ant-table-cell-fix {
+  z-index: 4;
 }

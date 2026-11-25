@@ -20,10 +20,13 @@
 // consistent with the surrounding Tags and Progress bars.
 export const CELL_TYPE_COLOR_MAP = {
   Residual: { color: "#52c41a", tag: "green", label: "Residual" },
+  // Hazardous waste is RED on every screen, admin and portal (see
+  // utils/wasteCategories.js — HAZARDOUS_RED / TREATED_HAZARDOUS_RED). Treated
+  // hazardous is a lighter shade of the same red, not orange.
   "Hazardous Waste": { color: "#cf1322", tag: "red", label: "Hazardous Waste" },
-  "Treated Hazardous Waste": { color: "#fa8c16", tag: "volcano", label: "Treated Hazardous Waste" },
+  "Treated Hazardous Waste": { color: "#f5222d", tag: "red", label: "Treated Hazardous Waste" },
   // Legacy short form still present on older facility records.
-  "Treated Haz Waste": { color: "#fa8c16", tag: "volcano", label: "Treated Haz Waste" },
+  "Treated Haz Waste": { color: "#f5222d", tag: "red", label: "Treated Haz Waste" },
 };
 
 const DEFAULT_CELL_TYPE = { color: "#8c8c8c", tag: "default", label: "Unknown" };

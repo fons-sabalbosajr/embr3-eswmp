@@ -8,6 +8,7 @@ import {
   ReloadOutlined, TeamOutlined, BankOutlined, UserOutlined, FilterOutlined,
   ClearOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, EnvironmentOutlined,
   PhoneOutlined, MailOutlined, SolutionOutlined, SyncOutlined, WarningOutlined,
+  SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -598,8 +599,14 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     };
     try {
       if (editing) {
-        await api.put(`/slf-clients/${editing._id}`, payload);
-        Swal.fire({ icon: "success", title: "Client updated", timer: 1200, showConfirmButton: false });
+        const { data } = await api.put(`/slf-clients/${editing._id}`, payload);
+        // A change to what the portal holds (name, type, address, hauler) was
+        // written back to the SLF baselines — say so, or say it failed.
+        if (data?.embSync) {
+          showEmbSyncResult(data.embSync, "Client corrected");
+        } else {
+          Swal.fire({ icon: "success", title: "Client updated", timer: 1200, showConfirmButton: false });
+        }
       } else {
         await api.post("/slf-clients", payload);
         Swal.fire({ icon: "success", title: "Client added", timer: 1200, showConfirmButton: false });
@@ -610,6 +617,43 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       Swal.fire("Error", err.response?.data?.message || "Save failed", "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Result of writing an EMB correction / verification to the portal baselines.
+  const showEmbSyncResult = (sync, title) => {
+    if (!sync?.ok) {
+      Swal.fire({ icon: "warning", title: `${title} — portal not updated`, text: sync?.message || "The SLF baselines could not be updated. Use Verify to retry." });
+      return;
+    }
+    Swal.fire({
+      icon: "success",
+      title,
+      text: sync.recordsUpdated
+        ? `The corrected details were written to ${sync.recordsUpdated} SLF baseline record(s); ${sync.portalUsers} portal user(s) were notified. Their portal shows the client as Verified by EMB.`
+        : `The portal baselines already match. ${sync.portalUsers} portal user(s) were notified; the client shows as Verified by EMB.`,
+      confirmButtonColor: "#1a3353",
+    });
+  };
+
+  const handleVerify = async (r) => {
+    const confirm = await Swal.fire({
+      icon: "question",
+      title: "Verify this client?",
+      html:
+        `Confirm that <b>${String(r.name || "").replace(/[<>&]/g, "")}</b> (${r.type}) and its address are true and correct.` +
+        "<br/><br/>These details are written to the SLF's portal baseline, marked <b>Verified by EMB</b>, and the portal user is notified.",
+      showCancelButton: true,
+      confirmButtonText: "Verify",
+      confirmButtonColor: "#389e0d",
+    });
+    if (!confirm.isConfirmed) return;
+    try {
+      const { data } = await api.post(`/slf-clients/${r._id}/verify`);
+      setRecords((prev) => prev.map((x) => (x._id === r._id ? { ...x, embVerification: data.embVerification } : x)));
+      showEmbSyncResult(data.embSync, "Client verified");
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Verification failed", "error");
     }
   };
 
@@ -862,6 +906,11 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         <div style={{ lineHeight: 1.3 }}>
           <Text strong style={{ fontSize: 12 }}>{r.name}</Text><br />
           {typeTag(r.type)}
+          {r.embVerification?.verifiedAt && (
+            <Tooltip title={`Verified by ${r.embVerification.verifiedBy || "EMB"} on ${formatManila(r.embVerification.verifiedAt)}. Portal users see it as "Verified by EMB".`}>
+              <Tag color="green" icon={<SafetyCertificateOutlined />} style={{ fontSize: 10, marginTop: 2 }}>Verified</Tag>
+            </Tooltip>
+          )}
         </div>
       ),
     },
@@ -962,11 +1011,16 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       render: (v) => <Text type={v ? undefined : "secondary"} style={{ fontSize: 11 }}>{formatManila(v)}</Text>,
     },
     {
-      title: "Actions", key: "actions", width: 130, fixed: "right",
+      title: "Actions", key: "actions", width: 160, fixed: "right",
       render: (_, r) => (
         <Space size={2}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1677ff" }} />} onClick={() => setDetail(r)} /></Tooltip>
           {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>}
+          {canEdit && (
+            <Tooltip title="Verify — confirm these details are true and correct and send them to the SLF's portal baseline">
+              <Button type="text" size="small" icon={<SafetyCertificateOutlined style={{ color: "#389e0d" }} />} onClick={() => handleVerify(r)} />
+            </Tooltip>
+          )}
           {canDelete && (
             <Tooltip title={r.status === "Active" ? "Deactivate" : "Activate"}>
               <Button type="text" size="small" icon={r.status === "Active" ? <StopOutlined style={{ color: "#fa8c16" }} /> : <CheckCircleOutlined style={{ color: "#52c41a" }} />} onClick={() => handleToggleStatus(r)} />

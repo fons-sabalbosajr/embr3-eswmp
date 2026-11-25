@@ -1,5 +1,6 @@
 import HaulerClientsEditor from "../../slf-monitoring/HaulerClientsEditor";
-import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, SLF_DOCUMENT_TYPE_OPTIONS, THREE_DECIMAL_STEP, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, fileUrlFromValue, formatFileSize, formatThreeDecimalInput, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, resolveFacilityUnit, parseDecimalInput, renderUploadStatusCell, resolveMediaOpenUrl, resolveMediaUrl, resolveUploadName, slfUploadProps, uploadEventToFileList, uploadFileFromValue } from "../../slf-monitoring/helpers.jsx";
+import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, SLF_DOCUMENT_TYPE_OPTIONS, THREE_DECIMAL_STEP, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, fileUrlFromValue, formatFileSize, formatThreeDecimalInput, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, resolveFacilityUnit, resolveCellUnit, parseDecimalInput, renderUploadStatusCell, resolveMediaOpenUrl, resolveMediaUrl, resolveUploadName, slfUploadProps, uploadEventToFileList, uploadFileFromValue } from "../../slf-monitoring/helpers.jsx";
+import { cellPercent } from "../../../../utils/cellCapacity";
 import { AlertOutlined, BankOutlined, BarChartOutlined, CalculatorOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined, SafetyCertificateOutlined, TeamOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
 // `Image` MUST be imported from antd. Without it, JSX <Image> resolves to the
 // browser's global Image constructor and React throws "Please use the 'new'
@@ -41,7 +42,8 @@ const CELL_ARRAY_FIELDS = [
  */
 function CellFillBreakdown({ record, index, unit }) {
   if (!record?._id) return null;
-  const storedUnit = record.cellFillUnits?.[index] || record.wasteReceivedUnit || unit;
+  // The stored fill's unit by THE cell rule (utils/cellCapacity.js).
+  const storedUnit = resolveCellUnit(record, index, "fill");
   const inUnit = (v) => convertVolume(Number(v || 0), storedUnit, unit) ?? Number(v || 0);
   const baseline = inUnit(record.cellFillBaselineValues?.[index]);
   const submitted = inUnit(record.cellFillSubmittedValues?.[index]);
@@ -1942,13 +1944,8 @@ export default function SlfEditModal({
                           cellCapacityTotal || fallbackCapacity;
                         const wasteRaw = cellFillTotal || fallbackWaste;
                         const wasteUnit = cellDisplayUnit;
-                        const pct =
-                          totalCap > 0
-                            ? Math.min(
-                                Math.round((wasteRaw / totalCap) * 100),
-                                100,
-                              )
-                            : 0;
+                        // THE cell % (utils/cellCapacity.js), applied to the total.
+                        const pct = cellPercent(wasteRaw, totalCap) ?? 0;
                         if (cellCount < 1)
                           return (
                             <Empty description="Select number of cells to see infrastructure preview" />
@@ -1998,12 +1995,7 @@ export default function SlfEditModal({
                             if (!isInactive) {
                               if (fillInCapacityUnit != null && cap > 0) {
                                 usedInCapacityUnit = fillInCapacityUnit;
-                                displayPct = Math.min(
-                                  Math.round(
-                                    (fillInCapacityUnit / cap) * 100,
-                                  ),
-                                  100,
-                                );
+                                displayPct = cellPercent(fillInCapacityUnit, cap) ?? 0;
                               } else if (cap > 0) {
                                 displayPct = pct;
                                 usedInCapacityUnit = (pct / 100) * cap;

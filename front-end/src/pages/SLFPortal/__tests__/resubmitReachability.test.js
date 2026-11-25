@@ -14,6 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { portalSource } from "./portalSource.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,7 +26,7 @@ const read = (...p) => fs.readFileSync(path.join(here, "..", ...p), "utf8");
 const columns = read("columns", "historyColumns.jsx");
 const drafts = read("DraftsScheduledPanel.jsx");
 const dashboard = read("AssignedSlfDashboard.jsx");
-const portal = read("index.jsx");
+const portal = portalSource();
 
 test("a resubmission that kept its ID No. is recognised", () => {
   assert.equal(isResubmissionRecord({ previousIdNos: [] }), false);

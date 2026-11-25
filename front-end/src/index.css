@@ -1269,3 +1269,73 @@ code {
   min-width: 22px;
   padding-inline: 4px;
 }
+
+/* ── Submission Details modal — shared by the SLF Portal (Submission History)
+   and the admin (Portal Submissions → Submissions). Moved here from
+   SLFPortal.css so both sides render the same design. ── */
+/* ── Submission Details modal tables (Submission History) ──
+   Fit the modal width: the tables use tableLayout="fixed", so the columns share
+   the available width, and long values (ticket numbers, hauler names, client
+   lists, addresses) wrap instead of pushing the table wider than the modal.
+   One step smaller type keeps a wrapped row compact. */
+.slf-detail-fit.ant-table-wrapper .ant-table,
+.slf-detail-fit .ant-table {
+  font-size: 12px;
+}
+/* Submission Details close button: white ✕ on a dark disc over the dark banner. */
+.slf-detail-modal .ant-modal-close {
+  top: 14px;
+  inset-inline-end: 14px;
+  width: 32px;
+  height: 32px;
+  background: transparent !important;
+}
+.slf-detail-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+.slf-detail-modal .ant-modal-close:hover .slf-detail-modal-close,
+.slf-detail-modal .ant-modal-close:focus-visible .slf-detail-modal-close {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+/* index.css gives every antd table `width: max-content` + `table-layout: auto`,
+   which let the Submission Details tables grow wider than the modal and scroll.
+   Detail tables FIT their container instead: exactly its width, columns sized
+   by their (percentage) widths, long values wrapping below. Specificity 0,4,0
+   beats the global 0,3,0 rule, as .slf-history-table does. */
+.ant-table-wrapper.slf-detail-fit .ant-table table {
+  table-layout: fixed !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+.slf-detail-fit .ant-table-thead > tr > th,
+.slf-detail-fit .ant-table-tbody > tr > td {
+  padding: 6px 8px !important;
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  line-height: 1.35;
+}
+.slf-detail-fit .ant-table-thead > tr > th {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.slf-detail-fit .ant-tag {
+  font-size: 11px;
+  line-height: 18px;
+  white-space: normal;
+  margin-inline-end: 0;
+}
+.slf-detail-fit .ant-typography {
+  font-size: inherit !important;
+}

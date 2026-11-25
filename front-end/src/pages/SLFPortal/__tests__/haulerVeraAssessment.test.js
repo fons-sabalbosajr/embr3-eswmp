@@ -22,6 +22,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { portalSource } from "./portalSource.js";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
@@ -180,7 +181,7 @@ test("clients with no province are counted, since nothing else blocks them", () 
 });
 
 // ── The workflow rules, read off the portal ─────────────────────────────────
-const portal = fs.readFileSync(path.join(here, "..", "index.jsx"), "utf8");
+const portal = portalSource();
 const modals = fs.readFileSync(path.join(here, "..", "SLFPortalModals.jsx"), "utf8");
 
 test("VERA runs only on a CLEAN hauler preview", () => {

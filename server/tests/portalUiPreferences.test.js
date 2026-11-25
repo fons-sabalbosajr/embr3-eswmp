@@ -23,6 +23,7 @@
  * Run: npm test  (from server/)
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const express = require("express");
@@ -281,10 +282,7 @@ test("an unreadable preference reports 'nothing dismissed' rather than failing",
 
 // ── The browser half ────────────────────────────────────────────────────────
 const portalSource = () =>
-  fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  portalJsxSource();
 
 test("every exit from the tour records the dismissal the same way", () => {
   const source = portalSource();

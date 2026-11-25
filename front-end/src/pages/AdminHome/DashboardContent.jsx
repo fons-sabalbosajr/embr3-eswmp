@@ -121,6 +121,7 @@ import {
   getSlfCapacityColor,
 } from "../../utils/cellVisuals";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
+import { cellPercent, facilityCellCapacityRows } from "../../utils/cellCapacity";
 import secureStorage from "../../utils/secureStorage";
 import { getSocket } from "../../utils/socket";
 import {
@@ -1511,19 +1512,25 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         metricLabel: "cells",
                         filter: (r) => (r.numberOfCell || 0) > 0,
                         flatten: (r) => {
-                          const caps = r.cellCapacities || [];
-                          const fills = r.cellFillValues || [];
-                          const maxCap = Math.max(...caps.filter(c => c != null), 1);
-                          return Array.from({ length: r.numberOfCell || 0 }, (_, i) => ({
-                            key: `${r.lgu}_${i}`,
+                          // THE cell rule (utils/cellCapacity.js), in the facility's
+                          // unit: this table compared the raw fill and capacity
+                          // (possibly in different units) and labelled every
+                          // capacity "m³".
+                          const unit = resolveFacilityUnit(r);
+                          const rows = facilityCellCapacityRows(r, { unit }).slice(0, r.numberOfCell || 0);
+                          const maxCap = Math.max(...rows.map((row) => row.capacity), 1);
+                          return rows.map((row) => ({
+                            key: `${r.lgu}_${row.index}`,
                             slfName: r.lgu,
                             province: r.province,
-                            cellNo: i + 1,
-                            type: (r.cellTypes || [])[i] || "—",
-                            capacity: caps[i] ?? null,
-                            fill: fills[i] ?? null,
+                            cellNo: row.index + 1,
+                            type: (r.cellTypes || [])[row.index] || "—",
+                            capacity: row.hasCapacity ? row.capacity : null,
+                            fill: row.hasFill ? row.used : null,
+                            pct: row.pct,
+                            unit,
                             maxCap,
-                            status: (r.cellStatuses || [])[i] || "—",
+                            status: (r.cellStatuses || [])[row.index] || "—",
                           }));
                         },
                         columns: [
@@ -1539,13 +1546,13 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             // Gauge = cell fill vs this cell's capacity (falls back to
                             // relative-to-largest when no fill value is recorded).
                             const pct = row.fill != null
-                              ? computeGaugePercent({ usedCapacity: row.fill, totalCapacity: row.capacity })
+                              ? row.pct
                               : computeGaugePercent({ usedCapacity: row.capacity, totalCapacity: row.maxCap });
                             const gcolor = (pct ?? 0) > 75 ? "#ff4d4f" : (pct ?? 0) > 40 ? "#fa8c16" : "#52c41a";
                             return (
                               <div>
                                 <GaugeMeter percent={pct} size={72} thickness={7} color={gcolor} noDataText="—" />
-                                <Text type="secondary" style={{ fontSize: 10 }}>{Number(row.capacity).toLocaleString()} m³</Text>
+                                <Text type="secondary" style={{ fontSize: 10 }}>{Number(row.capacity).toLocaleString(undefined, { maximumFractionDigits: 2 })} {row.unit}</Text>
                               </div>
                             );
                           }},
@@ -1878,7 +1885,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             postOverrideSubmitted: live
                               ? toFacilityUnit(live.postOverrideSubmitted, live.unit)
                               : null,
-                            percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
+                            // THE cell % (utils/cellCapacity.js) — what the portal shows.
+                            percent: cellPercent(fill, cap),
                           });
                         }
                         // Volume contributions that make up the facility gauge, one
@@ -1945,7 +1953,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           // what the SLF holds but belongs to no cell, so it is
                           // reported rather than folded into one.
                           unplaced: toFacilityUnit(rollup?.totals?.unplaced || 0, rollup?.unit || facilityUnit) || 0,
-                          percent: computeGaugePercent({ usedCapacity: totalFill, totalCapacity: totalCap }),
+                          percent: cellPercent(totalFill, totalCap),
                         };
                       })
                       .sort((a, b) => (b.opCells - a.opCells) || (b.numberOfCell - a.numberOfCell));

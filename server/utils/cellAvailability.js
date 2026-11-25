@@ -5,7 +5,7 @@
 // nonexistent cell. Kept intentionally small and dependency-free.
 
 // Single source of truth for the m³ ↔ tons factor (server/utils/volumeUnits.js).
-const { TON_PER_M3 } = require("./volumeUnits");
+const { TON_PER_M3, resolveCellUnit } = require("./volumeUnits");
 
 function normUnit(u) {
   return String(u || "m³").replace("m3", "m³").trim().toLowerCase();
@@ -94,8 +94,12 @@ function evaluateFacilityCellAcceptance(facility, cellIndex, proposedVolume = nu
       utilization: null,
     };
   }
-  const capUnit = facility?.cellCapacityUnits?.[idx] || facility?.volumeCapacityUnit || "m³";
-  const fillUnit = facility?.cellFillUnits?.[idx] || facility?.wasteReceivedUnit || capUnit;
+  // The same unit rule every screen uses (utils/cellCapacity.js). This used to
+  // fall back to m³ for a cell with no unit of its own while the dashboards and
+  // the schema fell back to tons — so the gate could judge a load against twice
+  // the capacity the operator was shown.
+  const capUnit = resolveCellUnit(facility, idx, "capacity");
+  const fillUnit = resolveCellUnit(facility, idx, "fill");
   const cap = toBaseM3(facility?.cellCapacities?.[idx], capUnit);
   // Committed space = Waste in Cell (baseline + approved) + volume still pending
   // review. Pending left cellFillValues in occupancy calc v6 but must keep its

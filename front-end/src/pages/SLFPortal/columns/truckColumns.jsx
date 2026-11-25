@@ -10,9 +10,25 @@ export function makeTruckColumns({
   slfUnit,
   openTruckModal,
   removeTruck,
+  // A backlog's entries each carry their own disposal date — show it. An
+  // ordinary entry's trucks all share the form's Date of Disposal.
+  showDisposalDate = false,
 }) {
   return [
       { title: "#", key: "index", width: 40, render: (_, __, i) => i + 1 },
+      ...(showDisposalDate
+        ? [
+            {
+              title: "Disposal Date",
+              dataIndex: "disposalDate",
+              key: "disposalDate",
+              width: 120,
+              sorter: (a, b) => String(a.disposalDate || "").localeCompare(String(b.disposalDate || "")),
+              render: (v) =>
+                v ? new Date(`${v}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "Form date",
+            },
+          ]
+        : []),
       {
         title: "Ticket No.",
         dataIndex: "disposalTicketNo",

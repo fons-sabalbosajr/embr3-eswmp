@@ -36,3 +36,26 @@ export function isHazardousWasteType(value) {
   const normalized = normalizeWasteType(value);
   return normalized === HAZARDOUS || normalized === TREATED_HAZARDOUS;
 }
+
+// ── Hazardous waste is RED, everywhere (admin and portal) ──
+//
+// One palette so a hazardous load reads the same on every screen: tags use
+// antd's "red", charts and gauges these hex values. Treated hazardous is a
+// lighter shade of the same red — still hazardous, still red. Residual keeps the
+// colour each screen already uses (pass it as `residualTag`).
+export const HAZARDOUS_RED = "#cf1322";
+export const TREATED_HAZARDOUS_RED = "#f5222d";
+export const HAZARDOUS_TAG = "red";
+
+/** antd Tag colour for a waste type: red for (treated) hazardous. */
+export function wasteTypeTagColor(value, residualTag = "green") {
+  return isHazardousWasteType(value) ? HAZARDOUS_TAG : residualTag;
+}
+
+/** Hex colour for charts / gauges: red shades for hazardous, `residualColor` otherwise. */
+export function wasteTypeColor(value, residualColor = "#52c41a") {
+  const normalized = normalizeWasteType(value);
+  if (normalized === HAZARDOUS) return HAZARDOUS_RED;
+  if (normalized === TREATED_HAZARDOUS) return TREATED_HAZARDOUS_RED;
+  return residualColor;
+}

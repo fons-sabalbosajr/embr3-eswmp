@@ -34,7 +34,18 @@ const ACTIVE_STATUSES = ["draft", "scheduled"];
 // payload is fetched one record at a time from GET /:id when a row is opened.
 const SUMMARY_FIELDS =
   "portalUserEmail slfName slfGenerator type status scheduledAt submittedAt " +
-  "resultSubmissionId failureReason retryCount createdAt updatedAt resubmitOf resubmitOfIdNo";
+  "resultSubmissionId failureReason retryCount createdAt updatedAt resubmitOf resubmitOfIdNo autosavedAt";
+
+// Data Entry autosave sends `autosave: true` with the same body as Save as
+// Draft. It stamps `autosavedAt` (a manual save clears it) and skips the
+// per-save app-log line — an operator typing would otherwise write one every
+// few seconds. Creating a draft is still logged, autosaved or not.
+function isAutosave(body) {
+  return body?.autosave === true;
+}
+function stampAutosave(record, body) {
+  record.autosavedAt = isAutosave(body) ? new Date() : undefined;
+}
 
 // Hard ceiling on one page of queue records. Generous enough that no real
 // operator paginates, low enough that a runaway account cannot ask the database
@@ -334,13 +345,16 @@ router.post("/", async (req, res) => {
         existing.failureReason = "";
         existing.resubmitOfIdNo = resubmitTarget.resubmitOfIdNo;
         existing.updatedBy = email;
+        stampAutosave(existing, kind === "draft" ? req.body : null);
         await existing.save();
-        writeLog("info", "portal.queue.resubmit_updated", {
-          message: `Portal ${kind} correction of ${resubmitTarget.resubmitOfIdNo || "a reverted entry"} updated`,
-          user: email,
-          ip: req.ip,
-          meta: { queueId: existing._id, resubmitOf: String(resubmitTarget.resubmitOf) },
-        });
+        if (!isAutosave(req.body)) {
+          writeLog("info", "portal.queue.resubmit_updated", {
+            message: `Portal ${kind} correction of ${resubmitTarget.resubmitOfIdNo || "a reverted entry"} updated`,
+            user: email,
+            ip: req.ip,
+            meta: { queueId: existing._id, resubmitOf: String(resubmitTarget.resubmitOf) },
+          });
+        }
         return res.status(200).json({
           message: kind === "scheduled" ? "Resubmission scheduled" : "Draft updated",
           data: existing,
@@ -386,14 +400,17 @@ router.post("/", async (req, res) => {
         }
         existing.scheduledAt = undefined;
         existing.updatedBy = email;
+        stampAutosave(existing, req.body);
         await existing.save();
 
-        writeLog("info", "portal.queue.draft_updated", {
-          message: `Portal draft updated in place (${existing.slfName || "SLF"})`,
-          user: email,
-          ip: req.ip,
-          meta: { queueId: existing._id, identity },
-        });
+        if (!isAutosave(req.body)) {
+          writeLog("info", "portal.queue.draft_updated", {
+            message: `Portal draft updated in place (${existing.slfName || "SLF"})`,
+            user: email,
+            ip: req.ip,
+            meta: { queueId: existing._id, identity },
+          });
+        }
 
         return res.status(200).json({
           message: "Draft updated",
@@ -414,16 +431,22 @@ router.post("/", async (req, res) => {
       status: kind,
       payload: payload && typeof payload === "object" ? payload : {},
       scheduledAt: kind === "scheduled" ? sanitizeScheduledAt(scheduledAt) : undefined,
+      autosavedAt: kind === "draft" && isAutosave(req.body) ? new Date() : undefined,
       ...(resubmitTarget || {}),
       createdBy: email,
       updatedBy: email,
     });
 
     writeLog("info", kind === "scheduled" ? "portal.queue.scheduled" : "portal.queue.draft", {
-      message: `Portal ${kind} saved (${record.slfName || "SLF"})`,
+      message: `Portal ${kind} ${record.autosavedAt ? "autosaved" : "saved"} (${record.slfName || "SLF"})`,
       user: email,
       ip: req.ip,
-      meta: { queueId: record._id, type: kind, scheduledAt: record.scheduledAt },
+      meta: {
+        queueId: record._id,
+        type: kind,
+        scheduledAt: record.scheduledAt,
+        autosave: Boolean(record.autosavedAt),
+      },
     });
 
     res.status(201).json({ message: kind === "scheduled" ? "Submission scheduled" : "Draft saved", data: record });
@@ -482,14 +505,17 @@ router.put("/:id", async (req, res) => {
       record.scheduledAt = undefined;
     }
     record.updatedBy = email || record.updatedBy;
+    stampAutosave(record, record.type === "draft" ? req.body : null);
     await record.save();
 
-    writeLog("info", "portal.queue.update", {
-      message: `Portal ${record.type} updated (${record.slfName || "SLF"})`,
-      user: email || record.portalUserEmail,
-      ip: req.ip,
-      meta: { queueId: record._id, type: record.type },
-    });
+    if (!isAutosave(req.body)) {
+      writeLog("info", "portal.queue.update", {
+        message: `Portal ${record.type} updated (${record.slfName || "SLF"})`,
+        user: email || record.portalUserEmail,
+        ip: req.ip,
+        meta: { queueId: record._id, type: record.type },
+      });
+    }
 
     res.json({ message: "Saved", data: record });
   } catch (error) {
@@ -647,3 +673,5 @@ module.exports = router;
 module.exports.draftIdentity = draftIdentity;
 module.exports.summarizePayload = summarizePayload;
 module.exports.isTruthyFlag = isTruthyFlag;
+module.exports.isAutosave = isAutosave;
+module.exports.stampAutosave = stampAutosave;

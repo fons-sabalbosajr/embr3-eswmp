@@ -34,11 +34,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { portalSource } from "./portalSource.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = fs.readFileSync(path.join(here, "..", "index.jsx"), "utf8");
+const src = portalSource();
 
 /** Source of one function declaration/arrow, bounded at the next top-level one. */
 const block = (needle, endNeedle) => {

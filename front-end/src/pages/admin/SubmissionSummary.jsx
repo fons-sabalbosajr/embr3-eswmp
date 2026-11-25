@@ -50,7 +50,10 @@ import CellInfraOverview from "./CellInfraOverview";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import excludeDummy from "../../utils/excludeDummy";
-import { convertVolume } from "../../utils/volumeUnits";
+import { convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
+import { cellPercent } from "../../utils/cellCapacity";
+import { wasteTypeTagColor } from "../../utils/wasteCategories";
+import WeighedVolumeNote from "../../components/WeighedVolumeNote";
 import {
   buildSubmissionWasteEntries,
   formatWasteEntryTotals,
@@ -218,9 +221,7 @@ function buildCellStatusRows(summary, occupancy = null) {
   const rollupByIndex = new Map(rollupCells.map((cell) => [cell.index, cell]));
   const statuses = facility?.cellStatuses || [];
   const capacities = facility?.cellCapacities || [];
-  const capacityUnits = facility?.cellCapacityUnits || [];
   const fillValues = facility?.cellFillValues || [];
-  const fillUnits = facility?.cellFillUnits || [];
   const baselineFills = facility?.cellFillBaselineValues || [];
   const submittedFills = facility?.cellFillSubmittedValues || [];
   const cellNames = facility?.cellNames || [];
@@ -232,16 +233,21 @@ function buildCellStatusRows(summary, occupancy = null) {
     // into the capacity's unit before comparing them is what stops a facility
     // that declares tons from reporting a utilisation out by the conversion
     // factor.
-    const unit = normalizeUnit(capacityUnits[index] || fillUnits[index] || rollup?.unit || "m³");
+    //
+    // THE cell rule (utils/cellCapacity.js): the cell's capacity unit, the fill
+    // converted into it, the same whole-number % the portal shows. The capacity
+    // used to come from the facility record OR the rollup (which is in the
+    // rollup's unit) without converting the latter.
+    const unit = resolveCellUnit(facility, index, "capacity");
     const toUnit = (value, from) => {
       const converted = convertVolume(Number(value || 0), from || unit, unit);
       return Number.isFinite(converted) ? converted : 0;
     };
-    const capacity = Number(capacities[index] || rollup?.capacity || 0);
+    const capacity = Number(capacities[index] || 0) || toUnit(rollup?.capacity, rollup?.unit);
     const used = rollup
       ? toUnit(rollup.used, rollup.unit)
-      : toUnit(fillValues[index], fillUnits[index]);
-    const pct = capacity > 0 ? Math.min(Math.round((used / capacity) * 100), 100) : null;
+      : toUnit(fillValues[index], resolveCellUnit(facility, index, "fill"));
+    const pct = cellPercent(used, capacity);
     return {
       key: index,
       cell: rollup?.label || String(cellNames[index] || "").trim() || `Cell ${index + 1}`,
@@ -251,10 +257,10 @@ function buildCellStatusRows(summary, occupancy = null) {
       // came from instead of presenting one opaque number.
       baselineUsed: rollup
         ? toUnit(rollup.baselineUsed, rollup.unit)
-        : toUnit(baselineFills[index], fillUnits[index]),
+        : toUnit(baselineFills[index], resolveCellUnit(facility, index, "fill")),
       submittedUsed: rollup
         ? toUnit(rollup.submittedUsed, rollup.unit)
-        : toUnit(submittedFills[index], fillUnits[index]),
+        : toUnit(submittedFills[index], resolveCellUnit(facility, index, "fill")),
       // An admin-declared cell: `used` is their base plus everything recorded
       // since, and `derivedTotal` is what the submissions alone would say.
       overridden: rollup ? !!rollup.overridden : facility?.cellFillOverridden?.[index] === true,
@@ -1903,7 +1909,10 @@ export default function SubmissionSummary({ isDark }) {
         // #1: sit the modal higher with less top gap while keeping the header/close
         // on-screen and the body internally scrollable on smaller viewports.
         style={{ top: 20 }}
-        styles={{ body: { maxHeight: "calc(100vh - 150px)", overflowY: "auto" } }}
+        // Vertical scroll only: the content is laid out to FIT the modal width
+        // (the right-hand tables use .slf-detail-fit), so there is no sideways
+        // scrollbar.
+        styles={{ body: { maxHeight: "calc(100vh - 150px)", overflowY: "auto", overflowX: "hidden" } }}
         destroyOnHidden
       >
         {calendarRecord && (
@@ -1977,11 +1986,17 @@ export default function SubmissionSummary({ isDark }) {
                   dataSource={selectedCellRows}
                   rowKey="key"
                   style={{ marginBottom: 12 }}
+                  // Fits its half of the modal: fixed layout, percentage widths,
+                  // long values wrap (.slf-detail-fit in index.css) — the global
+                  // max-content table width made it push the modal sideways.
+                  className="slf-detail-fit"
+                  tableLayout="fixed"
                   columns={[
-                    { title: "Cell", dataIndex: "cell", width: 72, render: (value, row) => <Text strong={row.isActive}>{value}</Text> },
-                    { title: "Status", dataIndex: "status", width: 95, render: (value, row) => <Tag color={row.isActive ? "green" : "default"}>{value || "—"}</Tag> },
+                    { title: "Cell", dataIndex: "cell", width: "18%", render: (value, row) => <Text strong={row.isActive}>{value}</Text> },
+                    { title: "Status", dataIndex: "status", width: "20%", render: (value, row) => <Tag color={row.isActive ? "green" : "default"}>{value || "—"}</Tag> },
                     {
                       title: "Fill",
+                      width: "32%",
                       // Where the figure came from, not just the figure. An
                       // admin-declared cell is labelled as such with its base and
                       // what has been recorded since, because the derived
@@ -2018,11 +2033,11 @@ export default function SubmissionSummary({ isDark }) {
                     },
                     {
                       title: "Remaining",
-                      width: 150,
+                      width: "30%",
                       // #4: compact gauge beside the remaining figure showing the
                       // active cell's utilization at a glance.
                       render: (_, row) => (
-                        <Space size={8} align="center">
+                        <Space size={8} align="center" wrap>
                           <span>
                             {row.remaining == null
                               ? "—"
@@ -2051,13 +2066,15 @@ export default function SubmissionSummary({ isDark }) {
                   loading={calendarLoading}
                   rowKey={(record) => record._id}
                   locale={{ emptyText: "No submissions on this date" }}
+                  className="slf-detail-fit"
+                  tableLayout="fixed"
                   columns={[
-                    { title: "ID", dataIndex: "idNo", width: 90, render: (value, record) => <Text strong>{value || record.submissionId || "No ID"}</Text> },
-                    { title: "Generator",  width: 120, dataIndex: "lguCompanyName", ellipsis: true, render: (value, record) => value || record.companyName || record.generatorName || "Not encoded" },
-                    { title: "Trucks", width: 70, align: "center", render: (_, record) => record.trucks?.length || 0 },
+                    { title: "ID", dataIndex: "idNo", width: "24%", render: (value, record) => <Text strong>{value || record.submissionId || "No ID"}</Text> },
+                    { title: "Generator", width: "28%", dataIndex: "lguCompanyName", render: (value, record) => value || record.companyName || record.generatorName || "Not encoded" },
+                    { title: "Trucks", width: "12%", align: "center", render: (_, record) => record.trucks?.length || 0 },
                     {
                       title: "Volume",
-                      width: 80,
+                      width: "18%",
                       render: (_, record) => {
                         const dayTotal = (record.trucks || []).reduce((acc, truck) => {
                           const unit = normalizeUnit(truck.actualVolumeUnit || record.baselineUnit || "m³");
@@ -2068,7 +2085,7 @@ export default function SubmissionSummary({ isDark }) {
                         return formatVolume(dayTotal.m3, dayTotal.tons, record.baselineUnit || calendarRecord.baselineUnit || displayUnit);
                       },
                     },
-                    { title: "Status", dataIndex: "status", width: 90, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "pending"}</Tag> },
+                    { title: "Status", dataIndex: "status", width: "18%", render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "pending"}</Tag> },
                   ]}
                 />
               </Card>
@@ -2134,7 +2151,9 @@ export default function SubmissionSummary({ isDark }) {
         open={dailyOpen}
         onCancel={() => setDailyOpen(false)}
         footer={<Button onClick={() => setDailyOpen(false)}>Close</Button>}
-        width="min(860px, 96vw)"
+        // Wide enough for the Waste Breakdown table's eight columns to read
+        // comfortably (it was squeezed into 860px and scrolled sideways).
+        width="min(1280px, 96vw)"
         centered
         // Scroll long daily details inside the modal; title + Close stay visible.
         styles={{ body: { maxHeight: "70vh", overflowY: "auto", overflowX: "hidden" } }}
@@ -2215,20 +2234,23 @@ export default function SubmissionSummary({ isDark }) {
                       rowKey="key"
                       dataSource={wasteEntries}
                       pagination={wasteEntries.length > 8 ? { pageSize: 8, size: "small" } : false}
-                      scroll={{ x: 760 }}
+                      // Fits the modal: fixed layout + percentage widths, long
+                      // values wrap (.slf-detail-fit) — no sideways scroll.
+                      className="slf-detail-fit"
+                      tableLayout="fixed"
                       locale={{ emptyText: "No waste entries recorded for this submission" }}
                       columns={[
                         {
                           title: "Date",
                           dataIndex: "date",
-                          width: 110,
+                          width: "10%",
                           render: (value) => (value ? dayjs(value).format("MMM D, YYYY") : "—"),
                         },
-                        { title: "Hauler", dataIndex: "hauler", width: 150, render: (v) => v || "—" },
+                        { title: "Hauler", dataIndex: "hauler", width: "15%", render: (v) => v || "—" },
                         {
                           title: "Client",
                           dataIndex: "clients",
-                          width: 190,
+                          width: "20%",
                           render: (clients) => {
                             const list = Array.isArray(clients) ? clients : [];
                             if (!list.length) return <Text type="secondary">No client recorded</Text>;
@@ -2247,10 +2269,10 @@ export default function SubmissionSummary({ isDark }) {
                         {
                           title: "Waste Type",
                           dataIndex: "wasteType",
-                          width: 150,
+                          width: "14%",
                           render: (v) =>
                             v ? (
-                              <Tag color={/hazard/i.test(v) ? "volcano" : "blue"}>{v}</Tag>
+                              <Tag color={wasteTypeTagColor(v, "blue")}>{v}</Tag>
                             ) : (
                               "—"
                             ),
@@ -2258,19 +2280,26 @@ export default function SubmissionSummary({ isDark }) {
                         {
                           title: "Volume",
                           dataIndex: "volume",
-                          width: 100,
+                          width: "10%",
                           align: "right",
-                          render: (v) =>
-                            v == null ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: 2 }),
+                          // A load weighed in the other unit shows its weight as
+                          // entered under the converted volume.
+                          render: (v, e) =>
+                            v == null ? "—" : (
+                              <div>
+                                {v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                <div><WeighedVolumeNote entry={e} /></div>
+                              </div>
+                            ),
                         },
                         // The unit is its OWN column so no exported/displayed volume
                         // can ever be read without knowing what it is measured in.
-                        { title: "Unit", dataIndex: "unit", width: 70, render: (v) => v || "—" },
-                        { title: "Cell", dataIndex: "cell", width: 110, render: (v) => v || "Unplaced" },
+                        { title: "Unit", dataIndex: "unit", width: "7%", render: (v) => v || "—" },
+                        { title: "Cell", dataIndex: "cell", width: "12%", render: (v) => v || "Unplaced" },
                         {
                           title: "Status",
                           dataIndex: "status",
-                          width: 120,
+                          width: "12%",
                           render: (v) => (
                             <Tag color={v === "acknowledged" ? "green" : v === "rejected" ? "red" : /revert/.test(v || "") ? "orange" : "gold"}>
                               {v || "pending"}

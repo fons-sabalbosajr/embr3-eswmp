@@ -524,6 +524,55 @@ async function getDriveFileMeta(fileId) {
   return null;
 }
 
+/**
+ * Download a Drive file into memory, for bundling (e.g. a portal user's
+ * My Documents .zip).
+ *
+ * `requirePublic` (default true) only returns files shared "anyone with the
+ * link" — the way every portal upload is stored. The service account can read
+ * PRIVATE files too (restricted admin media), and the URLs this is used for come
+ * from records a portal user wrote, so without this check a crafted Drive link
+ * would let them download a file they could never open themselves.
+ *
+ * @returns {Promise<{ buffer: Buffer, name: string, mimeType: string }>}
+ * @throws  Error with `code` = "NOT_PUBLIC" | "TOO_LARGE" | Drive's error.
+ */
+async function downloadDriveFile(fileId, { maxBytes = 50 * 1024 * 1024, requirePublic = true } = {}) {
+  const clients = getDriveClients();
+  let lastError;
+  for (const client of clients) {
+    try {
+      const meta = await client.drive.files.get({
+        fileId,
+        fields: "name,mimeType,size,permissions(type,role)",
+        supportsAllDrives: true,
+      });
+      const data = meta.data || {};
+      if (requirePublic) {
+        const isPublic = (data.permissions || []).some((p) => p?.type === "anyone");
+        if (!isPublic) throw Object.assign(new Error("File is not shared publicly."), { code: "NOT_PUBLIC" });
+      }
+      if (Number(data.size) > maxBytes) {
+        throw Object.assign(new Error("File is too large to bundle."), { code: "TOO_LARGE" });
+      }
+      const response = await client.drive.files.get(
+        { fileId, alt: "media", supportsAllDrives: true },
+        { responseType: "arraybuffer" },
+      );
+      const buffer = Buffer.from(response.data);
+      if (buffer.length > maxBytes) {
+        throw Object.assign(new Error("File is too large to bundle."), { code: "TOO_LARGE" });
+      }
+      return { buffer, name: data.name || "", mimeType: data.mimeType || "" };
+    } catch (error) {
+      lastError = error;
+      if (error?.code === "NOT_PUBLIC" || error?.code === "TOO_LARGE") throw error;
+      if (!shouldTryNextClient(error)) throw error;
+    }
+  }
+  throw lastError || new Error("Unable to download Drive file.");
+}
+
 async function validateDriveFile(urlOrId) {
   const fileId = extractDriveFileId(urlOrId);
   if (!fileId) {
@@ -691,6 +740,7 @@ module.exports = {
   uploadFileToDrive,
   uploadFilePathToDrive,
   streamDriveFile,
+  downloadDriveFile,
   verifyDriveAccess,
   getDriveConfigStatus,
   extractDriveFileId,

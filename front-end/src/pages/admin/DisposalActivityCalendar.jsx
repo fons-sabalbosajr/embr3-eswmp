@@ -37,6 +37,7 @@ import api from "../../api";
 import { classifySlfStatus, presentationFor } from "../../utils/submissionStatus";
 import { getSocket } from "../../utils/socket";
 import { normalizeUnit } from "../../utils/volumeUnits";
+import { wasteTypeTagColor } from "../../utils/wasteCategories";
 
 const { Text } = Typography;
 
@@ -831,7 +832,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       ellipsis: { showTitle: true },
       render: (v) =>
         v && v !== "—" ? (
-          <Tag color={/hazard/i.test(v) ? "volcano" : "green"} style={{ fontSize: 11 }}>
+          <Tag color={wasteTypeTagColor(v, "green")} style={{ fontSize: 11 }}>
             {v}
           </Tag>
         ) : (

@@ -325,35 +325,115 @@ export const differsOnlyByQualifier = (a, b) => {
 // what an abbreviation stands for, and it is not worth a misattributed trip.
 export const AUTO_ALIGN_MIN_SCORE = 0.95;
 
+// ── Spelling slips: "Villa Muesta" for "Villa Muestra" ──
+//
+// Edit distance (optimal string alignment: insert, delete, substitute, swap two
+// neighbours) between the two normalized names. Formatting never reaches here —
+// normalizeComparableText has already made "Inc." and "Inc" equal — so what is
+// left is a real difference in letters, and it is only ever a SUGGESTION: the
+// score stays under AUTO_ALIGN_MIN_SCORE, so the operator confirms every one.
+const editDistance = (a, b, max) => {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prevPrev = null;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const row = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost);
+      if (prevPrev && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, prevPrev[j - 2] + 1);
+      }
+      row.push(value);
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > max) return max + 1;
+    prevPrev = prev;
+    prev = row;
+  }
+  return prev[b.length];
+};
+
+// How many letters may differ for a name of this length: none for very short
+// names (every letter of "ABC" matters), up to three for long ones
+// ("Northwest Sample Haulers" / "Northwind Sample Haulers" is three). These are
+// suggestions the operator confirms, so a little generosity costs one glance;
+// numbers and codes are excluded above whatever the distance.
+const typoAllowance = (length) => (length <= 4 ? 0 : length <= 9 ? 1 : length <= 19 ? 2 : 3);
+
+/** A spelling-slip candidate for `target`, or null. Numbers and codes never qualify. */
+const spellingNearMiss = (target, candidate, name, kind = "client") => {
+  const allowance = typoAllowance(Math.max(target.length, candidate.length));
+  if (!allowance) return null;
+  // "Barangay 1" vs "Barangay 2" is one letter apart and two different places.
+  if (differingTokens(target, candidate).some((token) => IDENTIFIER_TOKEN.test(token))) return null;
+  const distance = editDistance(target, candidate, allowance);
+  if (distance > allowance) return null;
+  return {
+    name,
+    score: distance === 1 ? 0.8 : 0.7,
+    reason:
+      distance === 1
+        ? `Differs by one letter — check the spelling of the ${kind}.`
+        : `Differs by a few letters or a word — check that it is the same ${kind}.`,
+  };
+};
+
+/** Containment, abbreviation or spelling near miss of `target` against one name. */
+const nameNearMiss = (target, name, kind) => {
+  const candidate = normalizeComparableText(name);
+  if (!candidate || candidate === target) return null;
+
+  // Direction matters: the SHORTER name is the one that has to be contained.
+  const [shorter, longer] = target.length <= candidate.length ? [target, candidate] : [candidate, target];
+  if (hasEnoughSubstance(shorter, longer)) {
+    if (containsWholeWords(longer, shorter)) {
+      return {
+        name,
+        score: 0.98,
+        reason: `One name is the other with an extra qualifier — almost certainly the same ${kind}.`,
+      };
+    }
+    if (tokenSubset(shorter, longer)) {
+      return {
+        name,
+        score: 0.85,
+        reason: `Every word of one name appears in the other — likely the same ${kind}, abbreviated differently.`,
+      };
+    }
+  }
+  return spellingNearMiss(target, candidate, name, kind);
+};
+
 export const findClientNearMisses = (hauler, clientValue, limit = 4) => {
   const target = normalizeComparableText(clientValue);
   if (!target || !hauler || hauler.ambiguous) return [];
   return haulerClientPool(hauler)
-    .map((client) => {
-      const name = clientDisplayName(client);
-      const candidate = normalizeComparableText(name);
-      if (!candidate || candidate === target) return null;
+    .map((client) => nameNearMiss(target, clientDisplayName(client), "client"))
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+};
 
-      // Direction matters: the SHORTER name is the one that has to be contained.
-      const [shorter, longer] = target.length <= candidate.length ? [target, candidate] : [candidate, target];
-      if (!hasEnoughSubstance(shorter, longer)) return null;
-
-      if (containsWholeWords(longer, shorter)) {
-        return {
-          name,
-          score: 0.98,
-          reason: "One name is the other with an extra qualifier — almost certainly the same client.",
-        };
-      }
-      if (tokenSubset(shorter, longer)) {
-        return {
-          name,
-          score: 0.85,
-          reason: "Every word of one name appears in the other — likely the same client, abbreviated differently.",
-        };
-      }
-      return null;
+/**
+ * Accredited haulers whose name looks like `haulerValue` — for the "Did you
+ * mean …?" in an unresolved row. Suggestions only; a hauler is never swapped
+ * on the operator's behalf.
+ */
+export const findHaulerNearMisses = (haulers, haulerValue, limit = 3) => {
+  const target = normalizeComparableText(haulerValue);
+  if (!target) return [];
+  const seen = new Set();
+  return (haulers || [])
+    .map((hauler) => haulerName(hauler))
+    .filter((name) => {
+      const key = normalizeComparableText(name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
     })
+    .map((name) => nameNearMiss(target, name, "hauler"))
     .filter(Boolean)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
@@ -524,6 +604,21 @@ export const resolveDisposalIdentity = (row = {}, haulers = []) => {
           : " — this hauler has no clients on the baseline yet."),
     };
   }
+  // A hauler spelled slightly differently from an accredited one is most likely
+  // that hauler — say which, so the operator can correct the cell. Never swapped
+  // automatically: whose waste a trip is, is the operator's call.
+  const haulerSuggestions = findHaulerNearMisses(haulers, rawHauler);
+  if (haulerSuggestions.length) {
+    return {
+      status: "unresolved",
+      client: rawClient,
+      haulerSuggestions,
+      reason:
+        `Hauler "${rawHauler}" is not accredited under this SLF. ` +
+        `Did you mean "${haulerSuggestions[0].name}"?` +
+        (haulerSuggestions.length > 1 ? ` (Also close: ${haulerSuggestions.slice(1).map((s) => `"${s.name}"`).join(", ")}.)` : ""),
+    };
+  }
   return {
     status: "unresolved",
     reason: `Neither "${rawHauler}" nor "${rawClient}" matches an accredited hauler or a client of one under this SLF.`,
@@ -599,9 +694,12 @@ export const alignDisposalRow = (row = {}, haulers = []) => {
       hauler: result.hauler || "",
       client: result.client || cleanUploadText(row.client),
       suggestions: [],
+      haulerSuggestions: result.haulerSuggestions || [],
     },
     _alignmentErrors: [
-      `${rowLabel} — ${result.reason} Add the missing record under Baseline / Accredited Haulers, then re-upload.`,
+      result.haulerSuggestions?.length
+        ? `${rowLabel} — ${result.reason} If so, correct the Hauler cell in the preview; if it is a different hauler, add it under Baseline / Accredited Haulers.`
+        : `${rowLabel} — ${result.reason} Add the missing record under Baseline / Accredited Haulers, then re-upload.`,
     ],
   };
 };
@@ -675,6 +773,8 @@ export const summarizeAlignment = (rows = []) => {
       rows: 0,
       rowKeys: [],
       reason: alignment.note || "",
+      // "Did you mean" accredited haulers for a hauler the baseline lacks.
+      haulerSuggestions: alignment.haulerSuggestions || [],
     };
     entry.rows += 1;
     if (row.key != null) entry.rowKeys.push(row.key);
@@ -698,6 +798,7 @@ export default {
   alignDisposalRow,
   summarizeAlignment,
   findClientNearMisses,
+  findHaulerNearMisses,
   differsOnlyByQualifier,
   AUTO_ALIGN_MIN_SCORE,
   isTripRow,

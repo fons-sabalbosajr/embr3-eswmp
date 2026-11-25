@@ -9,6 +9,7 @@
  * Run: npm test  (from server/)
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -161,10 +162,7 @@ test("a Client cell naming several clients is split, but only as a FALLBACK", ()
 });
 
 test("the portal binds EVERY matched client to the uploaded row", () => {
-  const portal = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const portal = portalJsxSource();
   assert.match(portal, /selectedClients: d\._matchedClients \|\| \[\],/);
   assert.doesNotMatch(
     portal,
@@ -238,10 +236,7 @@ test("a scheduled submission that gives up TELLS the operator", () => {
 });
 
 test("the Drafts & Scheduled MENU carries a failed-count badge", () => {
-  const portal = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const portal = portalJsxSource();
   // Counted in the parent, not in the panel: the panel is unmounted on every
   // other menu, which is exactly where the badge has to be right.
   // …asked for as a COUNT. The badge needs one number; fetching the failed

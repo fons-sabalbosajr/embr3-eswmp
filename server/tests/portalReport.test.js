@@ -303,15 +303,27 @@ test("non-existent cells are left out and remaining space is derived", () => {
   const r = buildPortalReport([ACK], { facility: FACILITY });
   assert.equal(r.cells.length, 2, "the 'Not Existed' cell is not a cell");
   // Cells are reported in TONS, like every other figure in this report. The
-  // fixture declares no cell unit, so its capacities are m³ and are halved on
-  // the way in (TON_PER_M3 = 0.5) — the same normalisation `toTons` applies to
-  // the submission volumes above. Before this, the cells table was the one part
-  // of the document still in the facility's own unit, so "Used" here disagreed
-  // with the same cell's figure in "Disposal by Cell" by exactly that factor.
+  // fixture declares no unit anywhere, so by the one cell rule
+  // (utils/cellCapacity.js) its cells are in the facility's unit — tons by
+  // default — exactly as the admin and portal dashboards show them. This used to
+  // read an undeclared cell as m³ and halve it (500 / 125) while every screen
+  // showed 1,000 / 250 for the same cell.
   assert.deepEqual(r.cells[0], {
     name: "Cell 4", status: "Active Cell", type: "Residual", unit: "tons",
-    capacity: 500, fill: 125, remaining: 375, utilization: 25,
+    capacity: 1000, fill: 250, remaining: 750, utilization: 25,
   });
+  // An m³-declared cell is still converted into the report's tons.
+  const inM3 = buildPortalReport([], {
+    facility: {
+      numberOfCell: 1, cellNames: ["C1"], cellStatuses: ["Active Cell"],
+      cellCapacities: [1000], cellFillValues: [250], cellCapacityUnits: ["m³"], cellFillUnits: ["m³"],
+      volumeCapacityUnit: "tons",
+    },
+  });
+  assert.deepEqual(
+    { capacity: inM3.cells[0].capacity, fill: inM3.cells[0].fill, utilization: inM3.cells[0].utilization },
+    { capacity: 500, fill: 125, utilization: 25 },
+  );
   // The ratio is unit-invariant: both sides converted, so the percentage the
   // operator reads is unchanged by the normalisation.
   assert.equal(r.cells[0].utilization, 25, "utilisation is unaffected by the unit");

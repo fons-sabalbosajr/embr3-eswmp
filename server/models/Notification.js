@@ -28,6 +28,7 @@ const notificationSchema = new mongoose.Schema(
         "submission_revert_followup", // admin sent revert follow-up template
         "submission_temp_deleted", // overdue reverted data moved to deleted submissions
         "scheduled_submission_failed", // a scheduled submission exhausted its retries
+        "data_verified_by_emb", // EMB verified/corrected a client in the portal user's baseline
       ],
       required: true,
     },

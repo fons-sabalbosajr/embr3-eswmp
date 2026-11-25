@@ -61,6 +61,7 @@ import {
   isHazardousCellType,
   normalizeCellStatus,
   normalizeUnit,
+  resolveCellUnit,
 } from "./helpers.jsx";
 import ResponsiveTable from "../shared/ResponsiveTable";
 import { formatCompact as formatCompactShared } from "../../../utils/formatNumber";
@@ -763,7 +764,7 @@ function SlfDashboardTab({ dashboard, isDark, loading = false, error = null, pro
                         {c.name}{" "}
                         <Tag
                           color={
-                            isHazardousCellType(c.type) ? "volcano" : "blue"
+                            isHazardousCellType(c.type) ? "red" : "blue"
                           }
                           style={{ fontSize: 9, marginLeft: 2 }}
                         >
@@ -1204,11 +1205,9 @@ export const buildFacilityCellUsage = (record, baseline, submissions = []) => {
       type,
       isHazardous: isHazardousCellType(type),
       capacity: Number(record?.cellCapacities?.[index] || 0),
-      capacityUnit: normalizeUnit(
-        record?.cellCapacityUnits?.[index] ||
-          record?.volumeCapacityUnit ||
-          "m³",
-      ),
+      // THE cell rule's capacity unit (utils/cellCapacity.js) — this fell back to
+      // m³ where every other view falls back to the facility's declared unit.
+      capacityUnit: resolveCellUnit(record, index, "capacity"),
       unit: targetUnit,
       baseline: 0,
       submissions: 0,

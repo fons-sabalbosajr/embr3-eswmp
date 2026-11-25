@@ -827,8 +827,13 @@ async function preBaselineExclusionEnabled() {
  *       baseline entries are placed in their cells; baseline rows bind by their
  *       stored cellIndex; the unit is the facility's DECLARED unit, not the first
  *       truck's.
+ *   7 — the persisted figures count the SAME submissions as the admin rollups:
+ *       every year (the year-visibility filter dropped hidden years from the
+ *       stored figures only, so with "hide historical records" on the portal and
+ *       the capacity gate read emptier cells than the admin), and a test facility
+ *       counts its own test submissions.
  */
-const OCCUPANCY_CALC_VERSION = 6;
+const OCCUPANCY_CALC_VERSION = 7;
 
 module.exports = {
   computeCellOccupancy,

@@ -147,7 +147,18 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
         // Every volume carries the unit it was RECORDED in — never a page-level
         // default silently applied to a value stored in the other unit.
         unit: displayUnit(source?.actualVolumeUnit || truck?.actualVolumeUnit) || recordUnit,
+        // The volume AS WEIGHED when it was entered in the other unit (e.g. 12.5
+        // tons at an m³ SLF); `volume` is the converted figure. null otherwise.
+        enteredVolume: source?.enteredVolumeUnit && source?.enteredVolume != null ? Number(source.enteredVolume) : null,
+        enteredUnit: source?.enteredVolumeUnit ? displayUnit(source.enteredVolumeUnit) : "",
         cell: resolveCellLabel(source, truck),
+        // Which admin cell the load went to (index into the facility's cell
+        // arrays), so a view can show THAT cell's capacity. null when unplaced.
+        cellIndex: Number.isInteger(source?.cellIndex)
+          ? source.cellIndex
+          : Number.isInteger(truck?.cellIndex)
+            ? truck.cellIndex
+            : null,
         slfName: slfName || record.slfName || "",
         status: record.status || "pending",
         hazWasteCodes: codes.filter(Boolean),

@@ -218,6 +218,7 @@ import {
   fileNameFromUrl,
   getServedClientCount,
 } from "./slf-monitoring/helpers.jsx";
+import { cellCapacityRow, cellPercent } from "../../utils/cellCapacity";
 
 const EMPTY_ROWS = [];
 
@@ -935,12 +936,8 @@ export default function SLFMonitoring({
     const facility = detailViewRecord;
     if (!facility || !detailModal) return null;
     const subs = facilitySubmissions; // shared — no second full-array filter pass
-    const unit = normalizeUnit(
-      facility.wasteReceivedUnit ||
-        facility.volumeCapacityUnit ||
-        facility.baselineUnit ||
-        "m³",
-    );
+    // The facility's declared unit by the one rule the portal uses too.
+    const unit = resolveFacilityUnit(facility);
     let totalTrucks = 0;
     let totalVolume = 0;
     let residual = 0;
@@ -1014,16 +1011,11 @@ export default function SLFMonitoring({
     });
 
     const cellData = Array.from({ length: cellCount }, (_, i) => {
-      const capacity = convertVolume(
-        facility.cellCapacities?.[i] || 0,
-        facility.cellCapacityUnits?.[i] || unit,
-        unit,
-      );
-      const base = convertVolume(
-        facility.cellFillValues?.[i] || 0,
-        facility.cellFillUnits?.[i] || unit,
-        unit,
-      );
+      // THE cell rule (utils/cellCapacity.js), in the facility unit — the same
+      // capacity / Waste in Cell / % the portal shows for this cell.
+      const cellRow = cellCapacityRow(facility, i, { unit });
+      const capacity = cellRow.capacity;
+      const base = cellRow.used;
       // `cellFillValues[i]` is ALREADY the complete Waste in Cell — baseline plus
       // valid submissions, each counted exactly once. enrichFacilityWithBaseline
       // fills it from the server rollup (computeCellOccupancy, which also writes
@@ -1039,19 +1031,19 @@ export default function SLFMonitoring({
       // It is kept only as the fallback for a facility that has no fill figure at
       // all (no rollup entry and nothing stored), which is the one case where the
       // submissions this page already loaded are the best available answer.
-      const storedFill = facility.cellFillValues?.[i];
-      const hasStoredFill =
-        storedFill !== null && storedFill !== undefined && storedFill !== "";
-      const used = Math.round(hasStoredFill ? base : cellUsed[i]);
+      // Two decimals, not whole numbers: rounding here made this tab disagree
+      // with the portal's figures for the same cell.
+      const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+      const used = round2(cellRow.hasFill ? base : cellUsed[i]);
       return {
         // Read the CURRENT name from the facility's cell infrastructure, so a
         // renamed cell updates here instead of showing a stale "Cell N".
         name: resolveCellName(facility, i),
-        capacity: Math.round(capacity),
+        capacity: round2(capacity),
         used,
         type: facility.cellTypes?.[i] || "Residual",
         status: facility.cellStatuses?.[i] || "Active Cell",
-        pct: capacity > 0 ? Math.min(100, (used / capacity) * 100) : null,
+        pct: cellPercent(used, capacity),
       };
     });
 
@@ -2833,8 +2825,10 @@ export default function SLFMonitoring({
           const status = record.cellStatuses?.[index] || "Active Cell";
           if (isNonExistentCell(status)) continue;
           const type = record.cellTypes?.[index] || "Residual";
-          const capacity = Number(record.cellCapacities?.[index] || 0);
-          const fill = Number(record.cellFillValues?.[index] || 0);
+          // Fill converted into the capacity's unit (utils/cellCapacity.js); the
+          // raw pair was compared as-is, so a tons fill against an m³ capacity
+          // put a cell in the wrong band.
+          const { capacity, used: fill } = cellCapacityRow(record, index);
           summary.total += 1;
           if (isHazardousCellType(type)) summary.hazardous += 1;
           else summary.residual += 1;

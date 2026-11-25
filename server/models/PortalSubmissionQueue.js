@@ -43,6 +43,10 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
 
     scheduledAt: { type: Date },
     submittedAt: { type: Date },
+    // When the portal last saved this draft ON ITS OWN (Data Entry autosave).
+    // Cleared by a manual Save as Draft, so it is set only while the latest
+    // save was an autosave — Drafts & Scheduled shows it as "Autosaved".
+    autosavedAt: { type: Date },
     // submissionId of the DataSLF batch created on successful submission.
     resultSubmissionId: { type: String, trim: true },
 

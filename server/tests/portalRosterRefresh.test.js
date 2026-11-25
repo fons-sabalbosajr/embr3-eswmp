@@ -22,6 +22,7 @@
  * Run: npm test  (from server/)
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -29,10 +30,7 @@ const fs = require("node:fs");
 const keys = require("../utils/cacheKeys");
 const socketEmitSource = fs.readFileSync(path.join(__dirname, "..", "utils", "socketEmit.js"), "utf8");
 const dataSlf = fs.readFileSync(path.join(__dirname, "..", "routes", "dataSLF.js"), "utf8");
-const portalIndex = fs.readFileSync(
-  path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-  "utf8",
-);
+const portalIndex = portalJsxSource();
 
 // staleKeysFor is module-private; exercise it through the public emitters with a
 // stubbed cache so the REAL table is what gets tested, not a copy of it.

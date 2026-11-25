@@ -4,7 +4,8 @@ import GaugeMeter from "../../../../components/GaugeMeter";
 import CellGaugeLegend, { cellFullnessStatus } from "../../slf-monitoring/CellGaugeLegend";
 import HaulerClientsTab from "../../slf-monitoring/HaulerClientsTab";
 import SlfDashboardTab, { getStatusTag } from "../../slf-monitoring/SlfDashboardTab";
-import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, getServedClientCount, isActiveCellStatus, isCompletedCellStatus, isHazardousCellType, normalizeCellStatus, normalizeStoredFileUrl, normalizeUnit, resolveMediaOpenUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
+import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, getServedClientCount, isActiveCellStatus, isCompletedCellStatus, isHazardousCellType, normalizeCellStatus, normalizeStoredFileUrl, normalizeUnit, resolveFacilityUnit, resolveMediaOpenUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
+import { cellCapacityRow } from "../../../../utils/cellCapacity";
 import { AlertOutlined, AppstoreOutlined, BankOutlined, BarChartOutlined, BellOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, LinkOutlined, PlayCircleOutlined, SafetyCertificateOutlined, TeamOutlined, UnorderedListOutlined, WarningOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Col, Collapse, Descriptions, Divider, Empty, Image, List, Modal, Progress, Row, Segmented, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs from "dayjs";
@@ -296,11 +297,8 @@ export default function SlfDetailModal({
                       detailViewRecord.wasteReceivedUnit || "m³",
                     );
                     const estVolume = 0;
-                    const capacityUnit = normalizeUnit(
-                      detailViewRecord.volumeCapacityUnit ||
-                        detailViewRecord.cellCapacityUnits?.find(Boolean) ||
-                        "m³",
-                    );
+                    // The facility's declared unit — the one rule the portal uses.
+                    const capacityUnit = resolveFacilityUnit(detailViewRecord);
                     // A blank facility Volume Capacity (General Tinio) falls back
                     // to the sum of its cells' capacities, each converted into
                     // the facility unit, instead of reading as no capacity at all.
@@ -311,11 +309,7 @@ export default function SlfDetailModal({
                           sum +
                           (isNonExistentCell(detailViewRecord.cellStatuses?.[i])
                             ? 0
-                            : convertVolume(
-                                Number(cap || 0),
-                                detailViewRecord.cellCapacityUnits?.[i] || capacityUnit,
-                                capacityUnit,
-                              ) || 0),
+                            : cellCapacityRow(detailViewRecord, i, { unit: capacityUnit }).capacity),
                         0,
                       );
                     const wasteReceivedInCapacityUnit = convertVolume(
@@ -479,8 +473,6 @@ export default function SlfDetailModal({
                               detailViewRecord.cellStatuses || [];
                             const cellTypesArr =
                               detailViewRecord.cellTypes || [];
-                            const cellCapacityUnits =
-                              detailViewRecord.cellCapacityUnits || [];
                             const hasAnyBaselineData = Boolean(baselineData);
                             const hasCellUsageRows = (
                               detailViewRecord._cellUsageRows || []
@@ -542,12 +534,6 @@ export default function SlfDetailModal({
                                       style={{ borderRadius: 10 }}
                                     >
                                       {(() => {
-                                        const fillValues =
-                                          detailViewRecord.cellFillValues ||
-                                          [];
-                                        const fillUnits =
-                                          detailViewRecord.cellFillUnits ||
-                                          [];
                                         const alertCells = (
                                           cellCaps.length > 0
                                             ? cellCaps
@@ -566,31 +552,14 @@ export default function SlfDetailModal({
                                               Number(cap || 0) <= 0
                                             )
                                               return null;
-                                            const capUnit = normalizeUnit(
-                                              cellCapacityUnits[index] ||
-                                                detailViewRecord.volumeCapacityUnit ||
-                                                "m³",
-                                            );
-                                            const used = convertVolume(
-                                              fillValues[index] || 0,
-                                              fillUnits[index] ||
-                                                detailViewRecord.wasteReceivedUnit ||
-                                                capUnit,
-                                              capUnit,
-                                            );
-                                            const pct = Math.min(
-                                              Math.round(
-                                                (used / Number(cap || 0)) *
-                                                  100,
-                                              ),
-                                              100,
-                                            );
+                                            // THE cell rule (utils/cellCapacity.js).
+                                            const cellRow = cellCapacityRow(detailViewRecord, index);
                                             return {
                                               index,
-                                              pct,
-                                              used,
-                                              capacity: Number(cap || 0),
-                                              unit: capUnit,
+                                              pct: cellRow.pct ?? 0,
+                                              used: cellRow.used,
+                                              capacity: cellRow.capacity,
+                                              unit: cellRow.unit,
                                               status,
                                             };
                                           })
@@ -701,37 +670,14 @@ export default function SlfDetailModal({
                                           const fillValues =
                                             detailViewRecord.cellFillValues ||
                                             [];
-                                          const capUnit = normalizeUnit(
-                                            cellCapacityUnits[i] ||
-                                              detailViewRecord.volumeCapacityUnit ||
-                                              "m³",
-                                          );
-                                          const usedInCell = Number(
-                                            fillValues[i] || 0,
-                                          );
-                                          const cellFillUnit = normalizeUnit(
-                                            detailViewRecord.cellFillUnits?.[
-                                              i
-                                            ] ||
-                                              detailViewRecord.wasteReceivedUnit ||
-                                              capUnit,
-                                          );
-                                          const usedForCapacity =
-                                            convertVolume(
-                                              usedInCell,
-                                              cellFillUnit,
-                                              capUnit,
-                                            );
-                                          const cellFill =
-                                            cap > 0
-                                              ? Math.min(
-                                                  Math.round(
-                                                    (usedForCapacity / cap) *
-                                                      100,
-                                                  ),
-                                                  100,
-                                                )
-                                              : 0;
+                                          // THE cell rule (utils/cellCapacity.js): the same
+                                          // capacity, fill and % the portal shows.
+                                          const cellRow = cellCapacityRow(detailViewRecord, i);
+                                          const capUnit = cellRow.capacityUnit;
+                                          const cellFillUnit = cellRow.fillUnit;
+                                          const usedInCell = Number(fillValues[i] || 0);
+                                          const usedForCapacity = cellRow.used;
+                                          const cellFill = cellRow.pct ?? 0;
                                           const cellSt = normalizeCellStatus(
                                             cellStatuses[i],
                                           );
@@ -742,13 +688,7 @@ export default function SlfDetailModal({
                                           const isHaz =
                                             cellTy === "Treated Haz Waste";
                                           // Remaining capacity in the cell's own unit.
-                                          const remaining =
-                                            cap > 0
-                                              ? Math.max(
-                                                  0,
-                                                  cap - usedForCapacity,
-                                                )
-                                              : null;
+                                          const remaining = cellRow.remaining;
                                           // Reusable capacity colour: each cell keeps its
                                           // TYPE colour below the warning band, then escalates
                                           // to warning/alarming/critical as it fills. Missing /

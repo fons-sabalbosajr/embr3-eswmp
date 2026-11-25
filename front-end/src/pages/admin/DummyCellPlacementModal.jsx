@@ -15,11 +15,10 @@ import {
 } from "antd";
 import { DatabaseOutlined } from "@ant-design/icons";
 import { convertVolume } from "../../utils/volumeUnits";
+import { cellCapacityRow, cellPercent } from "../../utils/cellCapacity";
 import { fetchAllSubmissions } from "./shared/submissionRecords";
 
 const { Text } = Typography;
-// Display-only unit label. Conversion comes from utils/volumeUnits.js.
-const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 const isActiveCellStatus = (status) =>
   /active|operational|open/i.test(String(status || "Active Cell"));
 const statusColor = (pct) => {
@@ -85,15 +84,12 @@ export default function DummyCellPlacementModal({ open, facility, onClose }) {
       1,
     );
     const rows = Array.from({ length: count }, (_, i) => {
-      const unit = normalizeUnit(
-        facility.cellCapacityUnits?.[i] || facility.cellFillUnits?.[i] || "m³",
-      );
-      const capacity = Number(facility.cellCapacities?.[i] || 0);
-      const baseFill = convertVolume(
-        facility.cellFillValues?.[i] || 0,
-        facility.cellFillUnits?.[i] || unit,
-        unit,
-      );
+      // THE cell rule (utils/cellCapacity.js) for the cell's unit, capacity and
+      // stored Waste in Cell; the test loads below are added on top.
+      const cellRow = cellCapacityRow(facility, i);
+      const unit = cellRow.capacityUnit;
+      const capacity = cellRow.capacity;
+      const baseFill = cellRow.used;
       return {
         index: i,
         label: `Cell ${i + 1}`,
@@ -136,7 +132,7 @@ export default function DummyCellPlacementModal({ open, facility, onClose }) {
     });
     return rows.map((row) => ({
       ...row,
-      pct: row.capacity > 0 ? Math.min(100, Math.round((row.used / row.capacity) * 100)) : null,
+      pct: cellPercent(row.used, row.capacity),
       remaining: row.capacity > 0 ? Math.max(0, row.capacity - row.used) : null,
       isFull: row.capacity > 0 && row.used >= row.capacity,
     }));

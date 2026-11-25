@@ -25,6 +25,7 @@
  */
 
 const { isDemoRequest, MASK } = require("./demoMode");
+const { cellCapacityRow } = require("./cellCapacity");
 
 /** Topics this provider can ground. Deliberately narrow — a miss just means
  *  VERA answers from the knowledge base, which is the old behaviour. */
@@ -210,6 +211,8 @@ async function getPortalFacts(portalUser) {
     SlfFacility.findById(slfIds[0])
       .select(
         "lgu province barangay statusOfSLF numberOfCell cellNames cellStatuses cellCapacities cellFillValues cellTypes cellCapacityUnits " +
+          // The unit fields the cell rule resolves through (utils/cellCapacity.js).
+          "cellFillUnits volumeCapacityUnit wasteReceivedUnit receivingVolumeCapacityUnit estimatedVolumeWasteUnit baselineUnit " +
           "permitToOperate permitToOperateValidity permitToOperateStatus dischargePermit dischargePermitValidity dischargePermitStatus eccNo hazwasteGenerationId",
       )
       .lean(),
@@ -263,17 +266,19 @@ async function getPortalFacts(portalUser) {
   for (let i = 0; i < cellCount; i += 1) {
     const status = facility.cellStatuses?.[i] || "Active Cell";
     if (/not\s*exist/i.test(status)) continue;
-    const capacity = num(facility.cellCapacities?.[i]);
-    const fill = num(facility.cellFillValues?.[i]);
-    const pct = capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null;
+    // The ONE cell rule (utils/cellCapacity.js): the fill is converted into the
+    // capacity's unit before the % is taken. It used to divide the two raw
+    // numbers, so VERA quoted a % out by the m³/tons factor whenever the fill and
+    // the capacity were stored in different units.
+    const row = cellCapacityRow(facility, i);
     cells.push({
       name: facility.cellNames?.[i] || `Cell ${i + 1}`,
       status,
       type: facility.cellTypes?.[i] || "Residual",
-      unit: facility.cellCapacityUnits?.[i] || "m³",
-      capacity,
-      fill,
-      pct,
+      unit: row.unit,
+      capacity: row.capacity,
+      fill: Math.round(row.used * 1000) / 1000,
+      pct: row.pct,
     });
   }
 

@@ -67,6 +67,7 @@ export default function SectionMovButton({ title, attachments, onChange, editabl
       <Badge count={list.length} size="small" offset={[-4, 2]} color="#1a3353">
         <Button
           size="small"
+          type="primary"
           icon={editable ? <UploadOutlined /> : <PaperClipOutlined />}
           onClick={(e) => {
             e.stopPropagation();

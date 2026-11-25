@@ -13,6 +13,7 @@
  * Run: npm test  (from server/)
  */
 const test = require("node:test");
+const { portalJsxSource } = require("./helpers/portalSource");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -251,10 +252,7 @@ test("a suggestion is attached only where a capacity is actually missing", () =>
 });
 
 test("the organizer pre-fills it, marks it, and still saves nothing on its own", () => {
-  const ui = fs.readFileSync(
-    path.join(__dirname, "..", "..", "front-end", "src", "pages", "SLFPortal", "index.jsx"),
-    "utf8",
-  );
+  const ui = portalJsxSource();
   // Seeded only when the row needs a capacity and does not already have one.
   assert.match(ui, /p\.needsCapacity && !\(Number\(p\.capacity\) > 0\) && Number\(p\.suggestedCapacity\) > 0/);
   assert.match(ui, /capacityPrefilled: true/);

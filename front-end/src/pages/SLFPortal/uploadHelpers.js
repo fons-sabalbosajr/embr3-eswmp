@@ -112,7 +112,8 @@ export const DISPOSAL_UPLOAD_COLUMNS = [
     required: true,
     format: "YYYY-MM-DD, MM/DD/YYYY, or an Excel date value",
     sample: "2026-07-24",
-    description: "Date of the disposal trip. All rows in one import must use one disposal date.",
+    description:
+      "Date of the disposal trip. One file may cover up to one month of missed days (no future dates); each date is submitted as its own submission.",
     matches: isDisposalDateHeader,
   },
   {
@@ -157,7 +158,8 @@ export const DISPOSAL_UPLOAD_COLUMNS = [
     required: true,
     format: "tons, m3, or m³",
     sample: "tons",
-    description: "Must match the selected SLF's declared baseline unit.",
+    description:
+      "Use the unit the load was weighed or measured in. A value in the other unit (e.g. tons at an m³ SLF) is converted to the SLF's declared unit (1 m³ = 0.5 tons) and the original is kept.",
     matches: isUnitOfMeasurementHeader,
   },
   {
@@ -767,17 +769,22 @@ const normalizeComparableTextUncached = (value) =>
     .replace(/[\u2018\u2019\u02BC]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2010-\u2015]/g, "-")
-    // Separators are punctuation style, not identity: comma, semicolon and dash
-    // all fold to a single space, so "Kitang I" / "Kitang-I" / "Kitang, I" and
-    // "Zambales - Iba" / "Zambales Iba" each compare equal. Word content and word
-    // ORDER still decide identity, so distinct clients remain distinct.
-    .replace(/[,;-]+/g, " ")
+    // Separators are punctuation style, not identity: period, comma, semicolon
+    // and dash all fold to a single space, so "Kitang I" / "Kitang-I" /
+    // "Kitang, I", "Zambales - Iba" / "Zambales Iba" and "Brgy.Poblacion" /
+    // "Brgy. Poblacion" each compare equal. Word content and word ORDER still
+    // decide identity, so distinct clients remain distinct.
+    .replace(/[.,;-]+/g, " ")
     .replace(/\s*\/\s*/g, "/")
     .replace(/\s+/g, " ")
-    // A trailing period ("… Inc.") is formatting too.
-    .replace(/[.\s]+$/g, "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    // Dotted initials: "j p rizal" (from "J.P. Rizal") = "jp rizal". Letters
+    // only — "1.2" stays "1 2", so numbers keep their meaning.
+    //
+    // MUST stay identical to server/utils/nameMatch.js#comparableText — both are
+    // pinned by the same table of cases (__tests__/nameMatch.test.js).
+    .replace(/\b([a-z]) (?=[a-z]\b)/g, "$1");
 
 // Memoised because findUploadClientForHauler re-normalises a hauler's ENTIRE
 // client pool on every uploaded row: a 5,000-row file against a large fleet

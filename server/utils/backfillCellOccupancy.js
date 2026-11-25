@@ -68,7 +68,7 @@ async function backfillCellOccupancy() {
     numberOfCell: { $gt: 0 },
   })
     .select(
-      "_id numberOfCell cellNames cellStatuses cellTypes cellCapacities " +
+      "_id isDummy numberOfCell cellNames cellStatuses cellTypes cellCapacities " +
       "cellCapacityUnits wasteReceivedUnit volumeCapacityUnit " +
       // The override fields are READ so an admin-declared Waste in Cell survives
       // the sweep — base, unit and declaration date included, since the date is
@@ -95,13 +95,15 @@ async function backfillCellOccupancy() {
 
     // One query per batch rather than per facility.
     // eslint-disable-next-line no-await-in-loop -- deliberate batching
+    // Same scope as refreshFacilityCellOccupancy (and the admin rollups): every
+    // year, and test data only for a test facility — filtered per facility below.
     const entries = await DataSLF.find({
       slfGenerator: { $in: ids },
       deletedAt: null,
-      isDummy: { $ne: true },
     })
+      .setOptions({ includeHiddenYears: true })
       // `dateOfDisposal` is what the pre-baseline rule compares against.
-      .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
+      .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal isDummy`)
       .sort({ createdAt: -1 })
       .lean();
 
@@ -114,7 +116,9 @@ async function backfillCellOccupancy() {
 
     const operations = [];
     batch.forEach((facility) => {
-      const own = entriesByFacility.get(String(facility._id)) || [];
+      const own = (entriesByFacility.get(String(facility._id)) || []).filter(
+        (entry) => facility.isDummy || entry.isDummy !== true,
+      );
       // EXACTLY what refreshFacilityCellOccupancy does on the live write path —
       // the same filter and the same unit anchor. A repair that computed the
       // figures differently from the code that maintains them would simply

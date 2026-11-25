@@ -43,6 +43,12 @@ const vehicleSchema = new mongoose.Schema(
     // Per-vehicle waste placement (volume goes to a specific open cell)
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+    // The volume AS WEIGHED when it was entered in another unit than the SLF's
+    // (e.g. 12.5 tons at an m³ facility). `actualVolume` holds the converted
+    // value (25 m³); these keep the original for EMB to check. See
+    // utils/enteredVolume.js — the server recomputes the conversion on save.
+    enteredVolume: { type: Number },
+    enteredVolumeUnit: { type: String, enum: ["tons", "m³", "m3"] },
     wasteType: { type: String, trim: true },
     hazWasteCode: [{ type: String, trim: true }],
     cellIndex: { type: Number },
@@ -62,6 +68,9 @@ const truckSchema = new mongoose.Schema(
     vehicles: [vehicleSchema],
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
+    // Original weighed value when entered in another unit (see vehicleSchema).
+    enteredVolume: { type: Number },
+    enteredVolumeUnit: { type: String, enum: ["tons", "m³", "m3"] },
     wasteType: { type: String, enum: ["Residual", "Hazardous Waste", "Treated Hazardous Waste"] },
     cellIndex: { type: Number },
     cellName: { type: String, trim: true },
@@ -206,6 +215,9 @@ const dataSLFSchema = new mongoose.Schema(
       cellName: { type: String, trim: true },
       cellType: { type: String, trim: true },
       cellIndex: { type: Number },
+      // The operator's own name for this cell (optional). The entry is still
+      // bound to the admin-declared cell by cellIndex / cellName.
+      cellLabel: { type: String, trim: true },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
@@ -217,6 +229,9 @@ const dataSLFSchema = new mongoose.Schema(
       cellName: { type: String, trim: true },
       cellType: { type: String, trim: true },
       cellIndex: { type: Number },
+      // The operator's own name for this cell (optional). The entry is still
+      // bound to the admin-declared cell by cellIndex / cellName.
+      cellLabel: { type: String, trim: true },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },

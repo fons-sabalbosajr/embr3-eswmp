@@ -1119,7 +1119,7 @@ router.post("/my-submissions/batch", async (req, res) => {
           "trucks.actualVolumeUnit trucks.truckCapacity trucks.truckCapacityUnit " +
           "trucks.cellIndex trucks.cellName trucks.cellType " +
           "trucks.vehicles.plateNumber trucks.vehicles.wasteType trucks.vehicles.actualVolume " +
-          "trucks.vehicles.actualVolumeUnit trucks.vehicles.capacity trucks.vehicles.capacityUnit " +
+          "trucks.vehicles.actualVolumeUnit trucks.vehicles.enteredVolume trucks.vehicles.enteredVolumeUnit trucks.vehicles.capacity trucks.vehicles.capacityUnit " +
           "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType",
       );
     } else {
